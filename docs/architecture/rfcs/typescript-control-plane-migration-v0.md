@@ -16,6 +16,22 @@
 
 ## Current implementation checkpoint
 
+The projection-delivery stage now closes the cross-language boundary: typed
+TypeScript mutation results and the Python compatibility provider share the
+same four-state contract (`pending`, `delivered`, `current`, `not_required`).
+Provider readback is validated before acknowledgement decisions, and the
+end-to-end causal chain is covered by a shared composition fixture. This is a
+completed delivery stage, not a promotion of Markdown or a claim that the
+remaining lifecycle writers have migrated.
+
+The same stage also removes duplicated Python read policy around that boundary.
+Task-class resolution, title-aware actionability, dependency readiness, agent
+eligibility, priority ordering, and canonical Todo read records now have one
+Python semantic owner while TypeScript remains the transaction owner. The old
+projection module is an import-only compatibility facade. This keeps the
+replacement-first rule intact: compatibility remains available, but it cannot
+silently become a second semantic implementation.
+
 Native update now composes `todos/public_update.ts` for a bounded nonterminal
 planning intent (status, evidence/reason, resume/clear and successor links),
 against the same complete canonical head used for authority checks and CAS.
@@ -403,6 +419,13 @@ the shared plan, not another per-agent checklist database.
 
 **T1 — close the public Todo update transaction.**
 
+The current ownership slice closes promoted claim transfer, claim clearing and
+executor-exclusion edits through this typed update planner. Normalization is
+part of request identity, so replay cannot restore a superseded claim. A
+lease-bearing ownership change remains a lifecycle operation, not metadata
+authority; the legacy writer remains for unpromoted Goals. This is a bounded T1
+closure, not completion of all Todo fields or Goal promotion.
+
 Bounded prerequisite: `todos/public_update.ts` now composes authoring scope,
 external-wait topology and Monitor/field planning over one locked source.
 The public Python writer no longer sequences their leaf RPCs or derives the
@@ -508,6 +531,31 @@ delivery. This does not finish all T2 commands or authorize whole-Goal promotion
 
 **T3 — close remaining structured consumers, then remove their old reads.**
 
+Task-graph topology now shares `work_items/planning_relations.ts` with inventory
+and horizon. One pure TS request owns relationship discovery, deterministic
+bounded traversal, edge deduplication and missing/truncated completeness; the
+Python predecessor indexes, condition parser and traversal are retired. Python
+retains status source adaptation and public-safe node/evidence/handoff rendering.
+This intentionally distinguishes successor lineage from completion dependencies,
+corrects unblocks direction, includes Monitor generation conditions and preserves
+parallel/diamond edges at the node cap. See the [graph contract](../../reference/protocols/task-graph-projection-v0.md#typed-todo-topology).
+It does not change lifecycle admission, claim/lease semantics or default provider.
+The status source can still be incomplete: this closes one T3 interpretation
+boundary, not all graph source delivery or the remaining T1–T4 work.
+
+Lease inspection now consumes one canonical Todo/lease/handoff-mode revision
+after promotion; an absent canonical lease does not revive a local lease file,
+and provider failure cannot fall back to Markdown. The read reports its provider
+revision without repairing display or changing the lease. Unpromoted inspection
+retains its legacy source contract. The shared `task_lease_eligibility.ts` owner
+also replaces the Python authority-core and three TS owner-eligibility copies
+used by acquire, lifecycle and terminal fencing. Current-lease effectiveness is
+derived inside acquire from the supplied owner/claim/exclusion/registration facts,
+not from the old caller-provided `effective` hint. Other-Todo overlap facts still
+come from the existing complete execution snapshot; release retains its separate
+key/version cleanup fence. This closes one T3 reader and shared rule boundary,
+not the remaining Goal-channel lease display, T1/T2 transactions or promotion.
+
 Capability resolution now shares `agents/capability_gate.ts`: missing prerequisites,
 repair outputs, owner/agent resolution and blocked-Todo bindings have one typed
 owner. Quota planning v1 passes normalized requirements, not Python-computed
@@ -587,6 +635,18 @@ Python retains lane source adaptation and compact presentation; no new provider
 read or resume evaluation is added. Remaining T3 work includes consumers that
 reconstruct diagnostics from compact summaries; do not call those migrated.
 This does not close T1/T2, all T3 consumers, or any durability/promotion hold.
+
+Runtime capability re-entry now uses that same TS owner for verification-target selection,
+owner-authority exclusion, advisory versus bound Turn handling, and the recovery contract
+without durable grants. Python removes the former target lookup/filter rules and only adapts
+host/scheduler facts, calls one typed reducer, and renders shell argv. One interaction packet
+reuses the result; a healthy path adds no runtime call. The intentional correction is that an
+eligible fallback recommendation cannot hide a blocked task's real capability check before
+explicit selection. Success re-enters the same Turn; failure still allows explicit fallback
+selection. A committed receipt's Todo remains bound. This is a host-local read plan under
+section 3 of the shared-authority RFC, not a capability lease, shared grant, or provider write.
+CLI/managed Turn reuse the existing re-entry fields; the generated `/loopx` skill requires
+checking missing declarations. No frontend configuration or second UI state is introduced.
 
 Advancement-frontier checkpoint closure: `todos/frontier_revision.ts` now owns
 agent selection, completeness, material hashing, long-chain thresholds and exact

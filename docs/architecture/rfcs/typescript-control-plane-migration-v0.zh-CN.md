@@ -15,6 +15,18 @@
 
 ## 当前实现检查点
 
+投影交付阶段现已闭合跨语言边界：typed TypeScript mutation 结果与 Python
+兼容 provider 共用四态契约（`pending`、`delivered`、`current`、`not_required`）。
+Provider readback 在 acknowledgement 决策前进行校验，端到端因果链由共享组合
+fixture 覆盖。这是一个已完成的交付阶段，不代表 Markdown 晋升，也不声称其余
+lifecycle writer 已全部迁移。
+
+同一阶段也删除了该边界周围重复的 Python read policy。task-class 解析、识别 title
+的 actionable 判断、依赖就绪、Agent eligibility、priority 排序和 canonical Todo
+read record 现在只有一个 Python 语义 owner，而 TypeScript 仍是事务 owner。旧
+projection 模块只保留 import-only 兼容 facade。这样继续遵守 replacement-first：
+兼容路径仍可用，但不能静默形成第二份语义实现。
+
 Native update 现通过 `todos/public_update.ts` 组合有界的非终态 planning intent
 （status、evidence/reason、resume/clear、successor links），使用权限检查与 CAS
 同一份完整 canonical head。独立 intent 命名空间不扩大原 text/note patch allowlist，
@@ -312,6 +324,12 @@ commit。#4121（SQLite 候选）和 #4101（投影 receipt 保留）是独立�
 
 **T1 — 闭合公开 Todo update 事务。**
 
+当前 ownership slice 已将 promoted 路径的 claim 转交、清除和执行排除编辑接入
+typed update planner。规范化参与请求身份，因此重放不能恢复已被后续操作取代的
+claim。带 lease 的 ownership 变化仍必须走 lifecycle，不是 metadata 授权；未
+promotion 的 Goal 继续使用旧 writer。这是有边界的 T1 闭合，不代表所有 Todo
+字段或 Goal promotion 已完成。
+
 已闭合的前置项：`todos/public_update.ts` 在同一锁内快照上组合 authoring scope、
 external-wait 拓扑和 Monitor/field 规划。公开 Python writer 不再逐个调用这些
 leaf RPC，也不推导 Monitor 等待基线。`update_source.py` 只输送完整、紧凑的
@@ -390,6 +408,25 @@ promotion 已完成。
 
 **T3 — 闭合剩余 structured consumer，删除各自旧读路径。**
 
+Task graph topology 与 inventory/horizon 共用 `work_items/planning_relations.ts`。
+一轮纯 TS 请求拥有关系发现、稳定有界遍历、边去重与缺失/截断完整度；删除
+Python 的前驱索引、条件拆解和遍历。Python 保留 status 来源适配及节点、
+evidence/handoff 的脱敏展示。明确的语义修正：successor 谱系不再冒充完成
+依赖，unblocks 方向修正，补 Monitor generation 条件，上限处保留平行关系
+和菱形汇合边。详见[图协议](../../reference/protocols/task-graph-projection-v0.md#typed-todo-topology)。
+不改变生命周期准入、claim/lease 或默认 provider。来源仍可能不完整：本批
+闭合一个 T3 解释边界，不宣称所有图来源交付或 T1–T4 已完成。
+
+Lease inspect 在 promotion 后从同一 canonical revision 读取 Todo、lease 与
+handoff mode；canonical 无租约不复活本地旧文件，provider 失败不回退 Markdown。
+结果携带 provider revision，读取不修复展示、不修改租约；未 promotion 的来源契约保留。
+`task_lease_eligibility.ts` 同时替代 Python authority core 和三处 TS owner 资格判断，
+供 acquire、lifecycle 与终态 fence 复用。当前租约是否有效由 acquire 内部根据同一输入
+的 owner/claim/exclusion/注册事实推导，不再由旧 `effective` 派生提示覆盖。
+其他 Todo 的 scope 冲突仍消费现有完整执行快照；release 保留独立的 key/version
+清理门禁。这是一个 T3 reader 与共享规则边界的闭合，不代表 Goal-channel lease
+展示、T1/T2 全部事务或 promotion 已完成。
+
 Quota 的 scope/claim 消费者现通过每个 source 一次 `todo.quota_planning.project`，
 组合选择、有限展示与既有 resume planner。`quota_selection.ts` 替代 Python
 claim-visibility 模块及 Agent-scope 中独立的 User gate/action 过滤器。Python
@@ -448,6 +485,16 @@ codec、候选来源／资格和共享 profile/rank 适配。明确修正：共�
 Todo，同一 Todo 的不同展示不重复计算，权威空 backlog 不再复活陈旧 first-item。
 target capability 是修复产出，不是安装或授权。没有新 provider／inventory／enablement／
 promotion；压缩候选来源的上限和其余 T3 consumer 仍需分别闭合。
+
+运行时能力重入现在复用同一个 TS owner：验证目标选择、owner 权限排除、推荐与已绑定
+Turn 的区分，以及无持久授权的恢复合同由 `agents/capability_gate.ts` 负责。Python 删除
+旧目标查找与过滤规则，仅适配 host/scheduler 参数、调用一次 typed reducer 并渲染 shell
+argv；同一 interaction packet 复用结果，健康路径不增加 runtime 调用。修正行为是：显式
+选择前，可执行的低优先级推荐不能隐藏受阻任务的真实能力验证；验证成功在原 Turn 重入，
+失败后仍可显式选择其他工作。已提交 receipt 的 Todo 不变。该观察属于 host-local read
+plan，遵循 shared-authority RFC 第 3 节边界；不增加 capability lease、共享 grant 或
+provider 写入。CLI/managed Turn 复用已有重入字段，生成的 `/loopx` skill 明确要求核对
+缺失声明；没有新增前端配置或第二份 UI 状态。
 
 Advancement-frontier checkpoint 闭合：`todos/frontier_revision.ts` 现统一 Agent
 选择、完整度、实质内容哈希、长链阈值与精确 ACK/rearm 分类。Python 保留 v0 字段清单
