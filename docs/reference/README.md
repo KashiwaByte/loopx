@@ -11,6 +11,8 @@ Current groups:
   registration, extension packaging, readiness, and lifecycle boundaries.
 - [Project skill delivery](../../loopx/capabilities/project_skill_delivery/README.md): release-owned,
   project-local skill discovery and managed-copy lifecycle.
+- [PostgreSQL authority service admission v0](postgresql-authority-service-v0.md): opt-in
+  authentication, tenant authorization, and restore-incarnation rotation.
 
 High-traffic read paths:
 
