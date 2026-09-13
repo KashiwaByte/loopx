@@ -184,6 +184,23 @@ def capability_configuration_editor(
                 _field("strict_receipt", "Require an exact-diff receipt", "boolean"),
             ],
         },
+        "pull_request_review": {
+            "supported_scopes": ["machine"],
+            "writable_scopes": ["machine"],
+            "fields": [
+                _field(
+                    "review_priority",
+                    "Review priority",
+                    "select",
+                    options=("other-developers-first", "owner-first"),
+                    required=True,
+                    description=(
+                        "Default ranks actionable PRs whose author differs from the "
+                        "authenticated reviewer before the reviewer's own PRs."
+                    ),
+                ),
+            ],
+        },
         "local_authority_shadow": {
             "supported_scopes": ["goal"],
             "writable_scopes": ["goal"],
@@ -196,12 +213,28 @@ def capability_configuration_editor(
         },
         "reward_memory": {
             "supported_scopes": ["goal"],
-            "writable_scopes": [],
-            "fields": [],
-            "read_only_reason": (
-                "This capability requires a reviewed ignored provider binding and an "
-                "explicit Agent allowlist. Configure it through the capability CLI."
-            ),
+            "writable_scopes": ["goal"],
+            "fields": [
+                _field(
+                    "config_path",
+                    "Local-private configuration path",
+                    "text",
+                    description=(
+                        "Repo-relative ignored JSON under .loopx/config/. The path "
+                        "is accepted only as write input and is never returned. Leave "
+                        "blank to retain an existing binding."
+                    ),
+                ),
+                _field(
+                    "enabled_agents",
+                    "Enabled Goal Agents",
+                    "string_list",
+                    description=(
+                        "One already registered Goal-local Agent id per line. Private "
+                        "bindings currently accept exactly one Agent."
+                    ),
+                ),
+            ],
         },
         "lark_event_inbox": {
             "supported_scopes": ["goal"],

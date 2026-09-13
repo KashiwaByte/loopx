@@ -3,7 +3,7 @@
 - Status: Draft, under maintainer review
 - Initially proposed by: NoKV Lab
 - Widened by: LoopX maintainers
-- Date: 2026-08-05; revised 2026-09-07
+- Date: 2026-08-05; revised 2026-09-13
 - Scope: one provider-neutral LoopX authority contract with built-in file,
   optional NoKV, and optional PostgreSQL provider profiles, complementing
   [`host-integration-surface-v0`](../../reference/protocols/host-integration-surface-v0.md)
@@ -42,6 +42,21 @@ generated. Markdown remains canonical in default local mode. In a later,
 explicit shared-authority promotion, only sections covered by the typed
 contract become deterministic compatibility projections; free-form human
 narrative remains outside the coordination head.
+
+### Manager integration checkpoint (2026-09-13)
+
+Source audit at `7eb4b7bb1661bd5eff63a8725a33169792d5964b` confirms the
+`AuthorityStore` seam and the transaction/presentation/journal consolidations
+in #4280, #4283 and #4287. This updates the integration baseline, not the
+qualification evidence or historical provider baselines above. Candidate
+SQLite/PostgreSQL paths, provider-specific holds and the D1–D3 plan remain;
+neither a default source switch nor a shared service is declared shipped.
+
+The [capable manager and semantic handoff RFC](capable-manager-semantic-handoff-v0.md)
+consumes this authority. Its M1 host-tool work and M2 request-ledger refactor
+can proceed without provider promotion. Section 1.4 defines their boundary;
+the [TS execution cards](typescript-control-plane-migration-v0.md#execution-cards-after-the-current-stack)
+still own business-rule consolidation and legacy-caller deletion.
 
 ## Document map and maintenance contract
 
@@ -302,6 +317,41 @@ policy. Stage 5 creates a decision point, not an automatic license transition.
 No source path becomes AGPL-3.0 merely because it implements a shared-authority
 contract or passes a remote-provider canary.
 
+### 1.4 Manager requests and semantic handoff integration
+
+The [manager/handoff RFC](capable-manager-semantic-handoff-v0.md) owns the
+user-facing exchange and general request/assessment/result relations. This
+RFC owns the reviewed coordination state and its commit proof. A semantic
+brief, conversation, delivery attempt or scheduler cursor does not enter the
+v0 coordination head. Relevant evidence is published by its artifact owner
+and referenced at an exact revision and disclosure scope. Sharing a physical
+provider does not merge these logical state families or their access/retention
+contracts.
+
+Each Goal retains one selected authority source. When adoption changes
+Todo/lease/Vision state, handoff invokes that existing owner and links its real
+receipt; consultation or assessment without a work effect does not. A separate request commit
+cannot make that work mutation atomic across stores: persist intent, recover
+the original work receipt, then reconcile the pending relation. Cross-Goal
+requests likewise preserve per-Goal bases and outcomes; they do not require
+a distributed commit or invent one Goal-wide provider revision for both.
+Transport acknowledgement never substitutes for a current claim or fence.
+
+Manager reads and receiver writes must preserve canonical empty/failure
+semantics after promotion, without old-Markdown or lease-file fallback.
+Permanent Markdown presentation remains. The handoff RFC's A15 fixture checks
+these integration boundaries against legacy and explicitly configured canonical
+sources; it does not repeat or replace this RFC's backend conformance, retention,
+recovery, soak or cutover qualification.
+
+The [shared Goal alignment/amendment RFC](shared-goal-alignment-and-governed-amendment-v0.md)
+owns intent-change legality and its future governed commit. Its current
+proposal admission creates no canonical amendment. Neither the manager nor
+the provider becomes that authority. M1–M3 manager work may run in parallel
+with T1–T3/D1/D2; changing storage/profile/source or retiring a whole legacy
+Goal writer still requires the applicable D3/T4 boundary. A new handoff is
+not a provider promotion request.
+
 ## 2. What We Will Do, and What We Will Not
 
 **What this version will do**
@@ -534,12 +584,21 @@ but optimizing it must retain identity consumption, replay and conflict checks.
 
 Current local facades reuse their generated id within managed-runtime retries.
 Separate CLI invocations are not implicitly one attempt: claim exposes
-`--claim-operation-id`, while create and text/note update do not currently expose
-an equivalent cross-process recovery key. That is a caller-recovery limitation,
+`--claim-operation-id` and update exposes `--update-operation-id`; create does not
+currently expose an equivalent cross-process recovery key. That is a caller-recovery limitation,
 not proof of duplicate business effects or universal exactly-once execution.
 Any extension must define the retry boundary and distinguish retries from new
 intent before adding keys or durable attempt tracking. Test lost responses and
 intervening writes; a source-level ban on UUID construction proves neither.
+
+The canonical Todo commands now share one TS receipt recovery owner. Their
+local result contract retains unresolved post-commit readback as `ambiguous`
+and names the original operation for recovery; it does not infer no-write from
+an unavailable receipt or retry the CAS automatically. See the
+[command recovery checkpoint](typescript-control-plane-migration-v0.md#command-receipt-and-recovery-ownership)
+for intentional diagnostic changes and the complete fixture matrix. Historical
+receipt identity and one-way Markdown delivery remain intact. This is command
+recovery qualification, not storage retention, service availability or promotion.
 
 For every request, the authority performs this sequence:
 
@@ -757,6 +816,31 @@ should isolate LoopX control-plane records from application-domain records with
 separate schemas and roles, and relate them only through opaque identities or
 digests. Provider-specific payloads do not enter the provider-neutral LoopX
 schema.
+
+#### Retained-journal scan contract
+
+`scanCommitted(after_cursor, limit)` binds the head, rows and lookahead to one
+read snapshot. The current providers retain a contiguous journal from cursor 1;
+`null` is the sole start checkpoint, and every supplied cursor is a positive
+canonical decimal string. A positive checkpoint beyond the head, including an
+empty store, fails with `scan_cursor_out_of_range` rather than acknowledging
+successful exhaustion. Malformed runtime values fail before storage access.
+
+The shared TS scan owner checks the exact requested interval, including the
+lookahead row that proves `has_more`. Missing, repeated or reordered rows and a
+last transaction inconsistent with the snapshot head fail as protocol violations.
+PostgreSQL metadata/head/row reads use repeatable read; File/NoKV validate one
+retained envelope and SQLite keeps its existing read transaction. This does not
+introduce a snapshot token across pages: later calls may observe later commits.
+A page does not certify rows before its checkpoint, arbitrary payload integrity,
+or a future compacted/segmented history format.
+
+File and NoKV share journal decoding and append construction in the existing
+transaction module, while retaining their own revision digest inputs, identities,
+CAS and durability effects. Validation covers all four adapters with the shared
+complex fixture, real PostgreSQL concurrent commits and disposable corrupted
+rows, plus isolated real-source File/PostgreSQL pagination. No active Goal
+migration, default-provider change or D1–D3 qualification is implied.
 
 #### 6.2.2 Target store contract after the reference CAS slice
 
@@ -1131,8 +1215,10 @@ is gated by evidence below, not by calendar dates or this PR's merge status.
 | New-Goal default decision (F) | Maintainers accept the qualified profile and canary results, operational diagnostics, backup/restore procedure, release instructions and default-disable path. Ship the default change in a separate disclosed release change. | Apply only to newly created eligible local Goals. Existing explicit file selections remain pinned. Unsupported runtimes/filesystems require an explicit supported choice; no silent backend switch on open failure. |
 | Existing-Goal migration and file retirement | Migrate opt-in cohorts using the reviewed fenced workflow; reconcile receipts, history, projections and rollback after each cohort. Inventory the last file-primary callers and compatibility windows before removing any path. | Each Goal needs explicit migration authority. Retire file as the ordinary primary only after that evidence; retain reference/import/export support until its own callers and retention duties end. |
 
-**Current evidence position.** #4121 is the first milestone, pending maintainer
-acceptance; it is not completion of lane L. Its head pointer is bounded and
+**Current evidence position (rechecked 2026-09-13).** #4121 merged as
+`bde1632bb6f29aeb9a8b4ac23ead3e98ba2f2f55`, delivering the first candidate
+milestone. It remains subject to profile qualification and promotion; it is
+not completion of lane L. Its head pointer is bounded and
 operation/cursor lookups are indexed, but it retains full historical projections
 and counts a covering index for continuity. That count grows with history;
 current/accessed-row digests are checked, not every historical payload per read.
@@ -1458,10 +1544,10 @@ projects normalized snapshots, invokes those decisions, and reconstructs the
 provider-neutral `TransitionPlan`. The local lease-file transaction and the
 coordination executor therefore consume the same lease decisions; locking,
 source revalidation, file persistence, provider CAS, and receipt construction
-remain in their respective execution layers. Todo, terminal-fence, and
-handoff-mode decisions stay in the Python core until their own reviewed
-TypeScript cutovers; local holder/fence-close lock mechanics remain execution
-effects rather than provider contracts.
+remain in their respective execution layers. The initial extraction retained
+Todo, terminal-fence and handoff-mode decisions in Python; subsequent cutovers
+move them to their typed owners. Handoff quiescence now lives in
+`handoff_mode_policy.ts`. Local holder/fence-close locks remain execution effects.
 
 Keep three layers distinct as the provider work proceeds:
 
@@ -2600,6 +2686,32 @@ The planner neither reads a provider nor grants a lease, CAS receipt, or write
 permission. This checkpoint closes one rule owner, not the remaining mutation
 inventory or local-store/promotion qualification.
 
+### Cross-RFC semantic and presentation conformance checkpoint (2026-09-12)
+
+The TypeScript migration and this provider RFC now share one explicit Todo
+semantic boundary. Python production callers import `todos/todo_semantics.py`
+directly; `todos/projection.py` is retained only as an import-compatible facade
+for external integrations. This is an ownership cleanup, not a second kernel.
+The typed TypeScript `projection_delivery` union also owns the distinction
+between mutation intent (`pending`/`not_required`) and provider readback
+(`delivered`/`current`); unknown states fail closed before acknowledgement.
+
+Presentation is canonical at the projection layer, not in the domain record.
+`source_section` and `index` are the v0 wire shape's display coordinates, while
+native records derive the same display section from role/archive state and use
+timestamp plus Todo identity as a deterministic fallback instead of a fake
+persistent index. The normalized presentation metadata is therefore one
+contract even when the wire shapes differ. The same rule is exercised by the
+production-scale fixture and by File, SQLite, and NoKV conformance arms.
+Provider revision tokens remain provider-owned and are compared only for the
+provider-specific replay rules; they are not normalized into Todo semantics.
+
+This checkpoint changes read/ordering and compatibility-adapter semantics only:
+it does not promote a provider, add a writer, alter the transaction decoder
+delivered by #4280, or make Markdown a second authority. The shared RFC still
+owns durable truth, recovery, cutover, and projection delivery; the TS RFC owns
+business-rule ownership and caller deletion.
+
 ### Next delivery and parallel provider work
 
 Markdown is a **permanent first-class readable projection**. Retire its database
@@ -2782,6 +2894,7 @@ an equal-byte retry syncs file and directory before reporting `current`. Narrati
 canonical records stay intact. This converges the retained Python presentation/legacy
 input adapter; it adds no RPC or business state machine and does not change TS authority
 transactions, provider defaults, SQLite D2 or D3 promotion requirements.
+Canonical handoff-mode show/set no longer depend on Markdown frontmatter or local lease files. One TS transaction binds quiescence, mode and durable operation replay to the same revision, including sealed no-op intents. This adds a provider-neutral command boundary, not a provider default or whole-Goal cutover; frontmatter remains outside the Todo-section renderer. See [operation and recovery](../../reference/handoff-mode.md).
 
 T2 now commits a lease-free native Monitor observation and its independent
 successors in one canonical CAS/receipt; the route planner alone still grants

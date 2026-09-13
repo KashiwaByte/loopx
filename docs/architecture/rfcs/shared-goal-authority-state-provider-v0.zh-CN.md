@@ -3,7 +3,7 @@
 - 状态：Draft，正在接受 maintainer review
 - 最初提案方：NoKV Lab
 - 扩展修订方：LoopX maintainer
-- 日期：2026-08-05；修订于 2026-09-07
+- 日期：2026-08-05；修订于 2026-09-13
 - 范围：一个 provider-neutral 的 LoopX 权威合同，支持内置 file、可选 NoKV
   与可选 PostgreSQL provider profile，用来补充
   [`host-integration-surface-v0`](../../reference/protocols/host-integration-surface-v0.md)
@@ -36,6 +36,18 @@ capture 与已持久化 head 不会被静默迁移。
 模式下 Markdown 仍是 canonical；未来显式晋升 shared authority 后，也只有 typed
 contract 覆盖的 section 才成为确定性的兼容投影，自由的人类叙事仍在 coordination
 head 之外。
+
+### 管家衔接检查点（2026-09-13）
+
+在 `7eb4b7bb1661bd5eff63a8725a33169792d5964b` 源码核验 `AuthorityStore`
+接缝及 #4280、#4283、#4287 的事务/展示/journal 收敛。这更新衔接基线，不改变
+上方历史 provider 基线或资格证据。SQLite/PostgreSQL 候选路径、各 provider 的
+保留条件和 D1–D3 计划仍在；不宣称默认来源切换或共享服务已交付。
+
+[强能力管家与语义交接 RFC](capable-manager-semantic-handoff-v0.zh-CN.md)
+消费此 authority；M1 主机工具与 M2 请求账本重构无需等待 provider 晋级。
+第 1.4 节明确边界；[TS 执行卡](typescript-control-plane-migration-v0.zh-CN.md)
+继续负责业务规则收敛及旧 caller 删除。
 
 ## 文档地图与维护约定
 
@@ -244,6 +256,32 @@ adapter 人为包装成许可证边界。
 因此，本 RFC 继续让 Stage 1-4 遵循仓库的 Apache-2.0 政策。Stage 5 只是形成新的
 决策点，不会自动触发许可证切换。源码不会仅仅因为实现 shared-authority contract
 或通过远端 provider canary 就变成 AGPL-3.0。
+
+### 1.4 管家请求与语义交接衔接
+
+[管家/handoff RFC](capable-manager-semantic-handoff-v0.zh-CN.md) 负责用户完整
+交互与通用请求/评估/结果关系；本文负责已审阅协调状态与提交证明。
+semantic brief、对话、发送尝试、调度游标不进入 v0 coordination head。
+相关证据由 artifact owner 发布，按确切版本和披露范围引用。共用物理 provider
+不合并这些逻辑状态家族，也不合并其访问/保留契约。
+
+每个 Goal 保持唯一所选 authority source。采纳确实修改 Todo/lease/Vision 状态时，
+handoff 才调用对应现有 owner、关联真实回执；无工作效果的咨询或评估不调用它。
+独立请求提交不能让工作修改跨 store 原子化：先持久化意图，
+恢复原工作回执，再对账 pending 关系。跨 Goal 请求同样保留各 Goal 基线与结果，
+不要求分布式 commit，也不为两者编造同一个 Goal-wide provider revision。
+传输 ack 不能替代当前 claim 或 fence。
+
+管家读取和接收方写入必须保留晋级后 canonical 空/失败语义，不回退旧 Markdown
+或 lease 文件；永久 Markdown 展示保留。handoff RFC 的 A15 fixture 用 legacy
+与显式配置的 canonical source 验证此衔接，不重复或替代本文 backend conformance、
+保留、恢复、soak 和切换资格。
+
+[共享目标对齐/修订 RFC](shared-goal-alignment-and-governed-amendment-v0.zh-CN.md)
+负责意图改变是否合法，以及未来的受控提交；当前 proposal admission 不产生
+canonical amendment。管家与 provider 都不成为该 authority。M1–M3 管家工作可与
+T1–T3/D1/D2 并行；改变存储/profile/source 或退役完整 legacy Goal writer，仍遵守
+适用的 D3/T4 边界。新 handoff 不构成 provider 晋级请求。
 
 ## 2. 要做的，以及不要做的
 
@@ -454,11 +492,18 @@ Operation identity 标识调用方的一次逻辑尝试，不是参数组合。�
 存储成本，但优化时必须保留 identity consumption、重放与冲突校验。
 
 当前本地 facade 在 managed-runtime retry 内复用生成的 id。两次独立 CLI 调用不会
-自动视为同一尝试：claim 提供 `--claim-operation-id`，create 和 text/note update
-目前没有等价的跨进程恢复 key。这是 caller recovery 的限制，不证明业务效果重复，
+自动视为同一尝试：claim 提供 `--claim-operation-id`，update 提供
+`--update-operation-id`，create 目前没有等价的跨进程恢复 key。这是 caller recovery 的限制，不证明业务效果重复，
 也不能宣称通用 exactly-once。扩展前应先定义重试边界、区分 retry 与新 intent，再
 决定是否需要 key 或耐久 attempt tracking。用丢响应与中间插入其他写入来验证，
 而不是用禁止 UUID 构造的源码扫描代替语义测试。
+
+Canonical Todo 命令现在共用一个 TS 回执恢复 owner。本地结果合同将提交后未能
+确认的回读保留为 `ambiguous`，并指出恢复所需的原 operation；不能从回执不可用
+推断未写入，也不会自动重试 CAS。明确的诊断变化及完整 fixture 矩阵见
+[命令恢复检查点](typescript-control-plane-migration-v0.zh-CN.md#命令回执与恢复的统一所有者)。
+历史回执身份和单向 Markdown 投递保持不变。这是命令恢复验证，不代表存储保留、
+服务可用性或 promotion 已获资格。
 
 对每个 request，authority 执行以下顺序：
 
@@ -637,6 +682,26 @@ commit-marker protocol，并通过新的合同 review。
 物理数据库或 cluster 共同部署不会合并 ownership。部署应以独立 schema 与 role 隔离
 LoopX 控制面记录与应用领域记录，只通过 opaque identity 或 digest 建立关联。
 provider-specific payload 不进入 provider-neutral 的 LoopX schema。
+
+#### 保留 journal 的扫描合同
+
+`scanCommitted(after_cursor, limit)` 将 head、记录和 lookahead 绑定到同一个读取
+snapshot。当前 provider 保留从 cursor 1 起的连续 journal；`null` 是唯一起点，
+其他游标必须是规范的正十进制字符串。超过 head 的正数 checkpoint（包括空存储）
+返回 `scan_cursor_out_of_range`，不能确认“已成功读完”；非法运行时类型在访问
+存储前拒绝。
+
+共享 TS scan owner 验证请求区间及用于证明 `has_more` 的 lookahead 行。
+缺行、重复、乱序及末条 transaction 与 snapshot head 不一致均为协议错误。
+PostgreSQL metadata/head/row 使用 repeatable read；File/NoKV 验证同一个保留
+历史的 envelope，SQLite 保留原读事务。此合同不增加跨页 snapshot token，后续
+调用可以看到后续提交；也不证明 checkpoint 之前全部历史、任意 payload 的完整性，
+或未来压缩/分段历史格式。
+
+File 与 NoKV 在既有 transaction 模块共用 journal 解码及 append 构造，各自
+保留版本摘要输入、identity、CAS 与持久化副作用。验证包含四个 adapter 的复杂
+fixture、真实 PostgreSQL 并发提交及一次性损坏行，以及真实来源隔离副本上的
+File/PostgreSQL 分页。不迁移活跃 Goal，不切换默认 provider，不宣布 D1–D3 合格。
 
 #### 6.2.2 参考 CAS 切片之后的目标 store contract
 
@@ -891,7 +956,9 @@ fencing/export 演练与 maintainer review 都通过才可晋升。发布紧凑�
 | 新 Goal 默认决策（F） | 维护者接受合格 profile、canary 结果、运维诊断、backup/restore 流程、发布操作说明和关闭默认的路径；在独立且明确披露的发布改动中切默认。 | 仅适用于新建且符合条件的本地 Goal；已有显式 file 选择保持固定。不受支持的 runtime/filesystem 需显式选择支持方案，打开失败不能静默切 backend。 |
 | 已有 Goal 迁移与 file 退役 | 按已评审的 fenced workflow 逐批 opt-in 迁移，每批核对 receipt、历史、投影和回滚；删除路径前列清最后的 file-primary caller 与兼容窗口。 | 每个 Goal 需要明确迁移权限；证据满足后才退役常规 primary 角色。参考／导入／导出支持保留到其 caller 与保留责任分别结束。 |
 
-**当前证据位置。** #4121 对应第一个节点，仍待维护者接受，不代表 lane L 完成。
+**当前证据位置（2026-09-13 复核）。** #4121 已合并为
+`bde1632bb6f29aeb9a8b4ac23ead3e98ba2f2f55`，交付第一个候选节点；
+仍需 profile 资格化与晋级，不代表 lane L 完成。
 其 head pointer 有界，operation/cursor 查询有索引，但保留完整历史 projection，连续性
 校验还会统计覆盖索引，因此该成本随历史增长。它验证当前及访问到的 row digest，
 不是每次读取都审计全部历史 payload。已发布的固定 4 KiB 微基准尚缺上述 64 KiB 匹配
@@ -1164,9 +1231,9 @@ transfer、release 则由 `task_lease_lifecycle_decision.ts` 的纯 seam 持有�
 `authority_core` 只负责投影 normalized snapshot、调用这些 decision，再重建
 provider-neutral `TransitionPlan`。因此，本地 lease-file transaction 与 coordination
 executor 消费同一份 lease decision；加锁、source 重验、文件持久化、provider CAS 与
-receipt 构造仍分别属于各自 execution layer。Todo、terminal-fence 与 handoff-mode
-决策继续留在 Python core，直到各自经过 review 的 TypeScript cutover；本地 holder /
-fence-close 锁机制属于 execution effect，而不是 provider contract。
+receipt 构造仍分别属于各自 execution layer。初次抽取保留的 Todo、terminal-fence
+与 handoff-mode Python 决策由后续切片移入 typed owner；handoff 空闲判断现归属
+`handoff_mode_policy.ts`。本地 holder／fence-close 锁仍属于 execution effect。
 
 后续 provider 工作必须始终分开三层：
 
@@ -2060,6 +2127,28 @@ unsupported-field fence。planner 不读取 provider，也不授予 lease、CAS 
 写权限。该检查点闭合的是一个规则 owner，不是剩余 mutation inventory 或本地
 store／promotion 资格化。
 
+### 跨 RFC 的语义与展示 conformance 检查点（2026-09-12）
+
+TypeScript 重构 RFC 与本 provider RFC 现在共享一个显式的 Todo 语义边界。
+Python 生产 caller 直接从 `todos/todo_semantics.py` 导入；`todos/projection.py`
+只作为外部集成所需的 import 兼容 facade 保留，不再是第二个 kernel。这是 owner
+收敛，不是新增一套规则。TypeScript 的 typed `projection_delivery` union 也明确区分
+mutation intent（`pending`/`not_required`）与 provider readback（`delivered`/`current`）；
+未知状态在 acknowledgement 之前 fail closed。
+
+展示语义属于 projection 层，而不是 domain record。`source_section` 与 `index` 是 v0
+wire shape 的展示坐标；native record 根据 role/archive state 推导相同的展示 section，
+并以时间戳和 Todo identity 做确定性回退，不制造假的持久 index。因此即使 wire shape
+不同，normalized presentation metadata 仍只有一份 contract。同一规则由
+production-scale fixture 以及 File、SQLite、NoKV conformance arm 共同覆盖。Provider
+自己的 revision token 仍由各自 provider 管理，只用于 provider-specific replay 规则，
+不被归一成 Todo 语义。
+
+本检查点只改变 read/ordering 与兼容 adapter 语义：不晋升 provider、不增加 writer，
+不改动 #4280 交付的 transaction decoder，也不把 Markdown 变成第二权威。共享 RFC
+继续负责 durable truth、恢复、cutover 与 projection delivery；TS RFC 负责业务规则
+owner 与 caller 删除。
+
 ### 下一步交付与并行 provider 工作
 
 Markdown 是**长期保留的一等可读投影**。退役的是它的数据库及业务 writer 权威，
@@ -2199,6 +2288,7 @@ fenced 示例被当成真实任务、归档 end marker 后叙述进入历史、�
 文件／目录同步，之后才报告 `current`。区域外正文和 canonical record 不被改写。
 这是永久 Python 展示／legacy 输入适配层的收敛：TS authority transaction、provider
 默认值、SQLite D2 与 D3 promotion 合同不变，不增加 RPC 或另一份业务状态机。
+Canonical handoff-mode show/set 不再依赖 Markdown frontmatter 或本地 lease；一笔 TS 事务把空闲检查、mode 与耐久操作回执绑定到同一 revision，包括未改值请求的回执。该命令边界不切换默认 provider、不晋升整 Goal；frontmatter 仍不属于 Todo-section renderer。操作与恢复见 [handoff-mode](../../reference/handoff-mode.md)。
 
 能力缺口 consumer 在 legacy/canonical 输入上共用 TS requirement/resolution owner，
 包括 quota 的 Monitor 能力分流。删除 Python missing-set 与 owner/repair 决策 builder，

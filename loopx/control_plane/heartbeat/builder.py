@@ -45,6 +45,8 @@ from .host import (
 from .rules import (
     DEFAULT_MATERIAL_QUEUE_RULE,
     DEFAULT_PERMISSION_RULE,
+    REWARD_MEMORY_OUTCOME_COMPACT_RULE,
+    REWARD_MEMORY_OUTCOME_RULE,
 )
 from .task_body import (
     bind_exact_turn_settlement_task_body,
@@ -105,6 +107,26 @@ def _select_task_body_renderer(
     if compact:
         return render_compact_heartbeat_task_body
     return render_heartbeat_task_body
+
+
+def _reward_memory_rule_kwargs(
+    *,
+    full: bool,
+    reward_memory_enabled: bool,
+    native_goal_host: bool,
+    ark_managed_agent_goal: bool,
+) -> dict[str, str]:
+    if native_goal_host or ark_managed_agent_goal:
+        return {}
+    if not reward_memory_enabled:
+        return {"reward_memory_rule": ""}
+    return {
+        "reward_memory_rule": (
+            REWARD_MEMORY_OUTCOME_RULE
+            if full
+            else REWARD_MEMORY_OUTCOME_COMPACT_RULE
+        )
+    }
 
 
 def _heartbeat_regeneration_commands(
@@ -266,6 +288,7 @@ def build_heartbeat_prompt(
     visible_goal_host: str | None = None,
     turn_granularity: str | None = None,
     turn_instance_id: str | None = None,
+    reward_memory_enabled: bool = True,
 ) -> dict[str, Any]:
     if not (full or compact or brief or thin):
         thin = True
@@ -414,6 +437,12 @@ def build_heartbeat_prompt(
         brief=brief,
         compact=compact,
     )
+    reward_memory_rule_kwargs = _reward_memory_rule_kwargs(
+        full=full,
+        reward_memory_enabled=reward_memory_enabled,
+        native_goal_host=native_goal_host,
+        ark_managed_agent_goal=ark_managed_agent_goal,
+    )
     task_body = task_body_renderer(
         goal_id=goal_id,
         active_state=active_state_text,
@@ -433,6 +462,7 @@ def build_heartbeat_prompt(
         compact_prompt_command=str(commands["compact_prompt_command"]),
         brief_prompt_command=str(commands["brief_prompt_command"]),
         thin_prompt_command=str(commands["thin_prompt_command"]),
+        **reward_memory_rule_kwargs,
     )
     task_body = bind_exact_turn_settlement_task_body(
         task_body,
@@ -472,6 +502,7 @@ def build_heartbeat_prompt(
         "agent_profile": agent_profile_prompt_projection(agent_profile),
         "registered_agents": normalized_registered_agents,
         "runtime_profile": runtime_profile,
+        "reward_memory_enabled": reward_memory_enabled,
         "scheduler_execution_context": scheduler_execution_context,
         **(
             {"visible_goal_host": visible_goal_host}

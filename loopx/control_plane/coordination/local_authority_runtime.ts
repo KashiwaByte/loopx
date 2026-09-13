@@ -1,3 +1,4 @@
+import {COORDINATION_TODO_ARCHIVE_RESULT_SCHEMA} from "./todo_archive.ts";
 import {executeTodoContinuation} from "./todo_continuation.ts";
 import { withFileMutationLock } from "../effect_runtime_io.ts";
 import { ShadowManagementError, requireShadowPrimaryWriteAllowed, shadowMaintenanceLockPath } from "./shadow_management.ts";
@@ -59,7 +60,6 @@ import {
   executeCoordinationTodoUpdate,
 } from "./todo_update.ts";
 import {
-  COORDINATION_TODO_ARCHIVE_RESULT_SCHEMA,
   COORDINATION_TODO_TERMINAL_LIFECYCLE_RESULT_SCHEMA,
   executeCoordinationTodoTerminalLifecycle,
 } from "./todo_terminal_lifecycle.ts";
@@ -98,11 +98,11 @@ export {
 } from "./coordination_state_contract.generated.ts";
 export { LEGACY_COORDINATION_WRITER_FENCE_SCHEMA } from "./legacy_writer_fence.ts";
 
-function sourceAuthorityFor(store: AuthorityStore): "sqlite_v0" | "file_v0" {
+export function sourceAuthorityFor(store: AuthorityStore): "sqlite_v0" | "file_v0" {
   return store instanceof SqliteAuthorityStore ? "sqlite_v0" : "file_v0";
 }
 
-async function withCanonicalWriter<T>(root: string, goalId: string, dryRun: boolean, write: () => Promise<T>): Promise<T> {
+export async function withCanonicalWriter<T>(root: string, goalId: string, dryRun: boolean, write: () => Promise<T>): Promise<T> {
   if (dryRun) return await write();
   return await withFileMutationLock(shadowMaintenanceLockPath(root, goalId), async () => {
     await requireShadowPrimaryWriteAllowed(root, goalId);
@@ -147,7 +147,7 @@ interface LocalAuthorityRuntimeDependencies {
   createCanonicalStore?: (directory: string, goalId: string) => AuthorityStore;
 }
 
-function runtimeRoot(value: unknown): string {
+export function runtimeRoot(value: unknown): string {
   if (typeof value !== "string" || value.trim() !== value || !isAbsolute(value)) {
     throw new Error("runtime_root must be an absolute path");
   }

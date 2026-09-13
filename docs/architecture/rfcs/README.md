@@ -87,12 +87,13 @@ changes.
 - [Shared Goal Alignment and Governed Amendment Protocol v0](shared-goal-alignment-and-governed-amendment-v0.md)
   ([中文版](shared-goal-alignment-and-governed-amendment-v0.zh-CN.md))
   - **RFC status:** Draft, under maintainer review.
-  - **Delivery on `main`:** Proposal only.
-  - **Current boundary:** Existing peer lanes, unclaimed work, claims/leases,
-    Agent-scoped Goal Vision/Replan, and provider-neutral authority are inputs.
-    A read-only shared-alignment projection, automated amendment policy,
-    verifier boundary, and canonical Goal-amendment transaction have not
-    shipped.
+  - **Delivery on `main`:** Stage 1/2 read-only alignment and proposal-admission
+    foundations implemented; the RFC remains a draft.
+  - **Current boundary:** Current Todo/lease source-basis projection and retained
+    amendment admission have no canonical effect. Full Goal-intent versioning,
+    governed commit policy/verifier, lease-impact handling and Stage 3+
+    qualification remain unshipped. Manager handoff consumes these boundaries;
+    it does not provide another amendment writer.
 - [Goal Direction Baseline v0](goal-direction-baseline-v0.md)
   ([中文版](goal-direction-baseline-v0.zh-CN.md))
   - **RFC status:** Draft, under maintainer review.
@@ -147,6 +148,28 @@ changes.
     Replan settlement, memory, or action selection.
 
 ## Runtime, Capability, And Collaboration Integration
+
+- [Capable Agent Manager and Semantic Work Handoff v0](capable-manager-semantic-handoff-v0.md)
+  ([中文版](capable-manager-semantic-handoff-v0.zh-CN.md))
+  - **RFC status:** Draft, under maintainer review.
+  - **Delivery on `main`:** Proposal; existing manager/inbox foundations are reused.
+  - **Current boundary:** Proposes ordinary host-tool autonomy, persistent scoped
+    conversations, long-horizon semantic continuation and automatic result delivery.
+    Includes an official Grok Bot study distinguishing availability from goal
+    continuation; M0–M4 and A1–A20 define delivery and acceptance, with explicit
+    alignment, shared-authority and TS migration dependencies.
+    Cross-session restoration, execution takeover and automatic return are specified
+    separately, reusing #4094 with optional Obelisk gap recall under its own scope.
+    Runtime-profile promotion and generic handoff migration have not shipped.
+
+- [Explicit Todo Continuation — Stage A](cross-session-memory-substrate-v0.md)
+  ([中文版](cross-session-memory-substrate-v0.zh-CN.md))
+  - **Delivery on `main`:** #4094 shipped the explicit local CLI and rich/legacy
+    continuation note with revision-guarded ownership adoption.
+  - **Current boundary:** Registered agents, same host/Goal, lease-free promoted
+    local authority. No generic memory store, automatic host launch, cross-host
+    artifacts or automatic result return. Manager/handoff §5.13 integrates this
+    adapter into M2/M3; the shipped CLI contract remains until replacement qualifies.
 
 - [Single-Owner Local Daemon v0](single-owner-local-daemon-v0.md)
   - **RFC status:** Draft.

@@ -25,13 +25,12 @@ export const COORDINATION_TERMINAL_FENCE_REQUEST_SCHEMA =
   "loopx_coordination_terminal_fence_request_v0";
 export const COORDINATION_TERMINAL_FENCE_RESULT_SCHEMA =
   "loopx_coordination_terminal_fence_result_v0";
-const HANDOFF_MODES = ["legacy", "soft_claim", "hard_lease"] as const;
+import {HANDOFF_MODES, type HandoffMode} from "./handoff_mode_policy.ts";
 const OUTCOMES = ["approve", "reject", "cancel"] as const;
 const AUTHORITY_ACTIONS = ["complete", "reassign", "supersede", "update"] as const;
 const EXECUTOR_RECLAIM_ACTION = "reclaim";
 
 type LifecycleCommand = typeof COMMANDS[number] | typeof MUTATION_COMMANDS[number];
-type HandoffMode = typeof HANDOFF_MODES[number];
 type DecisionOutcome = typeof OUTCOMES[number];
 
 interface DecisionScope extends JsonObject {
@@ -365,8 +364,14 @@ function authority(request: LifecycleDecisionRequest):
   | CoordinationTodoTerminalDecisionResult {
   const { todo, actor_agent_id: actor, registered_agents: registered } = request;
   if (registered.length <= 1) {
-    if (actor !== null && registered.length > 0 && !registered.includes(actor)) {
-      return result("rejected", "actor_not_registered");
+    if (actor !== null) {
+      const rejection = registeredTodoMutationRejection(todo, actor, registered);
+      if (rejection !== null) return result("rejected", rejection);
+    } else if (todo.claimed_by !== null || todo.bound_agent !== null ||
+        todo.blocks_agent !== null || todo.excluded_agents.length > 0) {
+      // Actorless compatibility is limited to genuinely unowned Todo records;
+      // ownership, binding, and exclusion facts require an accountable actor.
+      return result("rejected", "actor_required");
     }
     return { mode: "single_agent_compatibility", ownershipGate: "not_required" };
   }
