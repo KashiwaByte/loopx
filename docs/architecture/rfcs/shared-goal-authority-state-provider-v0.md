@@ -2961,30 +2961,68 @@ independent legacy three-arm comparison or D2 soak.
 
 #### Execution handoff and integration order
 
-| Ready condition | Next action | What it does not authorize |
+**Local-default delivery program (2026-09-14).** The outcome is a new local
+Goal whose normal CLI, Turn and operator actions use one TS-owned canonical
+transaction path, with Markdown as a permanent projection. An omitted selector
+resolving to File is not this outcome: existing Goals still have a legacy
+writer until an explicit whole-Goal cutover.
+
+Qualify **one** long-lived local default profile. SQLite is the current D2
+candidate; File remains the real reference/explicit profile and migration
+rehearsal backend. Do not publish two ambiguous defaults, declare the current
+File history layout long-horizon-qualified, or silently fall back from a
+selected SQLite store. The final profile decision must cite its D2 evidence.
+PostgreSQL shares the TS semantic contracts but has independent service,
+tenant, restore and capacity qualification; its deployment must not delay the
+local profile's work.
+
+The reconciled baseline includes #4286 (command receipts/archive), #4289
+(typed work/ownership intent), #4292 (declarative decision metadata), and #4304
+(canonical handoff mode). Candidate #4316 closes Goal Channel observation;
+#4317 unifies provider opening; #4348 adds canonical renew; #4328 is the first
+SQLite D2 measurement/recovery batch. They are review candidates, not merged
+prerequisites or proof of the full cards. #4334 is the independent PostgreSQL
+service-admission candidate. Re-read actual heads before composing work; do
+not carry their already-merged ancestors as new changes.
+
+The identifiers below are **planned PR packages**, not reserved GitHub numbers.
+A package may split at a real effect/compatibility boundary; changing languages
+or moving a helper is not by itself a package exit.
+
+| Wave / package | Reviewable delivery and TS ownership payoff | Dependencies and exit evidence |
 | --- | --- | --- |
-| Current refactor stack is reconciled | T1; D1 and D2 may proceed independently | Default provider changes or another generic migration framework |
-| T1 closes field semantics | T2; close T3 consumers as their contracts become available | Per-command split authority within one Goal |
-| T1–T3 and D1/D2 plus capture qualify | D3 rehearsal, then explicit promotion request | Skipping soak, bypassing failed evidence, or production promotion by the agent |
-| Approved cutover and legacy window finish | T4 full-writer retirement | Deleting permanent Markdown presentation or historical receipts still needed for replay |
+| A / L1: Monitor configuration (this slice) | Existing `todo update` config enters the TS planner/CAS/receipt; delete Python's duplicate intent field catalog. Separate authoring from observed hashes, times and generations. | Ordinary CLI/API, clear/omission, active lease proof, no-op/replay, failed display delivery, complete fixture and real providers. This does not complete delegated Chat or leased polling. |
+| A / L2: Complete public mutation admission | Inventory actual CLI/Turn/Chat callers; close remaining effect-owned user decisions, delegated owner actions and Monitor lifecycle transitions with validated actor/grant facts. | Build on merged T1 owners, not a generic raw patch. Prove permission rejection and exact caller response; remove replaced Python admission and name every remaining unsupported command. |
+| A / L3: Canonical lease lifecycle | Reconcile #4348 renew; close transfer/release and their CLI consumers through the same typed lease rules, atomic head/event/receipt and replay. | One canonical Todo/lease revision; lost replies, stale versions, competing owners, expired/released history and cleanup proofs. Receipt replay is never a fresh execution grant. |
+| B / L4: Leased Monitor poll and settlement | Compose observation, generation and independent successors with the current lease fence. Reuse the existing quota settlement protocol and exact business receipt. | L2/L3; real polling failure, duplicate/no-change observations, crash between business and quota settlement, and competing writers. Do not pretend separate authorities share a database transaction. |
+| B / L5: Consumer and display closure | Reconcile #4316, audit Turn/quota/Dashboard/Chat source reads, and finish D1 freshness/recovery through the existing projection outbox. | CLI, Lark/Chat and packaged frontend read back their affected interactions; absent/stale display, empty canonical state, pending projection and data beyond UI limits. Delete post-promotion legacy fallbacks with each consumer. |
+| A–C / L6: Local durability qualification | Continue contributor-owned #4224/#4328 on the selected SQLite profile; reuse File/NoKV references and complete 7.2's ledger. | Capacity, real process/crash/restore/upgrade, retained receipts/scans, consumer lag, supported runtimes/OS and the separately authorized >=10-day synthetic soak. Missing measurements remain holds. |
+| A–C / L7: Capture continuity | Resolve #4315 with source-correlated archive retirement and identical lease membership at bootstrap and later writers; activate its row/mutant and complete the mixed-writer/event-source matrix. | Real CLI/File capture, history retained, partial drain unqualified, crash/replay and a new lease after archive/rebootstrap. Keep the legacy migration window provable; T4 cannot be used to skip this row. |
+| C / L8: Whole-Goal rehearsal and cohort migration | Integrate one exact revision/profile after L2–L7; drain capture, fence old writers, verify canonical readback and projection, then rehearse fenced export/rollback. | D3 evidence packet binds lineage, cursor, source digest, command coverage and profile. Existing Goal migration requires explicit cohort approval; no per-command split authority or stale Markdown revival. |
+| D / L9: New-Goal default and bounded retirement | A dedicated default-change PR makes new-Goal creation/onboarding choose the qualified local profile, including settings/readback, installer and packaged clients. Retire old business writers only as their final callers and migration window close. | L8's integrated product/rollback qualification; distinguish new Goal default from existing Goal migration. Publish compatibility/disable guidance, keep explicit provider choice, permanent rendering and validated import/export. T4 can continue after the default ships. |
 
-Expect roughly **five to seven cohesive implementation/qualification batches**
-after reconciling the current stack, not a fixed PR quota: T1, T2, T3, D1, D2,
-D3 and T4 can share a PR only when their dependencies, review and rollback
-remain clear. Semantic deletion starts in T1; full legacy-writer deletion waits
-for D3/T4. Elapsed-time soak is separate and is not shortened by splitting PRs.
+**Cadence is evidence-based.** First reconcile the active stack, then deliver A
+packages as complete operations while L6/L7 progress independently. B integrates
+those contracts into complete user flows; C has one reproducible qualification
+checkpoint; D changes the default in its own reviewable PR. This is roughly
+nine cohesive packages at this checkpoint, not a line-count target or a promise
+of nine merges. Avoid concurrent edits to the same transaction owner; share
+fixture/contracts early and rebase after the owner lands.
 
-For each handoff, record the exact base/head, selected card, actual callers
-removed, changed authority/observable semantics, real-backend results, remaining
-holds and one next executable action. If an earlier stage already landed,
-verify its evidence and skip its implementation; if prerequisites fail, stop
-that dependent stage. Do not turn hypothetical post-merge readiness into an
-automatic promotion, automation, merge or release permission.
+There is no defensible calendar completion date before the L2/L3 command
+inventory and L6 missing-evidence ledger close. The >=10-day soak is a real
+elapsed-time lower bound **after the measured profile is ready**, not ten days
+from this plan. It may overlap compatible work after explicit launch approval;
+changes to the qualified durability semantics require an impact-based rerun.
+Accelerated fixtures cannot replace elapsed time. Native TS CLI/distribution
+cleanup, removal of every Python adapter, and PostgreSQL service deployment are
+not prerequisites for this local default.
 
-The current default and Appendix C promotion holds remain unchanged. This plan
-does not declare the whole Todo family, long-goal profile, or shared deployment
-production-ready. Providers keep CAS/transactions durable; they never own a
-second Todo state machine.
+Every package records actual caller/owner deletion, added bridge LOC and its
+exit, request/response counts, real-backend results, baseline parity and disclosed
+semantic corrections. A green unit suite, a canonical selector, or a new config
+field alone cannot advance a package to default readiness. Planned integration,
+soak, release, merge and live promotion retain their respective authorization.
 
 ### Parallel delivery plan
 

@@ -2345,26 +2345,54 @@ route planner 本身仍不授予权限。CLI 将已提交回执交给既有 jour
 
 #### 执行交接与汇合顺序
 
-| 就绪条件 | 下一动作 | 不授予的权限 |
+**本地默认化交付计划（2026-09-14）。** 目标是新建本地 Goal 后，日常 CLI、Turn 和
+操作者动作都通过 TS 拥有的 canonical 事务运行，Markdown 永久作为展示投影。
+“未指定 selector 时选择 File”不等于达成目标：已有 Goal 在明确的整 Goal cutover
+之前，仍有 legacy writer。
+
+长程默认应选定**一个**合格本地 profile。SQLite 是当前 D2 候选；File 保留为真实
+对照、显式可选 profile 和迁移演练后端。不能发布两个含混的默认项，不能把现有 File
+历史布局直接称为长程合格，也不能从选定 SQLite 静默回退。最终选择必须引用 D2
+证据。PostgreSQL 复用 TS 语义合同，但 service、tenant、restore 和 capacity 单独
+资格化；其部署不阻塞本地路线。
+
+核对基线：#4286（命令回执／归档）、#4289（typed 工作／归属 intent）、#4292
+（声明式 decision metadata）、#4304（canonical handoff mode）已合并。#4316
+是 Goal Channel observation 候选，#4317 是 provider opening 候选，#4348 是
+canonical renew 候选，#4328 是 SQLite D2 首批测量／恢复候选；它们尚不能算作已
+合并前提或完整执行卡证据。#4334 是独立 PostgreSQL service admission 候选。
+组合前重读实际 head，不能把已合并祖先再次算成新变化。
+
+下表编号表示**计划 PR 包**，不是预留 GitHub 编号。可沿真实 effect／兼容边界拆分；
+仅换语言或移动 helper 不构成一个包的退出条件。
+
+| 波次／PR 包 | 完整交付内容与 TS 归属收益 | 依赖与退出证据 |
 | --- | --- | --- |
-| 当前 refactor stack 已核对 | T1；D1、D2 可独立推进 | 修改默认 provider 或新增通用迁移框架 |
-| T1 字段语义闭合 | T2；所需合同就绪后推进 T3 consumer | 同一 Goal 按命令拆分 authority |
-| T1–T3、D1/D2 和 capture 均合格 | D3 演练，再请求 promotion 批准 | 跳过 soak、绕过失败证据或自行生产晋升 |
-| 批准的 cutover 和 legacy 窗口结束 | T4 完整 writer 退役 | 删除永久 Markdown 展示或 replay 仍需的历史 receipt |
+| A／L1：Monitor 配置（本切片） | 现有 `todo update` 配置进入 TS planner／CAS／receipt，删除 Python 重复 intent 字段表；区分配置与观察 hash、时间、代数。 | 普通 CLI/API、清除／省略、active lease proof、no-op／replay、展示失败恢复、完整 fixture 和真实 provider。不宣称完成委托 Chat 或 leased polling。 |
+| A／L2：公共 mutation admission 闭合 | 盘点 CLI／Turn／Chat 实际 caller；以可信 actor／grant 事实闭合剩余 effect-owned 用户决策、委托 owner 动作和 Monitor lifecycle。 | 复用已合并 T1 owner，不开通通用 raw patch；验证权限拒绝和 caller 响应，删除替代的 Python admission，列全未支持命令。 |
+| A／L3：canonical lease 生命周期 | 核对 #4348 renew，继续 transfer／release 及 CLI consumer；复用 typed lease 规则和原子 head／event／receipt。 | 同一 canonical Todo／lease revision；丢回复、旧版本、owner 竞争、过期／释放历史和清理凭据。旧回执 replay 不是新执行权。 |
+| B／L4：leased Monitor poll 与 settlement | 组合观察、变化代数、独立 successor 和现有 lease fence；复用 quota settlement 与精确业务回执。 | L2/L3；真实 polling 失败、重复／无变化、业务提交到 quota settlement 间崩溃和并发。不能假装不同 authority 共享一个数据库事务。 |
+| B／L5：consumer 与展示闭合 | 核对 #4316，审计 Turn／quota／Dashboard／Chat 的来源，复用 projection outbox 完成 D1 新鲜度和恢复。 | 验证 CLI、Lark／Chat、打包 frontend 的受影响交互；缺失／陈旧展示、权威空状态、pending 投影及超过 UI 上限的数据。逐个删除晋升后的 legacy fallback。 |
+| A–C／L6：本地持久化资格 | 延续 contributor 认领的 #4224／#4328，在选定 SQLite profile 上补齐第 7.2 节 ledger，复用 File／NoKV 对照。 | capacity、真实进程／crash／restore／upgrade、历史 receipt／scan、consumer lag、支持的 runtime／OS，以及另行授权的 >=10 天合成 soak。缺项继续 hold。 |
+| A–C／L7：capture 连续性 | 修复 #4315：归档的源事务明确退休 lease 引用，bootstrap 与后续 writer 使用一致成员范围；执行 row／mutant 和 mixed-writer／event-source 矩阵。 | 真实 CLI／File capture、保留历史、半完成 drain 不合格、crash／replay，以及归档／rebootstrap 后再申请 lease。不能借 T4 跳过迁移窗口证明。 |
+| C／L8：整 Goal 演练与分组迁移 | L2–L7 后汇合一个精确 revision／profile；drain capture、fence 旧 writer、回读 canonical 与投影、演练 fenced export／rollback。 | D3 包绑定 lineage、cursor、source digest、命令覆盖和 profile；已有 Goal 分组迁移需明确批准，不能按命令拆 authority 或复活旧 Markdown。 |
+| D／L9：新 Goal 默认与有界退役 | 单独 default-change PR 让新建／onboarding 选择合格本地 profile，配齐 settings／readback、installer 和打包客户端；最后 caller 与迁移窗口退出才删除旧业务 writer。 | L8 整体产品／回滚资格；区分新 Goal 默认和已有 Goal 迁移。发布兼容／停用说明，保留显式 provider、永久 renderer 和合法 import/export。T4 可在默认启用后继续收尾。 |
 
-核对当前 stack 后，预估还需**五到七个完整实现／资格化批次**，不是固定 PR 配额：
-T1、T2、T3、D1、D2、D3、T4 仅在依赖、评审和回滚清晰时可同 PR 交付。
-T1 就开始删除重复语义；完整 legacy writer 删除等待 D3/T4。Soak 的真实经过时间
-独立计算，不能靠拆 PR 缩短。
+**开发节奏以证据推进。** 先核对在途 stack，再按完整操作交付 A；L6/L7 可独立推进。
+B 汇合为完整用户流程，C 形成一次可复现资格检查点，D 用独立 PR 修改默认。此时约
+九个完整包，不是代码行数指标，也不承诺恰好九次 merge。同一 transaction owner
+避免并发重写，先共享 fixture／合同，owner 合入后再 rebase。
 
-每次交接记录精确 base/head、执行卡、实际删除的 caller、authority／可观察语义变化、
-真实 backend 结果、剩余 hold 和一个可执行的下一动作。前序已合入则验证证据后跳过
-重复实现；前提不满足就暂停依赖阶段。不能把“假设合并后”的就绪状态当成自动
-promotion、automation、merge 或 release 授权。
+L2/L3 命令盘点与 L6 缺失证据未闭合前，不给虚假的日历承诺。>=10 天 soak 是
+**被测 profile 就绪之后**的真实时间下限，不是从写计划当天计时；明确授权后可与
+兼容工作重叠，涉及持久化语义的后续变化须按影响重新验证。加速 fixture 不能替代
+真实经过时间。本地默认不依赖完整 TS CLI／distribution 清理、删除所有 Python
+adapter，也不依赖 PostgreSQL service 部署。
 
-当前默认和附录 C promotion hold 均不改变。这份计划不宣称完整 Todo 命令族、长程
-profile 或 shared deployment 已生产就绪。provider 负责 durable CAS/transaction，
-不拥有第二份 Todo 状态机。
+每包记录实际 caller／owner 删除、bridge LOC 与退出条件、跨运行时次数、真实后端、
+基线 parity 和公开的语义纠正。单元测试绿、canonical selector 或新增配置字段，均
+不能单独代表默认化就绪。计划中的 integration、soak、release、merge 和生产晋升
+仍分别保留授权边界。
 
 ### 并行交付计划
 

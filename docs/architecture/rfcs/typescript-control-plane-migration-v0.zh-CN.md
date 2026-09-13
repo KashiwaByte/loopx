@@ -417,7 +417,7 @@ field codec 仍有真实 caller，不引入公开 update 限制。Native metadat
 T2 原子后续动作尚未全部闭合。Lease-edit PR #4152 已合入；有界规划更新复用该
 fence 及既有 CAS/receipt 事务。下一步继续剩余字段/effect 清单，不另建 update engine。
 
-工作要求编辑现已闭合：没有保留 lease 的非 Monitor Agent Todo，可通过既有 v1
+工作要求编辑首先闭合于没有保留 lease 的非 Monitor Agent Todo，可通过既有 v1
 planning 事务更新 `action_kind`、`task_domain`、`task_repository`、
 `required_write_scopes`、`required_capabilities`、`target_capabilities` 和
 `explore_result_node_refs`。公开 legacy 编辑与 native planning 共用
@@ -452,6 +452,22 @@ metadata 修正不会擦掉保留的 user-gate scope。这闭合的是 T1 的声
 - 通过公开命令及受影响真实 provider 验证：省略／清空、unclaimed 文案修正与受限
   metadata 的差异、other-owner/lease 拒绝、no-op、非法输入无写入、竞争 revision、
   retry 和丢响应恢复。
+
+Monitor 配置现通过既有 native planning transaction 和 public legacy planner
+共享 typed authoring codec：target／cadence／due／expiry／watch-only 属于配置，
+观察 hash、时间、effect identity 和代数仍属于 polling lifecycle。删除 Python
+重复字段 allowlist 和 native 对 Monitor 的整体拒绝。配置保留观察历史，已观察的
+Monitor 不允许换 target；底层 import／observation codec 保留真实 caller，不作为
+raw update 开放。普通 CLI/API、显式清除、回执恢复和既有 active lease proof 已覆盖；
+owner-confirmed Chat 委托和 leased Monitor polling 仍是独立未闭合路径，配置文本
+不授予权限。
+
+本地默认化计划统一维护在 shared RFC 的
+[执行顺序](shared-goal-authority-state-provider-v0.zh-CN.md#执行交接与汇合顺序)：
+L1–L4 闭合 mutation 语义，L5 汇合 consumer，L6/L7 完成存储与 capture，L8 验证整
+Goal 迁移，L9 修改新 Goal 默认。每包用新的 owner 删除重复决策。无需等待完整 TS
+launcher：一个粗粒度 TS 请求拥有完整事务时，有限的 Python 输入／外部 effect
+adapter 可保留；不能把执行卡拆成不断新增 leaf RPC，也不能绕过仍在使用的 caller。
 
 **T2 — 闭合 monitor 写回及原子后续动作。**
 
