@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -41,8 +42,11 @@ SUPPORTED_ACTION_KINDS = {
     "monitor.create",
     "monitor.update",
     "gate.resolve",
+    "operation.execute",
 }
 _OPAQUE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_AUTHORITY_PRINCIPAL = re.compile(r"^[a-z][a-z0-9._-]{0,30}:[A-Za-z0-9._:-]{1,200}$")
 # Runtime Endpoint ids and durable Goal agent ids are chosen independently, so
 # a family token collapses both onto the host that produced them: Endpoint
 # `codex` has to resolve to a registered `codex-main-control`. Every host that
@@ -67,13 +71,18 @@ _MONITOR_CADENCE = re.compile(
 class ProtectedActionGate(ActionConflictError):
     """A typed preview is valid while its canonical write needs an explicit gate."""
 
-    def __init__(self, action_kind: str, *, gate: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self, action_kind: str, *, gate: Mapping[str, Any] | None = None
+    ) -> None:
         self.action_kind = action_kind
-        self.gate = dict(gate or {
-            "kind": "protected_action",
-            "summary": f"{action_kind} needs an explicit canonical LoopX write service.",
-            "next_action": "Keep this preview and complete the protected transition through its canonical LoopX service.",
-        })
+        self.gate = dict(
+            gate
+            or {
+                "kind": "protected_action",
+                "summary": f"{action_kind} needs an explicit canonical LoopX write service.",
+                "next_action": "Keep this preview and complete the protected transition through its canonical LoopX service.",
+            }
+        )
         self.proposal: dict[str, Any] | None = None
         super().__init__(self.gate["summary"])
 
@@ -93,7 +102,13 @@ def _text(value: Any, *, field: str, limit: int = 1000) -> str:
 
 
 def _digest(payload: Any) -> str:
-    stable = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    stable = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
 
@@ -139,7 +154,13 @@ def _monitor_metadata(parameters: Mapping[str, Any]) -> dict[str, str]:
     if stop_condition:
         if parse_timestamp(stop_condition) is not None:
             metadata["expires_at"] = stop_condition
-        elif stop_condition.lower() in {"watch_only", "watch-only", "watch", "continuous", "never"}:
+        elif stop_condition.lower() in {
+            "watch_only",
+            "watch-only",
+            "watch",
+            "continuous",
+            "never",
+        }:
             metadata["watch_only"] = "true"
     return metadata
 
@@ -183,7 +204,11 @@ class ChatActionService(
 
     def _goal(self, goal_id: str) -> dict[str, Any]:
         goal = next(
-            (goal for goal in registry_goals(self._registry()) if str(goal.get("id") or "") == goal_id),
+            (
+                goal
+                for goal in registry_goals(self._registry())
+                if str(goal.get("id") or "") == goal_id
+            ),
             None,
         )
         if goal is None:
@@ -217,7 +242,8 @@ class ChatActionService(
             (
                 item
                 for item in capabilities
-                if isinstance(item, Mapping) and str(item.get("agent_id") or "") == agent_id
+                if isinstance(item, Mapping)
+                and str(item.get("agent_id") or "") == agent_id
             ),
             None,
         )
@@ -230,8 +256,14 @@ class ChatActionService(
         if str(row.get("trust_scope") or "") not in {"read_only", "workspace_write"}:
             raise ValueError("selected Agent endpoint has an incompatible trust scope")
         endpoint_registry = getattr(self.runtime_controller, "endpoint_registry", None)
-        endpoint = endpoint_registry.get(agent_id) if endpoint_registry is not None else None
-        if endpoint is not None and project is not None and endpoint.location == "remote":
+        endpoint = (
+            endpoint_registry.get(agent_id) if endpoint_registry is not None else None
+        )
+        if (
+            endpoint is not None
+            and project is not None
+            and endpoint.location == "remote"
+        ):
             mapped = endpoint.mapped_work_dir(project)
             if mapped == project and not endpoint.workspace_mapping:
                 raise ValueError("remote Agent endpoint needs a workspace mapping")
@@ -274,7 +306,11 @@ class ChatActionService(
                 str(profile.get("adapter_kind") or ""),
                 str(profile.get("provider") or ""),
             }
-            if any(self._agent_family(alias) == endpoint_family for alias in aliases if alias):
+            if any(
+                self._agent_family(alias) == endpoint_family
+                for alias in aliases
+                if alias
+            ):
                 matches.append(agent_id)
         if len(matches) == 1:
             return matches[0]
@@ -329,11 +365,199 @@ class ChatActionService(
             raise ValueError(f"unknown typed action parameter: {sorted(unknown)[0]}")
         return dict(parameters)
 
-    def _normalize(self, action_kind: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    def _normalize(
+        self, action_kind: str, parameters: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if action_kind == "operation.execute":
+            values = self._allowed_parameters(
+                parameters,
+                allowed={
+                    "schema_version",
+                    "goal_id",
+                    "agent_id",
+                    "domain",
+                    "operation_kind",
+                    "operation_schema",
+                    "payload_ref",
+                    "payload",
+                    "payload_digest",
+                    "projection",
+                    "destination_account_ref",
+                    "expires_at",
+                    "authorized_principals",
+                    "executor",
+                },
+            )
+            if values.get("schema_version") != "loopx_operation_request_v0":
+                raise ValueError(
+                    "operation.execute requires loopx_operation_request_v0"
+                )
+            goal_id = _opaque(values.get("goal_id"), field="goal_id")
+            goal = self._goal(goal_id)
+            agent_id = _opaque(values.get("agent_id"), field="agent_id")
+            if agent_id not in registered_agent_ids_for_goal(goal):
+                raise ValueError("operation agent_id must be registered for the Goal")
+            payload = values.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ValueError("operation payload must be an object")
+            payload_digest = str(values.get("payload_digest") or "").strip()
+            if not _SHA256.fullmatch(payload_digest):
+                raise ValueError("operation payload_digest must be lowercase SHA-256")
+            if _digest(payload) != payload_digest:
+                raise ValueError("operation payload_digest does not match payload")
+
+            projection = values.get("projection")
+            if not isinstance(projection, Mapping):
+                raise ValueError("operation projection must be an object")
+            projection_values = self._allowed_parameters(
+                projection,
+                allowed={
+                    "schema_version",
+                    "title",
+                    "subtitle",
+                    "focus",
+                    "fields",
+                    "warning",
+                    "simulated",
+                },
+            )
+            if (
+                projection_values.get("schema_version")
+                != "loopx_operation_projection_v0"
+            ):
+                raise ValueError(
+                    "operation projection requires loopx_operation_projection_v0"
+                )
+            normalized_projection: dict[str, Any] = {
+                "schema_version": "loopx_operation_projection_v0",
+                "title": _text(
+                    projection_values.get("title"),
+                    field="projection.title",
+                    limit=80,
+                ),
+                "subtitle": _text(
+                    projection_values.get("subtitle"),
+                    field="projection.subtitle",
+                    limit=120,
+                ),
+                "focus": _text(
+                    projection_values.get("focus"),
+                    field="projection.focus",
+                    limit=120,
+                ),
+                "warning": _text(
+                    projection_values.get("warning"),
+                    field="projection.warning",
+                    limit=300,
+                ),
+            }
+            if not isinstance(projection_values.get("simulated"), bool):
+                raise ValueError("operation projection simulated must be true or false")
+            normalized_projection["simulated"] = projection_values["simulated"]
+            raw_fields = projection_values.get("fields")
+            if not isinstance(raw_fields, list) or not 1 <= len(raw_fields) <= 12:
+                raise ValueError("operation projection fields must contain 1-12 items")
+            normalized_fields: list[dict[str, str]] = []
+            for index, raw_field in enumerate(raw_fields):
+                if not isinstance(raw_field, Mapping) or set(raw_field) != {
+                    "label",
+                    "value",
+                }:
+                    raise ValueError(
+                        f"operation projection field {index + 1} is invalid"
+                    )
+                normalized_fields.append(
+                    {
+                        "label": _text(
+                            raw_field.get("label"),
+                            field=f"projection.fields[{index}].label",
+                            limit=40,
+                        ),
+                        "value": _text(
+                            raw_field.get("value"),
+                            field=f"projection.fields[{index}].value",
+                            limit=120,
+                        ),
+                    }
+                )
+            normalized_projection["fields"] = normalized_fields
+
+            raw_executor = values.get("executor")
+            if not isinstance(raw_executor, Mapping) or set(raw_executor) != {
+                "extension_id",
+                "protocol",
+                "permission",
+                "revision",
+            }:
+                raise ValueError("operation executor binding is invalid")
+            executor = {
+                field: _opaque(raw_executor.get(field), field=f"executor.{field}")
+                for field in (
+                    "extension_id",
+                    "protocol",
+                    "permission",
+                    "revision",
+                )
+            }
+            expires_at = parse_timestamp(
+                _text(values.get("expires_at"), field="expires_at", limit=80)
+            )
+            if expires_at is None:
+                raise ValueError("operation expires_at must be an ISO-8601 timestamp")
+            current = now_utc()
+            if not current < expires_at <= current + timedelta(days=7):
+                raise ValueError("operation expiry must be within the next seven days")
+            raw_principals = values.get("authorized_principals")
+            if (
+                not isinstance(raw_principals, list)
+                or not 1 <= len(raw_principals) <= 20
+            ):
+                raise ValueError(
+                    "operation authorized_principals must contain 1-20 identities"
+                )
+            principals: list[str] = []
+            for raw_principal in raw_principals:
+                principal = str(raw_principal or "").strip()
+                if not _AUTHORITY_PRINCIPAL.fullmatch(principal):
+                    raise ValueError(
+                        "operation authorized_principals must use provider:subject values"
+                    )
+                if principal not in principals:
+                    principals.append(principal)
+            return {
+                "schema_version": "loopx_operation_request_v0",
+                "goal_id": goal_id,
+                "agent_id": agent_id,
+                "domain": _opaque(values.get("domain"), field="domain"),
+                "operation_kind": _opaque(
+                    values.get("operation_kind"), field="operation_kind"
+                ),
+                "operation_schema": _opaque(
+                    values.get("operation_schema"), field="operation_schema"
+                ),
+                "payload_ref": _opaque(values.get("payload_ref"), field="payload_ref"),
+                "payload": dict(payload),
+                "payload_digest": payload_digest,
+                "projection": normalized_projection,
+                "projection_digest": _digest(normalized_projection),
+                "destination_account_ref": _opaque(
+                    values.get("destination_account_ref"),
+                    field="destination_account_ref",
+                ),
+                "expires_at": utc_isoformat(expires_at),
+                "authorized_principals": principals,
+                "executor": executor,
+            }
         if action_kind == "todo.create":
             values = self._allowed_parameters(
                 parameters,
-                allowed={"goal_id", "text", "agent_id", "endpoint_id", "start_execution"},
+                allowed={
+                    "goal_id",
+                    "text",
+                    "agent_id",
+                    "endpoint_id",
+                    "start_execution",
+                },
             )
             goal_id = _opaque(values.get("goal_id"), field="goal_id")
             self._goal(goal_id)
@@ -390,7 +614,14 @@ class ChatActionService(
                 "todo_id": _opaque(values.get("todo_id"), field="todo_id"),
             }
             operation = str(values.get("operation") or "edit").strip().lower()
-            if operation not in {"edit", "reassign", "block", "defer", "complete", "successor"}:
+            if operation not in {
+                "edit",
+                "reassign",
+                "block",
+                "defer",
+                "complete",
+                "successor",
+            }:
                 raise ValueError(
                     "todo.update operation must be edit, reassign, block, defer, complete, or successor"
                 )
@@ -400,7 +631,9 @@ class ChatActionService(
             if values.get("status"):
                 status = str(values["status"]).strip().lower()
                 if status not in {"open", "blocked", "deferred"}:
-                    raise ValueError("todo.update status must be open, blocked, or deferred")
+                    raise ValueError(
+                        "todo.update status must be open, blocked, or deferred"
+                    )
                 result["status"] = status
             if values.get("note"):
                 result["note"] = _text(values["note"], field="note", limit=600)
@@ -453,7 +686,9 @@ class ChatActionService(
                 "message": _text(values.get("message"), field="message", limit=4000),
             }
             if client_turn_id:
-                normalized["client_turn_id"] = _opaque(client_turn_id, field="client_turn_id")
+                normalized["client_turn_id"] = _opaque(
+                    client_turn_id, field="client_turn_id"
+                )
             return normalized
         if action_kind == "goal.create":
             values = self._allowed_parameters(
@@ -473,7 +708,10 @@ class ChatActionService(
                 },
             )
             goal_id = _opaque(values.get("goal_id"), field="goal_id")
-            if any(str(goal.get("id") or "") == goal_id for goal in registry_goals(self._registry())):
+            if any(
+                str(goal.get("id") or "") == goal_id
+                for goal in registry_goals(self._registry())
+            ):
                 raise ValueError("goal_id already exists in the active LoopX registry")
             result: dict[str, Any] = {
                 "goal_id": goal_id,
@@ -516,7 +754,8 @@ class ChatActionService(
                 if not isinstance(values["initial_todos"], list):
                     raise ValueError("initial_todos must be a list")
                 result["initial_todos"] = [
-                    _text(item, field="initial_todos", limit=400) for item in values["initial_todos"][:20]
+                    _text(item, field="initial_todos", limit=400)
+                    for item in values["initial_todos"][:20]
                 ]
             return result
         if action_kind == "goal.update":
@@ -543,7 +782,9 @@ class ChatActionService(
         if action_kind == "goal.lifecycle":
             return self._normalize_goal_lifecycle(parameters)
         if action_kind == "agent.bind":
-            values = self._allowed_parameters(parameters, allowed={"goal_id", "agent_id"})
+            values = self._allowed_parameters(
+                parameters, allowed={"goal_id", "agent_id"}
+            )
             goal_id = _opaque(values.get("goal_id"), field="goal_id")
             self._goal(goal_id)
             agent_id = _opaque(values.get("agent_id"), field="agent_id")
@@ -569,7 +810,9 @@ class ChatActionService(
             self._goal(goal_id)
             operation = str(values.get("operation") or "bind").strip().lower()
             if operation not in {"bind", "edit", "pause", "resume", "stop"}:
-                raise ValueError("heartbeat operation must be bind, edit, pause, resume, or stop")
+                raise ValueError(
+                    "heartbeat operation must be bind, edit, pause, resume, or stop"
+                )
             agent_id = _opaque(values.get("agent_id"), field="agent_id")
             self._agent_eligibility(agent_id)
             result: dict[str, Any] = {
@@ -580,7 +823,9 @@ class ChatActionService(
             if values.get("cadence"):
                 result["cadence"] = _normalize_cadence(values["cadence"])
             if values.get("timezone"):
-                result["timezone"] = _text(values["timezone"], field="timezone", limit=80)
+                result["timezone"] = _text(
+                    values["timezone"], field="timezone", limit=80
+                )
             if values.get("stop_condition"):
                 result["stop_condition"] = _text(
                     values["stop_condition"], field="stop_condition", limit=160
@@ -592,7 +837,9 @@ class ChatActionService(
             if operation == "bind" and not all(
                 result.get(field) for field in ("cadence", "timezone", "stop_condition")
             ):
-                raise ValueError("heartbeat bind requires cadence, timezone, and stop_condition")
+                raise ValueError(
+                    "heartbeat bind requires cadence, timezone, and stop_condition"
+                )
             if operation == "edit" and len(result) == 3:
                 raise ValueError("heartbeat edit requires a configuration change")
             return result
@@ -624,7 +871,11 @@ class ChatActionService(
             if stop_cond_raw:
                 raw_text = _text(stop_cond_raw, field="stop_condition", limit=160)
                 parsed_ts = parse_timestamp(raw_text)
-                result["stop_condition"] = utc_isoformat(parsed_ts) if parsed_ts is not None else raw_text.lower()
+                result["stop_condition"] = (
+                    utc_isoformat(parsed_ts)
+                    if parsed_ts is not None
+                    else raw_text.lower()
+                )
             if values.get("notification_rule"):
                 result["notification_rule"] = _text(
                     values["notification_rule"], field="notification_rule", limit=400
@@ -650,7 +901,9 @@ class ChatActionService(
             self._goal(goal_id)
             operation = str(values.get("operation") or "").strip().lower()
             if operation not in {"pause", "resume", "stop", "run_now", "edit"}:
-                raise ValueError("monitor.update operation must be pause, resume, stop, run_now, or edit")
+                raise ValueError(
+                    "monitor.update operation must be pause, resume, stop, run_now, or edit"
+                )
             result = {
                 "goal_id": goal_id,
                 "todo_id": _opaque(values.get("todo_id"), field="todo_id"),
@@ -668,13 +921,21 @@ class ChatActionService(
             if values.get("cadence"):
                 result["cadence"] = _normalize_cadence(values["cadence"])
             if values.get("stop_condition"):
-                raw_stop = _text(values["stop_condition"], field="stop_condition", limit=160)
+                raw_stop = _text(
+                    values["stop_condition"], field="stop_condition", limit=160
+                )
                 parsed_ts = parse_timestamp(raw_stop)
-                result["stop_condition"] = utc_isoformat(parsed_ts) if parsed_ts is not None else raw_stop.lower()
+                result["stop_condition"] = (
+                    utc_isoformat(parsed_ts)
+                    if parsed_ts is not None
+                    else raw_stop.lower()
+                )
             if values.get("session_id"):
                 result["session_id"] = _opaque(values["session_id"], field="session_id")
             if operation == "edit" and len(result) == 4:
-                raise ValueError("monitor edit requires target, target_key, cadence, or stop_condition")
+                raise ValueError(
+                    "monitor edit requires target, target_key, cadence, or stop_condition"
+                )
             return result
         if action_kind == "gate.resolve":
             values = self._allowed_parameters(
@@ -685,7 +946,9 @@ class ChatActionService(
             self._goal(goal_id)
             decision = str(values.get("decision") or "").strip().lower()
             if decision not in {"approve", "reject", "cancel", "defer"}:
-                raise ValueError("gate decision must be approve, reject, cancel, or defer")
+                raise ValueError(
+                    "gate decision must be approve, reject, cancel, or defer"
+                )
             result = {
                 "goal_id": goal_id,
                 "todo_id": _opaque(values.get("todo_id"), field="todo_id"),
@@ -716,7 +979,9 @@ class ChatActionService(
             }
         )
 
-    def _project_for_goal_create(self, proposal: Mapping[str, Any]) -> tuple[Path, dict[str, Any]]:
+    def _project_for_goal_create(
+        self, proposal: Mapping[str, Any]
+    ) -> tuple[Path, dict[str, Any]]:
         parameters = proposal.get("normalized_parameters")
         context = proposal.get("context")
         if not isinstance(parameters, Mapping) or not isinstance(context, Mapping):
@@ -737,7 +1002,8 @@ class ChatActionService(
             source_goal = goals[0]
         if source_goal is None and workspace_ref == "current":
             workspace_candidates = [
-                root for root in self.workspace_roots
+                root
+                for root in self.workspace_roots
                 if root.is_dir() and (root / ".git").exists()
             ]
             if len(workspace_candidates) == 1:
@@ -761,7 +1027,8 @@ class ChatActionService(
                 }
         elif source_goal is None and workspace_ref.startswith("workspace-"):
             workspace_candidates = [
-                root for root in self.workspace_roots
+                root
+                for root in self.workspace_roots
                 if root.is_dir() and (root / ".git").exists()
             ]
             selected = next(
@@ -788,7 +1055,8 @@ class ChatActionService(
                 }
                 for index, root in enumerate(
                     (
-                        root for root in self.workspace_roots
+                        root
+                        for root in self.workspace_roots
                         if root.is_dir() and (root / ".git").exists()
                     ),
                     start=1,
@@ -821,7 +1089,11 @@ class ChatActionService(
         self, proposal_id: str, proposal: dict[str, Any], parameters: dict[str, Any]
     ) -> dict[str, Any]:
         current_fingerprint = self._registry_fingerprint()
-        heartbeat = parameters.get("heartbeat") if isinstance(parameters.get("heartbeat"), dict) else {}
+        heartbeat = (
+            parameters.get("heartbeat")
+            if isinstance(parameters.get("heartbeat"), dict)
+            else {}
+        )
         goal_id = str(parameters["goal_id"])
         existing_goal = next(
             (
@@ -836,7 +1108,9 @@ class ChatActionService(
             source_goal = existing_goal
         else:
             project, source_goal = self._project_for_goal_create(proposal)
-        self._agent_eligibility(str(parameters.get("agent_id") or "codex"), project=project)
+        self._agent_eligibility(
+            str(parameters.get("agent_id") or "codex"), project=project
+        )
         self.store.save_checkpoint(
             proposal_id,
             step="workspace_validated",
@@ -847,7 +1121,9 @@ class ChatActionService(
         )
         recovering = existing_goal is not None
         if recovering:
-            existing_project = Path(str(existing_goal.get("repo") or "")).expanduser().resolve()
+            existing_project = (
+                Path(str(existing_goal.get("repo") or "")).expanduser().resolve()
+            )
             if existing_project != project:
                 raise ProtectedActionGate(
                     "goal.create",
@@ -886,7 +1162,10 @@ class ChatActionService(
                 parent_goal_id=str(source_goal.get("id") or "") or None,
                 state_file=None,
                 goal_doc=None,
-                adapter_kind=str((source_goal.get("adapter") or {}).get("kind") or "generic_project_goal_v0"),
+                adapter_kind=str(
+                    (source_goal.get("adapter") or {}).get("kind")
+                    or "generic_project_goal_v0"
+                ),
                 adapter_status="connected",
                 display_name=str(parameters.get("title") or "").strip() or None,
                 onboarding_connection_validation="provider-prevalidated",
@@ -930,7 +1209,11 @@ class ChatActionService(
             self.store.save_checkpoint(
                 proposal_id,
                 step="agent_bound",
-                receipt={"outcome": "agent_bound", "goal_id": goal_id, "agent_id": agent_id},
+                receipt={
+                    "outcome": "agent_bound",
+                    "goal_id": goal_id,
+                    "agent_id": agent_id,
+                },
             )
         todo_ids: list[str] = []
         for todo_text in parameters.get("initial_todos") or []:
@@ -954,7 +1237,9 @@ class ChatActionService(
         )
         projected = self._goal(goal_id)
         if agent_id and agent_id not in registered_agent_ids_for_goal(projected):
-            raise ValueError("Goal projection did not retain the selected Agent binding")
+            raise ValueError(
+                "Goal projection did not retain the selected Agent binding"
+            )
         turn_result: dict[str, Any] | None = None
         session_id = ""
         first_turn_gate: dict[str, Any] | None = None
@@ -1049,7 +1334,9 @@ class ChatActionService(
                 "operation": "bind",
                 "cadence": str(heartbeat.get("cadence") or "1d"),
                 "timezone": str(heartbeat.get("timezone") or "UTC"),
-                "stop_condition": str(parameters.get("stop_condition") or "goal_complete"),
+                "stop_condition": str(
+                    parameters.get("stop_condition") or "goal_complete"
+                ),
             }
             child_gate = self._heartbeat_gate(heartbeat_parameters).gate
             self.store.save_checkpoint(
@@ -1058,7 +1345,9 @@ class ChatActionService(
                 receipt={"outcome": "heartbeat_gate_ready", "gate": child_gate},
             )
         receipt = {
-            "receipt_id": _digest({"proposal_id": proposal_id, "goal_id": goal_id})[:32],
+            "receipt_id": _digest({"proposal_id": proposal_id, "goal_id": goal_id})[
+                :32
+            ],
             "outcome": "goal_created",
             "projection_verified": True,
             "resource_ids": {
@@ -1087,9 +1376,17 @@ class ChatActionService(
         goal_id = str(parameters["goal_id"])
         agent_id = str(parameters["agent_id"])
         existing = registered_agent_ids_for_goal(self._goal(goal_id))
-        if agent_id in existing and current_fingerprint != proposal.get("expected_state_fingerprint"):
+        if agent_id in existing and current_fingerprint != proposal.get(
+            "expected_state_fingerprint"
+        ):
             receipt = {
-                "receipt_id": _digest({"proposal_id": proposal_id, "goal_id": goal_id, "agent_id": agent_id})[:32],
+                "receipt_id": _digest(
+                    {
+                        "proposal_id": proposal_id,
+                        "goal_id": goal_id,
+                        "agent_id": agent_id,
+                    }
+                )[:32],
                 "outcome": "agent_already_bound",
                 "projection_verified": True,
                 "resource_ids": {"goal_id": goal_id, "agent_id": agent_id},
@@ -1116,8 +1413,12 @@ class ChatActionService(
         if agent_id not in projected:
             raise ValueError("Agent binding was not visible in the Goal projection")
         receipt = {
-            "receipt_id": _digest({"proposal_id": proposal_id, "goal_id": goal_id, "agent_id": agent_id})[:32],
-            "outcome": "agent_bound" if result.get("changed") else "agent_already_bound",
+            "receipt_id": _digest(
+                {"proposal_id": proposal_id, "goal_id": goal_id, "agent_id": agent_id}
+            )[:32],
+            "outcome": "agent_bound"
+            if result.get("changed")
+            else "agent_already_bound",
             "projection_verified": True,
             "resource_ids": {"goal_id": goal_id, "agent_id": agent_id},
         }
@@ -1140,7 +1441,12 @@ class ChatActionService(
         )
         operation = str(parameters.get("operation") or "bind")
         gate_receipt = _digest(
-            {"goal_id": goal_id, "agent_id": agent_id, "operation": operation, "packet": packet}
+            {
+                "goal_id": goal_id,
+                "agent_id": agent_id,
+                "operation": operation,
+                "packet": packet,
+            }
         )[:32]
         return ProtectedActionGate(
             "heartbeat.bind",
@@ -1182,11 +1488,14 @@ class ChatActionService(
         if (
             stop_condition
             and parse_timestamp(stop_condition) is None
-            and stop_condition.lower() not in {"watch_only", "watch-only", "watch", "continuous", "never"}
+            and stop_condition.lower()
+            not in {"watch_only", "watch-only", "watch", "continuous", "never"}
         ):
             resume_when = stop_condition
         metadata = _monitor_metadata(parameters)
-        if not (metadata.get("expires_at") or resume_when or metadata.get("watch_only")):
+        if not (
+            metadata.get("expires_at") or resume_when or metadata.get("watch_only")
+        ):
             metadata["watch_only"] = "true"
         result = add_goal_todo(
             registry_path=self.registry_path,
@@ -1203,10 +1512,18 @@ class ChatActionService(
         )
         todo_id = _opaque(result.get("todo_id"), field="todo_id")
         receipt = {
-            "receipt_id": _digest({"proposal_id": proposal_id, "goal_id": goal_id, "todo_id": todo_id})[:32],
-            "outcome": "monitor_already_exists" if result.get("already_exists") else "monitor_created",
+            "receipt_id": _digest(
+                {"proposal_id": proposal_id, "goal_id": goal_id, "todo_id": todo_id}
+            )[:32],
+            "outcome": "monitor_already_exists"
+            if result.get("already_exists")
+            else "monitor_created",
             "projection_verified": True,
-            "resource_ids": {"goal_id": goal_id, "todo_id": todo_id, "agent_id": agent_id},
+            "resource_ids": {
+                "goal_id": goal_id,
+                "todo_id": todo_id,
+                "agent_id": agent_id,
+            },
         }
         stored = self.store.apply(
             proposal_id, current_state_fingerprint=current_fingerprint, receipt=receipt
@@ -1242,7 +1559,14 @@ class ChatActionService(
             eligibility = self._agent_eligibility(agent_id, project=project)
         else:
             eligibility = None
-        if action_kind == "todo.create":
+        if action_kind == "operation.execute":
+            fingerprint = _digest(normalized)
+            evidence = [
+                "The provider-neutral operation envelope and immutable digests validated.",
+                "Execution remains unavailable until an authenticated transport claims this exact request.",
+            ]
+            permission = "protected"
+        elif action_kind == "todo.create":
             canonical_preview = build_todo_review_preview(
                 registry_path=self.registry_path,
                 goal_id=normalized["goal_id"],
@@ -1262,10 +1586,16 @@ class ChatActionService(
                 canonical_preview = self._run_todo_update(normalized, dry_run=True)
                 if canonical_preview.get("ok") is not True:
                     raise ValueError(
-                        str(canonical_preview.get("error") or "Todo transition failed canonical dry-run validation")
+                        str(
+                            canonical_preview.get("error")
+                            or "Todo transition failed canonical dry-run validation"
+                        )
                     )
             goal_fingerprint = self._goal_state_fingerprint(normalized["goal_id"])
-            if action_kind == "monitor.update" and normalized.get("operation") == "run_now":
+            if (
+                action_kind == "monitor.update"
+                and normalized.get("operation") == "run_now"
+            ):
                 session_id = normalized.get("session_id")
                 fingerprint = (
                     _digest(
@@ -1289,7 +1619,9 @@ class ChatActionService(
             permission = "durable_write"
         else:
             fingerprint = self._registry_fingerprint()
-            evidence = ["Canonical LoopX contracts validated the bounded request shape."]
+            evidence = [
+                "Canonical LoopX contracts validated the bounded request shape."
+            ]
             permission = "durable_write"
         if eligibility is not None:
             evidence.extend(
@@ -1306,10 +1638,20 @@ class ChatActionService(
             expected_state_fingerprint=fingerprint,
             permission_classification=permission,
             validation_evidence=evidence,
-            available_transitions=["apply", "cancel"],
-            idempotency_key=_opaque(request.get("idempotency_key"), field="idempotency_key"),
+            available_transitions=(
+                ["cancel"]
+                if action_kind == "operation.execute"
+                else ["apply", "cancel"]
+            ),
+            idempotency_key=_opaque(
+                request.get("idempotency_key"), field="idempotency_key"
+            ),
         )
-        return proposal
+        return (
+            self.store.arm_operation(str(proposal["proposal_id"]))
+            if action_kind == "operation.execute"
+            else proposal
+        )
 
     def load(self, proposal_id: str) -> dict[str, Any] | None:
         return self.store.load(proposal_id)
@@ -1318,15 +1660,44 @@ class ChatActionService(
         return self.store.cancel(proposal_id)
 
     def reject(self, proposal_id: str) -> dict[str, Any]:
+        proposal = self.store.load(proposal_id)
+        if proposal is not None and proposal.get("action_kind") == "operation.execute":
+            raise ProtectedActionGate(
+                "operation.execute",
+                gate={
+                    "kind": "authenticated_operation_decision_required",
+                    "summary": "Operation decisions must come from a bound authenticated surface.",
+                    "next_action": "Use the original operation card to confirm or reject this request.",
+                },
+            )
         return self.store.mark_rejected(proposal_id)
 
     def defer(self, proposal_id: str) -> dict[str, Any]:
+        proposal = self.store.load(proposal_id)
+        if proposal is not None and proposal.get("action_kind") == "operation.execute":
+            raise ProtectedActionGate(
+                "operation.execute",
+                gate={
+                    "kind": "authenticated_operation_decision_required",
+                    "summary": "Operation decisions must come from a bound authenticated surface.",
+                    "next_action": "Use the original operation card to decide this request.",
+                },
+            )
         return self.store.mark_deferred(proposal_id)
 
     def regenerate(self, proposal_id: str) -> dict[str, Any]:
         proposal = self.store.load(proposal_id)
         if proposal is None:
             raise KeyError("typed Chat action proposal was not found")
+        if proposal.get("action_kind") == "operation.execute":
+            raise ProtectedActionGate(
+                "operation.execute",
+                gate={
+                    "kind": "new_operation_required",
+                    "summary": "Material operation changes require a new immutable request.",
+                    "next_action": "Prepare a new operation instead of regenerating this one.",
+                },
+            )
         if proposal.get("status") not in {"stale", "failed", "gated", "rejected"}:
             raise ActionConflictError(
                 f"proposal in {proposal.get('status')} state cannot be regenerated"
@@ -1349,7 +1720,19 @@ class ChatActionService(
         if proposal is None:
             raise KeyError("typed Chat action proposal was not found")
         if proposal.get("status") == "applied":
-            return {"proposal": proposal, "turn": self._turn_from_receipt(proposal.get("receipt"))}
+            return {
+                "proposal": proposal,
+                "turn": self._turn_from_receipt(proposal.get("receipt")),
+            }
+        if proposal.get("action_kind") == "operation.execute":
+            raise ProtectedActionGate(
+                "operation.execute",
+                gate={
+                    "kind": "authenticated_operation_confirmation_required",
+                    "summary": "A local apply request cannot attest a human operation confirmation.",
+                    "next_action": "Confirm the exact request through its authenticated operation card.",
+                },
+            )
         proposal = self.store.start_apply(proposal_id)
         action_kind = str(proposal.get("action_kind") or "")
         parameters = proposal.get("normalized_parameters")
@@ -1388,7 +1771,9 @@ class ChatActionService(
                 canonical_receipt = todo_step.get("canonical_receipt")
                 if not isinstance(canonical_receipt, dict):
                     raise ValueError("Todo creation checkpoint is malformed")
-                current_fingerprint = str(proposal.get("expected_state_fingerprint") or "")
+                current_fingerprint = str(
+                    proposal.get("expected_state_fingerprint") or ""
+                )
             else:
                 current = build_todo_review_preview(
                     registry_path=self.registry_path,
@@ -1454,8 +1839,12 @@ class ChatActionService(
                     parameters.get("endpoint_id") or parameters["agent_id"]
                 )
                 execution_step = steps.get("execution_started")
-                if isinstance(execution_step, dict) and execution_step.get("session_id"):
-                    session_id = _opaque(execution_step.get("session_id"), field="session_id")
+                if isinstance(execution_step, dict) and execution_step.get(
+                    "session_id"
+                ):
+                    session_id = _opaque(
+                        execution_step.get("session_id"), field="session_id"
+                    )
                     turn_id = _opaque(execution_step.get("turn_id"), field="turn_id")
                     created = False
                 else:
@@ -1520,7 +1909,9 @@ class ChatActionService(
             project = Path(str(goal.get("repo") or ".")).expanduser().resolve()
             if not project.is_dir():
                 raise ValueError("the Goal project root is unavailable")
-            client_turn_id = str(parameters.get("client_turn_id") or f"action-{proposal_id}")
+            client_turn_id = str(
+                parameters.get("client_turn_id") or f"action-{proposal_id}"
+            )
             turn, created = self.runtime_controller.submit_turn(
                 session_id=str(parameters["session_id"]),
                 client_turn_id=client_turn_id,
@@ -1531,7 +1922,11 @@ class ChatActionService(
             turn_id = _opaque(turn.get("turn_id"), field="turn_id")
             receipt = {
                 "receipt_id": _digest(
-                    {"proposal_id": proposal_id, "session_id": parameters["session_id"], "turn_id": turn_id}
+                    {
+                        "proposal_id": proposal_id,
+                        "session_id": parameters["session_id"],
+                        "turn_id": turn_id,
+                    }
                 )[:32],
                 "outcome": "turn_created" if created else "turn_already_exists",
                 "projection_verified": True,
@@ -1548,20 +1943,29 @@ class ChatActionService(
             )
             return {
                 "proposal": stored,
-                "turn": {"turn_id": turn_id, "status": str(turn.get("status") or "queued"), "created": created},
+                "turn": {
+                    "turn_id": turn_id,
+                    "status": str(turn.get("status") or "queued"),
+                    "created": created,
+                },
             }
         raise ValueError(f"unsupported action_kind: {action_kind}")
 
     @staticmethod
     def _turn_from_receipt(receipt: Any) -> dict[str, Any] | None:
-        if not isinstance(receipt, dict) or not isinstance(receipt.get("resource_ids"), dict):
+        if not isinstance(receipt, dict) or not isinstance(
+            receipt.get("resource_ids"), dict
+        ):
             return None
         resource_ids = receipt["resource_ids"]
         if not resource_ids.get("turn_id"):
             return None
         return {
-            "session_id": str(resource_ids["session_id"]) if resource_ids.get("session_id") else None,
+            "session_id": str(resource_ids["session_id"])
+            if resource_ids.get("session_id")
+            else None,
             "turn_id": str(resource_ids["turn_id"]),
             "status": "accepted",
-            "created": receipt.get("outcome") in {"turn_created", "task_execution_started"},
+            "created": receipt.get("outcome")
+            in {"turn_created", "task_execution_started"},
         }

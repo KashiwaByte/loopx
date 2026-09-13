@@ -215,7 +215,8 @@ export type WorkspaceActionPreview = {
     | "monitor.create"
     | "monitor.update"
     | "gate.resolve"
-    | "run.correct";
+    | "run.correct"
+    | "operation.execute";
   agentLabel?: string;
   fields: Array<{ key: string; label: string; value: string }>;
   goalId?: string;

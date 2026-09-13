@@ -2105,7 +2105,7 @@ def test_cli_global_registry_routes_binding_to_source_registry_from_any_cwd(
     assert not (unrelated_two / ".loopx").exists()
 
 
-def test_cli_prepare_payload_uses_source_registry_runtime(
+def test_cli_deliver_operation_uses_source_registry_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2131,11 +2131,6 @@ def test_cli_prepare_payload_uses_source_registry_runtime(
         }
     ]
     global_registry_path.write_text(json.dumps(global_registry), encoding="utf-8")
-    request_path = tmp_path / "payload.json"
-    request_path.write_text(
-        json.dumps({"schema_version": "goal_channel_frozen_payload_request_v0"}),
-        encoding="utf-8",
-    )
     captured: dict[str, Any] = {}
     printed: dict[str, Any] = {}
 
@@ -2146,14 +2141,13 @@ def test_cli_prepare_payload_uses_source_registry_runtime(
     )
     monkeypatch.setattr(goal_channel_cli, "_binding_target_name", lambda *args: "")
 
-    def capture_prepare(request: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    def capture_delivery(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
-        captured["request"] = request
         return {
             "ok": True,
             "goal_id": GOAL_ID,
             "provider": "lark",
-            "operation": "prepare_payload",
+            "operation": "deliver_operation_card",
             "status": "pending_execution",
             "execute": False,
             "external_write_performed": False,
@@ -2162,15 +2156,14 @@ def test_cli_prepare_payload_uses_source_registry_runtime(
         }
 
     monkeypatch.setattr(
-        goal_channel_cli, "prepare_goal_channel_payload", capture_prepare
+        goal_channel_cli, "deliver_goal_channel_operation_card", capture_delivery
     )
     result = goal_channel_cli.handle_goal_channel_command(
         argparse.Namespace(
             command="goal-channel",
-            goal_channel_command="prepare-payload",
+            goal_channel_command="deliver-operation",
             goal_id=GOAL_ID,
-            agent_id="codex-public-delivery",
-            request_json=str(request_path),
+            proposal_id="proposal-public-fixture",
             binding_path=None,
             target_path=None,
             execute=False,
@@ -2185,17 +2178,15 @@ def test_cli_prepare_payload_uses_source_registry_runtime(
 
     assert result == 0
     assert printed["ok"] is True
-    assert captured["registry_path"] == source_registry_path.resolve()
-    assert captured["runtime_root"] == source_runtime.resolve()
+    assert captured["proposal_id"] == "proposal-public-fixture"
+    assert captured["action_store_root"] == source_runtime / "chat" / "actions"
+    assert captured["runtime_root"] == source_runtime
     assert captured["binding_path"] == project / ".loopx" / "goal-channel.json"
     assert (
         captured["target_path"]
         == (source_runtime / "goal-channel-targets.json").resolve()
     )
-    assert captured["agent_id"] == "codex-public-delivery"
-    assert captured["request"] == {
-        "schema_version": "goal_channel_frozen_payload_request_v0"
-    }
+    assert captured["expected_goal_id"] == GOAL_ID
 
 
 @pytest.mark.parametrize(

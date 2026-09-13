@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+
+from ..chat_action_store import ChatActionStore
+from ..chat_actions import ChatActionService
 
 from ..extensions.lark import (
     LARK_EXTENSION_ID,
@@ -15,12 +19,11 @@ from ..extensions.lark.goal_channel import (
     configure_lark_goal_channel_automation,
     default_goal_channel_binding_path,
     default_goal_channel_target_path,
-    deliver_goal_channel_payload,
+    deliver_goal_channel_operation_card,
     doctor_lark_goal_channel,
     goal_channel_target_for_name,
     list_goal_channel_targets,
     notify_lark_goal_channel_gate,
-    prepare_goal_channel_payload,
     read_goal_channel_binding,
     read_goal_channel_targets,
     setup_lark_goal_channel,
@@ -205,28 +208,30 @@ def register_goal_channel_commands(
     notify.add_argument("--execute", action="store_true")
 
     prepare = sub.add_parser(
-        "prepare-payload",
+        "prepare-operation",
         help=(
-            "Freeze one capability-owned public payload and create its exact "
-            "approval successor. Dry-run unless --execute."
+            "Validate and persist one canonical typed-operation proposal. "
+            "Dry-run unless --execute."
         ),
     )
     add_subcommand_format(prepare)
     _add_common_args(prepare)
     prepare.add_argument("--agent-id", required=True)
+    prepare.add_argument("--summary", required=True)
+    prepare.add_argument("--idempotency-key", required=True)
     prepare.add_argument("--request-json", required=True)
     prepare.add_argument("--execute", action="store_true")
 
     deliver = sub.add_parser(
-        "deliver-payload",
+        "deliver-operation",
         help=(
-            "Deliver one exactly approved frozen payload through the bound "
-            "project Bot. Dry-run unless --execute."
+            "Deliver one canonical typed-operation confirmation card through "
+            "the bound project Bot. Dry-run unless --execute."
         ),
     )
     add_subcommand_format(deliver)
     _add_common_args(deliver)
-    deliver.add_argument("--receipt-id", required=True)
+    deliver.add_argument("--proposal-id", required=True)
     deliver.add_argument("--execute", action="store_true")
 
     register_goal_channel_runtime_commands(sub, add_subcommand_format)
@@ -436,6 +441,82 @@ def _quota_packet(
     )
 
 
+def _prepare_goal_channel_operation(
+    *,
+    registry_path: Path,
+    runtime_root: Path,
+    goal_id: str,
+    agent_id: str,
+    summary: str,
+    idempotency_key: str,
+    request_path: Path,
+    execute: bool,
+) -> dict[str, Any]:
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    if not isinstance(request, dict):
+        raise ValueError("operation request JSON must be an object")
+    parameters = {**request, "goal_id": goal_id, "agent_id": agent_id}
+
+    def preview(store_root: Path) -> dict[str, Any]:
+        return ChatActionService(
+            store=ChatActionStore(store_root),
+            registry_path=registry_path,
+        ).preview(
+            {
+                "action_kind": "operation.execute",
+                "summary": summary,
+                "idempotency_key": idempotency_key,
+                "context": {"kind": "goal", "goal_id": goal_id},
+                "normalized_parameters": parameters,
+            }
+        )
+
+    durable_store_root = runtime_root / "chat" / "actions"
+    if execute:
+        proposal = preview(durable_store_root)
+        readback = ChatActionStore(durable_store_root).load(
+            str(proposal["proposal_id"])
+        )
+        readback_verified = bool(
+            readback is not None
+            and readback.get("request_digest") == proposal.get("request_digest")
+            and readback.get("operation") == proposal.get("operation")
+        )
+        if not readback_verified:
+            raise ValueError("operation proposal durable readback did not match")
+    else:
+        with tempfile.TemporaryDirectory(prefix="loopx-operation-preview-") as root:
+            proposal = preview(Path(root) / "actions")
+        readback_verified = False
+    operation = proposal.get("operation")
+    if not isinstance(operation, Mapping):
+        raise ValueError("operation preview did not produce a canonical envelope")
+    return operation_packet(
+        ok=True,
+        goal_id=goal_id,
+        operation="prepare_operation",
+        execute=execute,
+        status="awaiting_confirmation" if execute else "preview_ready",
+        public_summary=(
+            "persisted one canonical operation awaiting card delivery"
+            if execute
+            else "validated one canonical operation proposal without persistence"
+        ),
+        external_write_performed=False,
+        readback_verified=readback_verified,
+        idempotency_key=idempotency_key,
+        receipt_id=str(proposal["proposal_id"]) if execute else None,
+        details={
+            "operation_id": str(proposal["proposal_id"]) if execute else None,
+            "lifecycle_state": operation["lifecycle_state"],
+            "confirmation_digest": operation["confirmation_digest"],
+            "payload_digest": operation["payload_digest"],
+            "projection_digest": operation["projection_digest"],
+            "durable_proposal_written": execute,
+        },
+    )
+
+
 def handle_goal_channel_command(
     args: argparse.Namespace,
     *,
@@ -599,7 +680,7 @@ def handle_goal_channel_command(
                     goal_id=goal_id,
                     binding_path_arg=getattr(args, "binding_path", None),
                 )
-                if command in {"prepare-payload", "deliver-payload"}:
+                if command == "deliver-operation":
                     target_path = _target_path(args, source_runtime_root)
                 target_name = str(getattr(args, "target", None) or "")
                 if not target_name:
@@ -692,31 +773,25 @@ def handle_goal_channel_command(
                         ),
                         execute=execute,
                     )
-                elif command == "prepare-payload":
-                    request_path = Path(str(args.request_json)).expanduser()
-                    request = json.loads(request_path.read_text(encoding="utf-8"))
-                    if not isinstance(request, dict):
-                        raise ValueError(
-                            "Goal Channel payload request must be an object"
-                        )
-                    payload = prepare_goal_channel_payload(
-                        request,
+                elif command == "prepare-operation":
+                    payload = _prepare_goal_channel_operation(
                         registry_path=source_registry_path,
                         runtime_root=source_runtime_root,
-                        binding_path=binding_path,
-                        target_path=target_path,
                         goal_id=goal_id,
                         agent_id=args.agent_id,
+                        summary=args.summary,
+                        idempotency_key=args.idempotency_key,
+                        request_path=Path(str(args.request_json)).expanduser(),
                         execute=execute,
                     )
-                elif command == "deliver-payload":
-                    payload = deliver_goal_channel_payload(
-                        receipt_id=args.receipt_id,
-                        registry_path=source_registry_path,
+                elif command == "deliver-operation":
+                    payload = deliver_goal_channel_operation_card(
+                        proposal_id=args.proposal_id,
+                        action_store_root=source_runtime_root / "chat" / "actions",
                         runtime_root=source_runtime_root,
                         binding_path=binding_path,
                         target_path=target_path,
-                        goal_id=goal_id,
+                        expected_goal_id=goal_id,
                         execute=execute,
                     )
                 else:

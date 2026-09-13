@@ -11,7 +11,7 @@ evidence, or recovery authority.
 | `lark-event-inbox` | Collect, inspect, reply to, and acknowledge bounded project feedback | [`event_inbox.py`](event_inbox.py), [`event_collector.py`](event_collector.py) |
 | `lark-reviewer-notification` | Send and verify a reviewer notification through a project-dedicated Lark app | [`reviewer_notification.py`](reviewer_notification.py) |
 | `lark-kanban-projection` | Render public-safe LoopX todo and control-plane projections into Lark Base | [`presentation/kanban.py`](presentation/kanban.py) |
-| `lark-goal-channel` | Bind one verified Lark group and projection surface to one LoopX goal, including exact-approval delivery of frozen capability payloads | [`goal_channel.py`](goal_channel.py), [`goal_channel_payload.py`](goal_channel_payload.py) |
+| `lark-goal-channel` | Bind one verified Lark group and projection surface to one LoopX goal, including authenticated confirmation cards for canonical typed operations | [`goal_channel.py`](goal_channel.py), [`goal_channel_operation.py`](goal_channel_operation.py) |
 | `lark-explore-projection` | Project canonical Explore results into Lark tables, cards, and whiteboards | [`presentation/explore_results.py`](presentation/explore_results.py) |
 | `lark-periodic-report-announcement` | Deliver a periodic report through the current Goal Channel's verified project Bot while mentioning only recipients selected by its typed audience plan | [`periodic_report_delivery.py`](periodic_report_delivery.py) |
 | `lark-periodic-report-source` | Bind and settle one exact Agent-selected Goal Channel source for a typed report action without classifying message text | [`periodic_report_request.py`](periodic_report_request.py) |
@@ -71,56 +71,64 @@ collector, processing, reply, reaction, and acknowledgement lifecycle. The
 [Lark Kanban integration guide](../../../docs/integrations/lark-kanban-control-plane-adapter.md)
 documents projection configuration and lineage.
 
-### Exact-approval capability payloads
+### Human-confirmed typed operations
 
-Any capability may hand LoopX one already public-safe Markdown result without
-becoming coupled to Lark. The capability owns domain semantics, citations, and
-redaction, and attests `public_safe=true`; LoopX freezes the final card, stores
-it only in owner-local runtime state, and creates a blocked delivery Todo plus
-an exact user gate. The public Todo stores only an opaque receipt id, digest,
-and decision scope.
-
-Prepare a payload from a local request file:
+The Goal Channel may project a canonical `operation.execute` typed-action
+proposal as one non-forwardable Card 2.0 confirmation card. The operation
+envelope, lifecycle, exact digests, authorized operator set, claim, and outcome
+remain in the Core Chat action store; Lark owns only authenticated transport,
+callback provenance checks, and result-card readback. It does not create a
+second User Todo or approval ledger.
 
 ```bash
-loopx goal-channel prepare-payload \
+loopx goal-channel prepare-operation \
   --goal-id <goal-id> \
   --agent-id <registered-agent-id> \
-  --request-json <payload-request.json>
+  --summary "Review one simulated order" \
+  --idempotency-key <stable-request-key> \
+  --request-json <loopx-operation-request.json> \
+  --execute
 
-loopx goal-channel prepare-payload \
+loopx goal-channel deliver-operation \
   --goal-id <goal-id> \
-  --agent-id <registered-agent-id> \
-  --request-json <payload-request.json> \
+  --proposal-id <typed-action-proposal-id>
+
+loopx goal-channel deliver-operation \
+  --goal-id <goal-id> \
+  --proposal-id <typed-action-proposal-id> \
   --execute
 ```
 
-The request uses `goal_channel_frozen_payload_request_v0` and supplies one
-capability id, opaque payload ref, title, Markdown body, footer, and an exact
-`public_claim:action:<scope>` decision scope. It cannot select a chat, profile,
-Bot, sender, or mention recipient. Complete the generated user gate with
-`decision_outcome=approve`, then preview and execute the receipt returned by
-prepare:
+The request file contains the provider-neutral `loopx_operation_request_v0`
+fields except `goal_id` and `agent_id`, which come from the CLI scope. Preparing
+uses the canonical Chat action service and store; it does not create a Lark- or
+finance-owned approval ledger. Preview mode validates in an ephemeral store and
+writes nothing durable.
 
-```bash
-loopx goal-channel deliver-payload \
-  --goal-id <goal-id> \
-  --receipt-id gcp_<digest>
+Enable `operation_callbacks.enabled=true` in a v1 event collector config and
+install that collector with the pinned LoopX runtime root. The service starts a
+separate `card.action.trigger` consumer beside message capture because each
+`lark-cli event consume` process owns one EventKey. Collector status reports
+listener health separately from real callback evidence; a healthy process does
+not prove the application console is configured to deliver callbacks.
 
-loopx goal-channel deliver-payload \
-  --goal-id <goal-id> \
-  --receipt-id gcp_<digest> \
-  --execute
-```
-
-Delivery fails before any provider write when the exact gate is not approved,
-the frozen card changes, or the Goal Channel binding changes. Execution uses
-only the bound project Bot, scans complete Bot-visible history for the exact
-card before sending, and requires provider-native sender, chat, and content
-readback. An exact retry therefore reuses the existing message instead of
-sending a duplicate. Periodic reports keep their separate standing-subscription
-authority and existing two-announcement workflow; they are not routed through
-this one-shot approval contract.
+On click, LoopX verifies the original App, chat, message, immutable card digest,
+operator allowlist, tenant membership, expiry, and globally unique event id.
+Confirmation atomically claims the operation before dispatch. Exact event
+replay reuses the existing claim/outcome, and a per-operation dispatch lock
+prevents concurrent copies of that callback from invoking the executor twice.
+The result update is not complete until the same card is read back with the
+expected App, chat, message, and content digest. If that update is acknowledged
+but cannot be verified, the canonical outcome remains durable and the collector
+retries only the result-card patch after restart. A restart may also resume one
+already-claimed request only when its exact executor permission, operation kind,
+and destination prove that it is the bundled non-effectful M1 simulation; live or
+otherwise effectful domain operations are never retried. Callback health,
+recovered simulations, and recovered-result counts remain separate. The initial
+finance executor is a
+simulation-only optional package: it has no venue, signer, wallet, transfer, or
+live-order permission. A successful SDK callback acknowledgement is never
+reported as the domain execution receipt.
 
 ### Bounded group-history catch-up
 

@@ -26,6 +26,7 @@ const dashboard = source("../../views/dashboard-page.tsx");
 const tasks = source("./goal-tasks-view.tsx");
 const status = source("../../data/status.ts");
 const chatData = source("../../data/chat.ts");
+const actionReview = source("./action-review-plan.ts");
 
 assert.match(model, /kind: "todo"/, "Todo has its own drawer selection");
 for (const field of ["dependencies", "nextTransition", "ownerLabel", "todoId", "taskClass"]) {
@@ -90,6 +91,14 @@ assert.doesNotMatch(router, /protectedActionIntent|protectedActionRules/, "Free-
 assert.doesNotMatch(router, /"goal\.update"/, "The browser Router type cannot emit a protected Goal action");
 assert.doesNotMatch(page, /intentRoute\.actionKind === "goal\.update"|workspace-protected-/, "Free-text send has no legacy protected-action preview branch");
 assert.match(chatData, /protected_action: protectedActionProposalSchema/, "Chat accepts one narrow semantic protected-action proposal");
+assert.match(chatData, /"operation\.execute"/, "Dashboard accepts canonical operation proposals");
+assert.match(chatData, /operation: typedOperationEnvelopeSchema\.nullable\(\)\.optional\(\)/, "Dashboard retains the canonical operation lifecycle");
+assert.match(page, /function operationProposalFields/, "Operation details have a dedicated safe projection");
+assert.doesNotMatch(page.match(/function operationProposalFields[\s\S]*?\n\}/)?.[0] ?? "", /authorized_principals|payload_digest|parameters\.payload/, "Operation details do not expose private authority or inline payloads");
+assert.match(page, /t\("proposal\.primary\.operationGroup"\)/, "Operation confirmation routes users to the bound group");
+assert.match(chatData, /result_delivery:/, "Dashboard retains operation result-delivery readback");
+assert.match(actionReview, /operation\.execute" \|\| proposal\.operation\?\.result_delivery != null/, "An operation is not complete in the Dashboard until result delivery is verified");
+assert.match(drawer, /selection\.item\.actionKind !== "operation\.execute"/, "Dashboard hides generic local controls for authenticated group operations");
 assert.match(dashboard, /response\.protected_action/, "Agent semantic protected intent is projected only after the Chat response");
 assert.match(dashboard, /normalizedMessage\.includes\(normalizedTarget\)/, "A model-invented protected target cannot reach typed preview");
 assert.match(page, /if \(semanticPreview\) await createPreview\(semanticPreview\)/, "Semantic intent still enters the typed preview boundary");

@@ -294,7 +294,28 @@ export const typedActionKindSchema = z.enum([
   "monitor.update",
   "gate.resolve",
   "run.correct",
+  "operation.execute",
 ]);
+
+const typedOperationEnvelopeSchema = z.object({
+  schema_version: z.literal("loopx_operation_envelope_v0"),
+  lifecycle_state: z.enum([
+    "prepared",
+    "awaiting_confirmation",
+    "claimed",
+    "outcome_observed",
+  ]),
+  operation_id: z.string().min(1),
+  confirmation_digest: z.string().min(1),
+  payload_digest: z.string().min(1),
+  projection_digest: z.string().min(1),
+  expires_at: z.string().min(1),
+  delivery: z.record(z.string(), z.unknown()).nullable(),
+  confirmation: z.record(z.string(), z.unknown()).nullable(),
+  claim: z.record(z.string(), z.unknown()).nullable(),
+  outcome: z.record(z.string(), z.unknown()).nullable(),
+  result_delivery: z.record(z.string(), z.unknown()).nullable().optional(),
+}).passthrough();
 
 export const typedActionProposalSchema = z.object({
   schema_version: z.literal("loopx_chat_action_proposal_v1"),
@@ -315,6 +336,7 @@ export const typedActionProposalSchema = z.object({
   error: z.record(z.string(), z.unknown()).nullable().optional(),
   checkpoint: z.record(z.string(), z.unknown()).nullable().optional(),
   regenerated_from: z.string().nullable().optional(),
+  operation: typedOperationEnvelopeSchema.nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),
 });

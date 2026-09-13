@@ -154,35 +154,39 @@ def test_shared_target_cli_parses_add_setup_and_bounded_attach() -> None:
             "goal-second-public-fixture",
         ]
     )
-    prepare = parser.parse_args(
-        [
-            "goal-channel",
-            "prepare-payload",
-            "--goal-id",
-            GOAL_ID,
-            "--agent-id",
-            "codex-public-delivery",
-            "--request-json",
-            "payload.json",
-        ]
-    )
     deliver = parser.parse_args(
         [
             "goal-channel",
-            "deliver-payload",
+            "deliver-operation",
             "--goal-id",
             GOAL_ID,
-            "--receipt-id",
-            "gcp_0123456789abcdef01234567",
+            "--proposal-id",
+            "proposal-public-fixture",
+        ]
+    )
+    prepare = parser.parse_args(
+        [
+            "goal-channel",
+            "prepare-operation",
+            "--goal-id",
+            GOAL_ID,
+            "--agent-id",
+            "finance-agent",
+            "--summary",
+            "Review the simulated order",
+            "--idempotency-key",
+            "finance-order-fixture",
+            "--request-json",
+            "operation.json",
         ]
     )
 
     assert target.goal_channel_target_command == "add"
     assert setup.target == "loopx-dev"
     assert attach.goal_id == [GOAL_ID, "goal-second-public-fixture"]
-    assert prepare.agent_id == "codex-public-delivery"
-    assert prepare.request_json == "payload.json"
-    assert deliver.receipt_id == "gcp_0123456789abcdef01234567"
+    assert deliver.proposal_id == "proposal-public-fixture"
+    assert prepare.agent_id == "finance-agent"
+    assert prepare.idempotency_key == "finance-order-fixture"
 
     bounded = goal_channel_cli._attach_goals(
         registry={},
