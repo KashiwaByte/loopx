@@ -288,13 +288,16 @@ function filterStatusFixtureToScope(fixture, statusGeneration, scope) {
   }
 }
 
-export async function installApi(page, { goalSubagentConfigurationEnabled = true } = {}) {
+export async function installApi(page, { goalSubagentConfigurationEnabled = true, initialActionProposals = [] } = {}) {
   let turnCounter = 0;
   const runtime = page.__loopxRuntime ??= { actionProposals: new Map(), goalSubagentConfigurations: new Map(), larkConnections: [], messages: new Map(), sessions: new Map(), turnMessages: new Map() };
   const actionProposals = runtime.actionProposals;
   const sessions = runtime.sessions;
   const messages = runtime.messages;
   const turnMessages = runtime.turnMessages;
+  for (const proposal of initialActionProposals) {
+    actionProposals.set(proposal.proposal_id, structuredClone(proposal));
+  }
   // Like ChatStore, persist completion before serving it and replay after disconnect.
   const completedTurns = runtime.completedTurns ??= new Map();
   const finishTurn = (sessionId, turnId, answer, protectedAction = null) => {

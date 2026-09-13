@@ -600,7 +600,11 @@ function workspaceProposal(proposal: TypedActionProposal, t: WorkspaceTranslate)
       summary: String(proposal.gate.summary ?? t("proposal.gate.default")),
     } : undefined,
     primaryLabel: proposal.action_kind === "operation.execute"
-      ? t("proposal.primary.operationGroup")
+      ? proposal.operation?.lifecycle_state === "outcome_observed"
+        ? proposal.operation.result_delivery
+          ? t("proposal.primary.operationResultVerified")
+          : t("proposal.primary.operationResultPending")
+        : t("proposal.primary.operationGroup")
       : proposal.action_kind === "goal.create" ? t("proposal.primary.goalCreate")
       : proposal.action_kind === "goal.lifecycle" && lifecycleOperation === "stop"
         ? t("proposal.primary.lifecycleStop")
@@ -611,7 +615,11 @@ function workspaceProposal(proposal: TypedActionProposal, t: WorkspaceTranslate)
       : proposal.action_kind === "todo.create" && proposal.normalized_parameters.start_execution === true
         ? t("proposal.primary.todoStart")
         : t("proposal.primary.apply"),
-    status: proposal.status === "applied" && reviewPlan.interaction !== "completed" ? "error" : proposalStatus(proposal.status),
+    status: proposal.status === "applied"
+      && proposal.action_kind !== "operation.execute"
+      && reviewPlan.interaction !== "completed"
+      ? "error"
+      : proposalStatus(proposal.status),
     title: localizedSummary,
   };
 }
@@ -1050,7 +1058,8 @@ export function PersonalWorkspacePage({
       .then((stored) => {
         if (cancelled) return;
         const restored = Object.fromEntries(stored
-          .filter((proposal) => ["ready", "gated", "deferred", "applying"].includes(proposal.status))
+          .filter((proposal) => ["preview_ready", "gated", "deferred", "applying"].includes(proposal.status)
+            || (proposal.action_kind === "operation.execute" && proposal.status === "applied"))
           .map((proposal) => {
             const projected = workspaceProposal(proposal, t);
             return [projected.previewId, projected];

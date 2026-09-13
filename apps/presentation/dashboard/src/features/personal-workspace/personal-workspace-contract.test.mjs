@@ -98,6 +98,8 @@ assert.doesNotMatch(page.match(/function operationProposalFields[\s\S]*?\n\}/)?.
 assert.match(page, /t\("proposal\.primary\.operationGroup"\)/, "Operation confirmation routes users to the bound group");
 assert.match(chatData, /result_delivery:/, "Dashboard retains operation result-delivery readback");
 assert.match(actionReview, /operation\.execute" \|\| proposal\.operation\?\.result_delivery != null/, "An operation is not complete in the Dashboard until result delivery is verified");
+assert.match(page, /operation\.execute" && proposal\.status === "applied"/, "Dashboard restores terminal operation receipts from the canonical action store");
+assert.match(page, /proposal\.action_kind !== "operation\.execute"[\s\S]*reviewPlan\.interaction !== "completed"/, "Pending operation result-card readback remains visible instead of becoming a generic apply error");
 assert.match(drawer, /selection\.item\.actionKind !== "operation\.execute"/, "Dashboard hides generic local controls for authenticated group operations");
 assert.match(dashboard, /response\.protected_action/, "Agent semantic protected intent is projected only after the Chat response");
 assert.match(dashboard, /normalizedMessage\.includes\(normalizedTarget\)/, "A model-invented protected target cannot reach typed preview");
