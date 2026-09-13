@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from ...file_lock import exclusive_file_lock
 from .goal_channel_contracts import binding_for_goal, read_goal_channel_binding
 from .goal_channel_delivery_contract import goal_channel_delivery_route
 from .goal_channel_targets import (
@@ -189,12 +191,16 @@ class GoalChannelMessageDeliverySession:
         *,
         goal_id: str,
         binding: Mapping[str, Any],
+        binding_lock_path: Path,
+        target_lock_path: Path,
         history_start_at: str,
         resolve_current_binding: Callable[[], Mapping[str, Any]],
         runner: CommandRunner,
     ) -> None:
         self.goal_id = goal_id
         self.binding = dict(binding)
+        self.binding_lock_path = binding_lock_path
+        self.target_lock_path = target_lock_path
         self.history_start_at = history_start_at
         self.resolve_current_binding = resolve_current_binding
         self.runner = runner
@@ -290,39 +296,60 @@ class GoalChannelMessageDeliverySession:
     def send(
         self, card: Mapping[str, Any], key: str, route: Mapping[str, Any]
     ) -> Mapping[str, Any]:
-        if dict(self.resolve_current_binding()) != self.binding:
-            raise ValueError("Goal Channel delivery binding drifted")
-        existing_message_id = self._existing_message(card, route)
-        if existing_message_id is not None:
-            self.expected_cards.setdefault(existing_message_id, []).append(dict(card))
-            return {
-                "message_id": existing_message_id,
-                "semantic_dedupe_status": "existing_exact_message",
-                "external_write_performed": False,
-            }
-        result = call(
-            self.runner,
-            lark_args(
-                cli_bin=str(route["cli_bin"]),
-                profile=str(route["sender_profile"]),
-                tail=[
-                    "im",
-                    "+messages-send",
-                    "--chat-id",
-                    str(route["chat_id"]),
-                    "--content",
-                    json.dumps(card, ensure_ascii=False, separators=(",", ":")),
-                    "--msg-type",
-                    "interactive",
-                    "--idempotency-key",
-                    f"loopx-{hashlib.sha256(key.encode()).hexdigest()[:32]}",
-                    "--as",
-                    "bot",
-                    "--format",
-                    "json",
-                ],
-            ),
-        )
+        with ExitStack() as locks:
+            # Match the writer order used by Goal Topic connect: the binding
+            # transaction owns the outer lock and target mutation the inner one.
+            locks.enter_context(
+                exclusive_file_lock(
+                    self.binding_lock_path, operation="lark_goal_channel_delivery"
+                )
+            )
+            if self.target_lock_path != self.binding_lock_path:
+                locks.enter_context(
+                    exclusive_file_lock(
+                        self.target_lock_path, operation="lark_goal_channel_delivery"
+                    )
+                )
+            if dict(self.resolve_current_binding()) != self.binding:
+                raise ValueError("Goal Channel delivery binding drifted")
+            existing_message_id = self._existing_message(card, route)
+            # The history lookup is a provider round trip. Recheck under the same
+            # lock used by binding writers immediately before either accepting
+            # the dedupe result or performing the external write.
+            if dict(self.resolve_current_binding()) != self.binding:
+                raise ValueError("Goal Channel delivery binding drifted")
+            if existing_message_id is not None:
+                self.expected_cards.setdefault(existing_message_id, []).append(
+                    dict(card)
+                )
+                return {
+                    "message_id": existing_message_id,
+                    "semantic_dedupe_status": "existing_exact_message",
+                    "external_write_performed": False,
+                }
+            result = call(
+                self.runner,
+                lark_args(
+                    cli_bin=str(route["cli_bin"]),
+                    profile=str(route["sender_profile"]),
+                    tail=[
+                        "im",
+                        "+messages-send",
+                        "--chat-id",
+                        str(route["chat_id"]),
+                        "--content",
+                        json.dumps(card, ensure_ascii=False, separators=(",", ":")),
+                        "--msg-type",
+                        "interactive",
+                        "--idempotency-key",
+                        f"loopx-{hashlib.sha256(key.encode()).hexdigest()[:32]}",
+                        "--as",
+                        "bot",
+                        "--format",
+                        "json",
+                    ],
+                ),
+            )
         message_id = find_first_string(
             json_payload(result), {"message_id"}, MESSAGE_ID_PATTERN
         )

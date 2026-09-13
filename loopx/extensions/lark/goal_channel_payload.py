@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ...control_plane.todos.contract import normalize_todo_decision_scope
+from ...control_plane.todos.contract import (
+    normalize_todo_claimed_by,
+    normalize_todo_decision_scope,
+)
 from ...todos import add_goal_todo, complete_goal_todo, list_goal_todos
 from .goal_channel_contracts import operation_packet
 from .goal_channel_delivery_contract import (
@@ -195,19 +198,22 @@ def prepare_goal_channel_payload(
 ) -> dict[str, Any]:
     """Freeze one capability-owned public payload behind an exact user gate."""
 
+    normalized_agent_id = normalize_todo_claimed_by(agent_id)
+    if normalized_agent_id is None:
+        raise ValueError("agent_id must be a valid Todo agent id")
     normalized = _normalized_request(request)
     binding = resolve_bound_goal_channel(
         binding_path=binding_path,
         target_path=target_path,
         goal_id=goal_id,
-        agent_id=agent_id,
+        agent_id=normalized_agent_id,
     )
     binding_digest = goal_channel_binding_digest(binding)
     receipt_id = _receipt_identity(
         goal_id=goal_id,
         request=normalized,
         binding_digest=binding_digest,
-        agent_id=agent_id,
+        agent_id=normalized_agent_id,
     )
     receipt_path = _receipt_path(runtime_root, goal_id, receipt_id)
     if receipt_path.exists():
@@ -251,8 +257,8 @@ def prepare_goal_channel_payload(
         required_capabilities=["network", "lark_bot_message_write"],
         target_capabilities=[normalized["capability_id"], "goal_channel"],
         required_decision_scopes=[scope_text],
-        claimed_by=agent_id,
-        agent_id=agent_id,
+        claimed_by=normalized_agent_id,
+        agent_id=normalized_agent_id,
         runtime_root_arg=str(runtime_root),
         dry_run=not execute,
     )
@@ -271,10 +277,10 @@ def prepare_goal_channel_payload(
         task_class="user_gate",
         action_kind="approve_goal_channel_payload",
         decision_scope=scope_text,
-        bound_agent=agent_id,
-        blocks_agent=agent_id,
+        bound_agent=normalized_agent_id,
+        blocks_agent=normalized_agent_id,
         unblocks_todo_id=str(delivery["todo_id"]),
-        agent_id=agent_id,
+        agent_id=normalized_agent_id,
         runtime_root_arg=str(runtime_root),
         dry_run=not execute,
     )
@@ -287,7 +293,7 @@ def prepare_goal_channel_payload(
         "payload_digest": normalized["payload_digest"],
         "decision_scope": normalized["decision_scope"],
         "binding_digest": binding_digest,
-        "agent_id": agent_id,
+        "agent_id": normalized_agent_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "title": normalized["title"],
         "markdown": normalized["markdown"],
@@ -442,6 +448,8 @@ def deliver_goal_channel_payload(
     session = GoalChannelMessageDeliverySession(
         goal_id=goal_id,
         binding=binding,
+        binding_lock_path=binding_path,
+        target_lock_path=target_path,
         history_start_at=str(receipt["created_at"]),
         resolve_current_binding=resolve_current,
         runner=runner,

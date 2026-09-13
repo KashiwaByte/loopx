@@ -392,6 +392,8 @@ def deliver_periodic_report_to_goal_channel(
     session = GoalChannelMessageDeliverySession(
         goal_id=goal_id,
         binding=binding,
+        binding_lock_path=default_goal_channel_binding_path(registry_path),
+        target_lock_path=default_goal_channel_target_path(runtime_root),
         history_start_at=str(generation["document"]["generated_at"]),
         resolve_current_binding=lambda: _resolved_goal_channel_binding(
             registry_path=registry_path,

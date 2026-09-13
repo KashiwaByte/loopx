@@ -331,6 +331,118 @@ def test_approved_delivery_is_verified_and_exact_replay_is_deduped(
     assert len([args for args in calls if "+messages-send" in args]) == 1
 
 
+def test_prepare_normalizes_agent_id_before_receipt_and_todos(tmp_path: Path) -> None:
+    registry_path, runtime_root, binding_path, target_path = _fixture(tmp_path)
+    prepared = prepare_goal_channel_payload(
+        _request(),
+        registry_path=registry_path,
+        runtime_root=runtime_root,
+        binding_path=binding_path,
+        target_path=target_path,
+        goal_id=GOAL_ID,
+        agent_id="  CODEX PUBLIC DELIVERY  ",
+        execute=True,
+    )
+    receipt_path = (
+        runtime_root
+        / "goals"
+        / GOAL_ID
+        / "goal_channel_payloads"
+        / f"{prepared['receipt_id']}.json"
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["agent_id"] == AGENT_ID
+
+    complete_goal_todo(
+        registry_path=registry_path,
+        runtime_root_arg=str(runtime_root),
+        goal_id=GOAL_ID,
+        todo_id=prepared["details"]["approval_todo_id"],
+        role="user",
+        decision_outcome="approve",
+        evidence="owner approved the normalized agent fixture",
+    )
+    result = deliver_goal_channel_payload(
+        receipt_id=prepared["receipt_id"],
+        registry_path=registry_path,
+        runtime_root=runtime_root,
+        binding_path=binding_path,
+        target_path=target_path,
+        goal_id=GOAL_ID,
+        execute=True,
+        runner=_runner([]),
+    )
+    assert result["status"] == "satisfied"
+
+
+def test_binding_mutation_during_history_scan_fails_before_send(tmp_path: Path) -> None:
+    registry_path, runtime_root, binding_path, target_path = _fixture(tmp_path)
+    prepared = _prepare_and_approve(
+        registry_path, runtime_root, binding_path, target_path
+    )
+    calls: list[list[str]] = []
+    base_runner = _runner(calls)
+
+    def mutate_during_history(
+        args: list[str], cwd: Path | None, timeout: float | None
+    ) -> dict[str, Any]:
+        result = base_runner(args, cwd, timeout)
+        if "+chat-messages-list" in args:
+            binding = read_goal_channel_binding(binding_path)
+            binding["bindings"][GOAL_ID]["enabled"] = False
+            write_goal_channel_binding(binding_path, binding)
+        return result
+
+    with pytest.raises(ValueError, match="Goal Channel delivery"):
+        deliver_goal_channel_payload(
+            receipt_id=prepared["receipt_id"],
+            registry_path=registry_path,
+            runtime_root=runtime_root,
+            binding_path=binding_path,
+            target_path=target_path,
+            goal_id=GOAL_ID,
+            execute=True,
+            runner=mutate_during_history,
+        )
+
+    assert not any("+messages-send" in args for args in calls)
+
+
+def test_target_mutation_during_history_scan_fails_before_send(tmp_path: Path) -> None:
+    registry_path, runtime_root, binding_path, target_path = _fixture(tmp_path)
+    prepared = _prepare_and_approve(
+        registry_path, runtime_root, binding_path, target_path
+    )
+    calls: list[list[str]] = []
+    base_runner = _runner(calls)
+
+    def mutate_during_history(
+        args: list[str], cwd: Path | None, timeout: float | None
+    ) -> dict[str, Any]:
+        result = base_runner(args, cwd, timeout)
+        if "+chat-messages-list" in args:
+            targets = json.loads(target_path.read_text(encoding="utf-8"))
+            targets["targets"]["public-route"]["channel"]["chat_id"] = (
+                "oc_changed_fixture"
+            )
+            target_path.write_text(json.dumps(targets), encoding="utf-8")
+        return result
+
+    with pytest.raises(ValueError, match="Goal Channel delivery binding drifted"):
+        deliver_goal_channel_payload(
+            receipt_id=prepared["receipt_id"],
+            registry_path=registry_path,
+            runtime_root=runtime_root,
+            binding_path=binding_path,
+            target_path=target_path,
+            goal_id=GOAL_ID,
+            execute=True,
+            runner=mutate_during_history,
+        )
+
+    assert not any("+messages-send" in args for args in calls)
+
+
 def test_approved_payload_and_route_drift_fail_before_send(tmp_path: Path) -> None:
     registry_path, runtime_root, binding_path, target_path = _fixture(tmp_path)
     prepared = _prepare_and_approve(
