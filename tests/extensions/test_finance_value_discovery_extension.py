@@ -404,6 +404,67 @@ def test_manifest_and_paypal_example_preserve_extension_boundary() -> None:
     assert packet["boundary"]["continuous_watch_allowed"] is False
 
 
+def _research_source_period_metric() -> dict[str, object]:
+    return {
+        "metric_id": "synthetic-value-capture",
+        "label": "Synthetic value capture",
+        "event_namespace": "synthetic.period.metric",
+        "event_id": "value-capture-2026w02",
+        "event_at": "2026-01-14T23:00:00Z",
+        "instrument_id": "SYNTH-USD",
+        "scope_id": "synthetic-scope",
+        "period_start": "2026-01-08",
+        "period_end": "2026-01-14",
+        "source_state": "ok",
+        "value": 0.0,
+        "unit": "USD",
+        "metric_basis": "realized_cash",
+        "metric_semantics": "cash_delta",
+        "value_origin": "source_reported",
+        "value_precision": "exact",
+        "observation_authority": "source_reported_exact",
+        "sign_basis": "account_cash_change",
+        "fee_inclusion": "not_applicable",
+        "account_scope": "not_applicable",
+        "account_value_role": "not_applicable",
+        "includes_isolated_margin": False,
+        "expected_components": ["primary", "overlap"],
+        "observed_components": ["primary", "overlap"],
+        "double_counted_components": ["overlap"],
+        "numerator_scope": ["primary"],
+        "denominator_scope": [],
+        "lineage_id": "synthetic-upstream-week",
+        "source_ref": "source:synthetic-value-capture",
+        "methodology_state": "verified",
+        "anomaly_state": "clear",
+    }
+
+
+def _research_spot_market_identity() -> dict[str, object]:
+    return {
+        "pairs": [
+            {
+                "name": "SYNTH-PAIR",
+                "asset_indexes": [4, 0],
+                "is_canonical": False,
+                "source_ref": "source:synthetic-pair",
+            }
+        ],
+        "tokens": [
+            {"index": 0, "symbol": "USDC", "source_ref": "source:synthetic-usdc"},
+            {"index": 4, "symbol": "SYN", "source_ref": "source:synthetic-syn"},
+        ],
+        "contexts": [
+            {
+                "coin": "SYNTH-PAIR",
+                "observed_at": "2026-01-15T12:00:00Z",
+                "mark_price": 4.25,
+                "source_ref": "source:synthetic-context",
+            }
+        ],
+    }
+
+
 def test_finance_research_dashboard_mapping_preserves_research_truth() -> None:
     packet = build_finance_research_dashboard_packet(_research_dashboard_input())
     assert packet == build_finance_research_dashboard_packet(
@@ -447,6 +508,37 @@ def test_finance_research_dashboard_mapping_preserves_research_truth() -> None:
     serialized = json.dumps(packet, sort_keys=True)
     assert "supporting_evidence" not in serialized
     assert "frozen_at" not in serialized
+
+
+def test_dashboard_cli_and_lark_card_share_period_metric_projection(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    payload = _research_dashboard_input()
+    payload["source_period_metrics"] = [_research_source_period_metric()]
+    payload["spot_market_identity"] = _research_spot_market_identity()
+    packet = build_finance_research_dashboard_packet(payload)
+    metric = packet["presentation_projection"]["view"]["source_period_metrics"][0]
+    assert metric["coverage_state"] == "complete"
+    assert metric["value"] == 0.0
+    assert metric["double_counted_components"] == ["overlap"]
+    assert metric["ready_eligible"] is False
+    market = packet["presentation_projection"]["view"]["spot_market_identity"][
+        "markets"
+    ][0]
+    assert market["context_coin"] == "SYNTH-PAIR"
+    assert market["base_asset"] == {"index": 4, "symbol": "SYN"}
+
+    input_path = tmp_path / "research-dashboard.json"
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert run(["render-lark-card", "--input-json", str(input_path)]) == 0
+    card = json.loads(capsys.readouterr().out)
+    markdown = card["elements"][0]["text"]["content"]
+    assert "0 USD" in markdown
+    assert "Excluded double-counted components: overlap" in markdown
+    assert "Spot identity joins" in markdown
+    assert "SYN / USDC" in markdown
+    assert "evidence-only" in markdown
 
 
 @pytest.mark.parametrize(
@@ -863,9 +955,10 @@ def test_declared_minimum_core_without_presentation_api_can_import_and_doctor(
         check=False,
     )
     assert doctor.returncode == 1
-    assert "does not provide the extension presentation API" in json.loads(
-        doctor.stdout
-    )["error"]
+    assert (
+        "does not provide the extension presentation API"
+        in json.loads(doctor.stdout)["error"]
+    )
 
 
 def test_dashboard_requires_only_public_presentation_validator_api(

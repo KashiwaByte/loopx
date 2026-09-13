@@ -74,6 +74,37 @@ recommendation.
 fully synthetic public-safe example. It deliberately reports zero validated
 company alpha and an unchanged active method.
 
+Extension 0.6.0 adds the optional `source_period_metrics` section to that same
+view. It records calendar-period completeness, realized-versus-estimated basis,
+value origin and precision, numerator/denominator scope, component coverage,
+double-count exclusions, upstream lineage, methodology verification, and
+anomaly state. The validator recomputes coverage and lineage status. Missing is
+`null`, not zero; repeated wrappers around one upstream period are not
+independent evidence; and every row remains evidence-only with
+`ready_eligible=false`. Deduplication uses the full event namespace/id/time,
+instrument, anonymous scope, period, semantics and unit. Explicit authority
+makes fill-derived VWAP outrank rounded position entry. Signed cash change,
+cumulative funding cost and inclusive fill fees stay distinct; unified-account
+NAV, venue composition, venue withdrawable and external-asset coverage cannot
+be added or relabeled as one another.
+
+0.6.0 版本在同一规范 view 中增加可选的 `source_period_metrics`：显式记录
+日历周期完整性、实际现金/估算口径、数值来源与精度、分子分母范围、子项
+覆盖、double-count 排除、上游 lineage、方法学互证和异常状态。完整性与
+lineage 去重由校验器重算；缺失保持 `null` 而不是 0；同一上游周期的多层
+封装不算独立证据；复合事件 identity 包含 namespace/id/time、instrument、
+匿名 scope、周期、语义和单位，fill-derived VWAP 显式高于 rounded entry。
+现金变化、累计 funding、已含 builder 的 fill fee，以及 unified-account NAV、
+venue 组成/可取金额、外部资产覆盖均保持不同口径；每行固定
+`ready_eligible=false`，不能自动升级 ready。
+
+The same view can carry an optional spot identity join. Contexts are matched by
+pair name and assets by explicit token indexes; input order is irrelevant and
+missing, duplicate or unmatched identities fail closed. Noncanonical naming is
+shown without inferring fraud or backing. 中文：spot context 按 pair name、
+资产按 token index 连接，不做 positional zip；`is_canonical=false` 不被解释
+为欺诈或无 backing。
+
 After separately installing, enabling, and doctor-validating the extension,
 publish a validated local projection with:
 
@@ -91,6 +122,22 @@ doctor-stale, missing, or revision-mismatched extension projection is hidden
 from status and Dashboard surfaces. Publishing does not install or enable the
 extension, activate or replace a Finance method, spend LoopX quota, consume a
 learning queue, create a trade, or place an order.
+
+Render the exact published-view semantics for an authorized Lark delivery
+without sending anything:
+
+```bash
+loopx-finance-value-discovery render-lark-card \
+  --input-json owner-research.json
+```
+
+The command returns a card payload only. Existing Goal Channel routing and
+message authority still own any external send. Dashboard and Lark both consume
+the same validated Finance view; neither reads raw provider material or carries
+a separate readiness rule. 中文：该命令只生成卡片、不发消息；外部发送仍需
+既有 Goal Channel 授权。停用可继续使用
+`loopx extension disable loopx-finance-value-discovery --execute`；若只回退
+期次指标，删除可选字段并重新发布旧 view 即可。
 
 ## Worked Method: How PayPal Surfaced
 

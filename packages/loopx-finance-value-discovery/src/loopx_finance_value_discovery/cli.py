@@ -121,6 +121,15 @@ def _direct_parser() -> argparse.ArgumentParser:
     pack_replay_parser.add_argument("--input-json", required=True)
     pack_replay_parser.add_argument("--expected-json", required=True)
     sub.add_parser("list-packs", help="List bundled industry metric packs.")
+    lark_parser = sub.add_parser(
+        "render-lark-card",
+        help="Render source-period evidence from the canonical dashboard view.",
+    )
+    lark_parser.add_argument(
+        "--input-json",
+        required=True,
+        help=f"Path to a {FINANCE_RESEARCH_DASHBOARD_INPUT_SCHEMA_VERSION} object.",
+    )
     return parser
 
 
@@ -182,10 +191,21 @@ def run(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "list-packs":
             packet = list_finance_metric_packs()
+        elif args.command == "render-lark-card":
+            from .dashboard import build_finance_research_dashboard_packet
+            from .lark_projection import build_source_period_metrics_lark_card
+
+            dashboard = build_finance_research_dashboard_packet(
+                _load_json(args.input_json)
+            )
+            packet = build_source_period_metrics_lark_card(
+                dashboard["presentation_projection"]["view"]
+            )
         else:
             raise ValueError(
                 "use --doctor, reduce, evaluate, replay, attribute-beta, "
-                "replay-beta, evaluate-pack, replay-pack, or list-packs"
+                "replay-beta, evaluate-pack, replay-pack, list-packs, or "
+                "render-lark-card"
             )
     except Exception as exc:
         print(json.dumps(_error_packet(exc), indent=2, sort_keys=True))
