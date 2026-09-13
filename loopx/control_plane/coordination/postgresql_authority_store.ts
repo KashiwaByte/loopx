@@ -20,9 +20,9 @@ import {
   requireAuthorityStoreId,
 } from "./authority_store_codec.ts";
 
-const POSTGRESQL_STORE_IDENTITY_PATTERN = /^postgresql:[0-9a-f]{32}$/;
+export const POSTGRESQL_STORE_IDENTITY_PATTERN = /^postgresql:[0-9a-f]{32}$/;
 const POSTGRESQL_PROVIDER_REVISION_PATTERN = /^postgresql:([0-9a-f]{32}):([1-9]\d*)$/;
-const POSTGRESQL_SCHEMA_VERSION = "loopx_postgresql_authority_store_v0";
+export const POSTGRESQL_SCHEMA_VERSION = "loopx_postgresql_authority_store_v0";
 export const DEFAULT_POSTGRESQL_MAX_COMMIT_BYTES = 16 * 1024 * 1024;
 
 /**
@@ -405,6 +405,135 @@ export async function installPostgreSqlAuthorityStoreSchema(
       releaseError = (await rollback(connection)) ?? undefined;
     }
     throw error;
+  } finally {
+    await connection.release(releaseError);
+  }
+}
+
+export type PostgreSqlAuthorityIdentityRotationResult =
+  | {
+    status: "rotated";
+    previous_store_identity: string;
+    store_identity: string;
+  }
+  | {
+    status: "ambiguous";
+    reason_code: "store_identity_rotation_outcome_unknown";
+    reason: string;
+  }
+  | {
+    status: "failed";
+    reason_code:
+      | "invalid_store_identity"
+      | "store_identity_unchanged"
+      | "provider_connection_unavailable"
+      | "store_identity_mismatch"
+      | "provider_protocol_violation"
+      | "provider_transaction_failed";
+    reason: string;
+  };
+
+class PostgreSqlAuthorityIdentityRotationRejected extends Error {
+  readonly reasonCode: "store_identity_mismatch";
+
+  constructor(reason: string) {
+    super(reason);
+    this.name = "PostgreSqlAuthorityIdentityRotationRejected";
+    this.reasonCode = "store_identity_mismatch";
+  }
+}
+
+/**
+ * Rotate the service-managed database incarnation after a restore. Revision
+ * tokens minted before the rotation become unusable because their opaque
+ * identity no longer matches; no Goal or operation state is rewritten.
+ */
+export async function rotatePostgreSqlAuthorityStoreIdentity(
+  database: PostgreSqlAuthorityDatabase,
+  expectedStoreIdentity: string,
+  nextStoreIdentity: string,
+): Promise<PostgreSqlAuthorityIdentityRotationResult> {
+  if (!POSTGRESQL_STORE_IDENTITY_PATTERN.test(expectedStoreIdentity) ||
+      !POSTGRESQL_STORE_IDENTITY_PATTERN.test(nextStoreIdentity)) {
+    return {
+      status: "failed",
+      reason_code: "invalid_store_identity",
+      reason: "PostgreSQL store identities must match postgresql:<32 lowercase hex>",
+    };
+  }
+  if (expectedStoreIdentity === nextStoreIdentity) {
+    return {
+      status: "failed",
+      reason_code: "store_identity_unchanged",
+      reason: "PostgreSQL store identity rotation requires a new incarnation",
+    };
+  }
+
+  let connection: PostgreSqlAuthorityConnection;
+  try {
+    connection = await database.connect();
+  } catch {
+    return {
+      status: "failed",
+      reason_code: "provider_connection_unavailable",
+      reason: "PostgreSQL connection was unavailable before identity rotation",
+    };
+  }
+
+  let commitStarted = false;
+  let releaseError: Error | undefined;
+  try {
+    await connection.query("BEGIN");
+    const metadata = oneRow(await connection.query(
+      `SELECT schema_version, store_identity
+       FROM loopx_control_plane.authority_store_metadata
+       WHERE singleton = TRUE
+       FOR UPDATE`,
+    ), "PostgreSQL store metadata");
+    if (
+      metadata === null || metadata.schema_version !== POSTGRESQL_SCHEMA_VERSION ||
+      !POSTGRESQL_STORE_IDENTITY_PATTERN.test(String(metadata.store_identity)) ||
+      metadata.store_identity !== expectedStoreIdentity
+    ) {
+      throw new PostgreSqlAuthorityIdentityRotationRejected(
+        "PostgreSQL store identity does not match the expected database incarnation",
+      );
+    }
+    await connection.query(
+      `UPDATE loopx_control_plane.authority_store_metadata
+       SET store_identity = $1
+       WHERE singleton = TRUE`,
+      [nextStoreIdentity],
+    );
+    commitStarted = true;
+    await connection.query("COMMIT");
+    return {
+      status: "rotated",
+      previous_store_identity: expectedStoreIdentity,
+      store_identity: nextStoreIdentity,
+    };
+  } catch (error) {
+    if (commitStarted) {
+      releaseError = asError(error);
+      return {
+        status: "ambiguous",
+        reason_code: "store_identity_rotation_outcome_unknown",
+        reason: "PostgreSQL identity rotation outcome is unknown; read store metadata before retrying",
+      };
+    }
+    releaseError = (await rollback(connection)) ?? undefined;
+    if (error instanceof PostgreSqlAuthorityIdentityRotationRejected) {
+      return {status: "failed", reason_code: error.reasonCode, reason: error.message};
+    }
+    return {
+      status: "failed",
+      reason_code: error instanceof AuthorityStoreProtocolError
+        ? "provider_protocol_violation"
+        : "provider_transaction_failed",
+      reason: error instanceof AuthorityStoreProtocolError
+        ? error.message
+        : "PostgreSQL identity rotation failed before COMMIT",
+    };
   } finally {
     await connection.release(releaseError);
   }
