@@ -122,6 +122,18 @@ def handle_turn_command(
             turn_start_hook_dispatch = extend_cadence_turn_start_dispatch(
                 turn_start_hook_dispatch, registry_path=registry_path, runtime_root=runtime_root,
                 goal_id=args.goal_id, agent_id=args.agent_id)
+            from ..control_plane.agents.capability_memory import (
+                extend_turn_start_dispatch as extend_capability_memory_dispatch,
+            )
+
+            turn_start_hook_dispatch = extend_capability_memory_dispatch(
+                turn_start_hook_dispatch,
+                registry_path=registry_path,
+                runtime_root=runtime_root,
+                goal_id=args.goal_id,
+                agent_id=args.agent_id,
+                available=args.available_capabilities,
+            )
         operator_inbox_urgency_projector = build_lark_operator_inbox_urgency_projector(
             runtime_root_arg=runtime_root,
         )

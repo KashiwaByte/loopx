@@ -390,7 +390,6 @@ def build_live_quota_should_run_decision(
     turn_start_hook_dispatch: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one live CLI decision while keeping host observation injectable."""
-
     resolved_context = resolve_scheduler_execution_context(scheduler_execution_context)
     codex_app_applicable = (
         resolved_context.ok
@@ -467,6 +466,11 @@ def build_live_quota_should_run_decision(
         turn_instance_id=turn_instance_id,
         runtime_root=runtime_root,
     )
+    remembered_runtime = (payload.get("agent_identity") or {}).get(
+        "runtime_available_capabilities"
+    )
+    if isinstance(remembered_runtime, list):
+        available_capabilities = remembered_runtime
     if route_source.startswith("loopx_turn_"):
         payload["runtime_root"] = str(runtime_root)
     _project_turn_start_required_reads(
