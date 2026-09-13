@@ -261,6 +261,32 @@ def test_excluded_actor_cannot_mutate_unclaimed_todo(tmp_path: Path) -> None:
     assert state.read_text(encoding="utf-8") == before
 
 
+def test_idempotent_add_preserves_existing_executor_exclusions(
+    tmp_path: Path,
+) -> None:
+    registry, state = _write_fixture(tmp_path)
+    todo = _add_agent_todo(
+        registry,
+        text="Independently review one exact PR head.",
+        claimed_by=None,
+        excluded_agents=[AUTHOR_AGENT],
+    )
+
+    replay = add_goal_todo(
+        registry_path=registry,
+        goal_id=GOAL_ID,
+        role="agent",
+        text="Independently review one exact PR head.",
+        task_class="advancement_task",
+    )
+
+    assert replay["todo_id"] == todo["todo_id"]
+    assert replay["already_exists"] is True
+    assert replay["metadata_updated"] is False
+    assert replay["excluded_agents"] == [AUTHOR_AGENT]
+    assert _agent_todo(state, todo["todo_id"])["excluded_agents"] == [AUTHOR_AGENT]
+
+
 def test_unresolved_decision_scope_is_not_a_local_claim_gate(tmp_path: Path) -> None:
     """Characterize the local writer before shared revision publishers exist.
 
@@ -2025,6 +2051,66 @@ def test_monitor_writeback_propagates_multi_agent_actor(tmp_path: Path) -> None:
     authority = result["todo_update"]["mutation_authority"]
     assert authority["mode"] == "registered_peer_actor"
     assert authority["actor_agent_id"] == AUTHOR_AGENT
+
+
+def test_monitor_successor_replay_preserves_independent_reviewer_exclusion(
+    tmp_path: Path,
+) -> None:
+    registry, state = _write_fixture(tmp_path)
+    monitor = add_goal_todo(
+        registry_path=registry,
+        goal_id=GOAL_ID,
+        role="agent",
+        text="Poll one exact PR head.",
+        task_class="continuous_monitor",
+        action_kind="monitor_pr",
+        task_repository="git:github.com/example/project",
+        claimed_by=AUTHOR_AGENT,
+        monitor_metadata={
+            "target_key": "public-pr:42",
+            "cadence": "15m",
+            "watch_only": "true",
+        },
+    )
+    review_text = "Independently review the exact PR head."
+    review = add_goal_todo(
+        registry_path=registry,
+        goal_id=GOAL_ID,
+        role="agent",
+        text=review_text,
+        task_class="advancement_task",
+        action_kind="review_and_merge",
+        task_repository="git:github.com/example/project",
+        continuation_policy="independent_handoff",
+        required_capabilities=["network"],
+        excluded_agents=[AUTHOR_AGENT],
+        unblocks_todo_id=monitor["todo_id"],
+        monitor_metadata={"target_key": "public-pr:42:review"},
+    )
+
+    result = write_monitor_poll_todo_state(
+        registry_path=registry,
+        runtime_root=tmp_path / "runtime",
+        goal_id=GOAL_ID,
+        generated_at="2026-07-18T00:15:00+00:00",
+        execute=True,
+        todo_id=monitor["todo_id"],
+        result_hash="all-checks-green",
+        material_change=True,
+        next_agent_todo=review_text,
+        next_action_kind="review_and_merge",
+        next_task_repository="git:github.com/example/project",
+        next_required_capabilities=["network"],
+        next_continuation_policy="independent_handoff",
+        next_target_key="public-pr:42:review",
+        agent_id=AUTHOR_AGENT,
+    )
+
+    assert result is not None
+    assert result["successor_receipts"][0]["todo_id"] == review["todo_id"]
+    assert _agent_todo(state, review["todo_id"])["excluded_agents"] == [
+        AUTHOR_AGENT
+    ]
 
 
 def test_exact_user_gate_decision_scope_uses_controller_override(

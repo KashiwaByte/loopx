@@ -775,8 +775,13 @@ def add_goal_todo(
         ) if agent_id else None
     )
     registered_agents = registered_agent_ids_from_registry(registry_path, goal_id)
-    effective_excluded_agents = require_registered_todo_excluded_agents(
-        registry_path=registry_path, goal_id=goal_id, excluded_agents=excluded_agents,
+    effective_excluded_agents = (
+        require_registered_todo_excluded_agents(
+            registry_path=registry_path, goal_id=goal_id,
+            excluded_agents=excluded_agents,
+        )
+        if excluded_agents is not None
+        else None
     )
     authoring_scope = plan_todo_authoring_scope(
         command="create", role=role, goal_id=goal_id, registered_agents=registered_agents,
