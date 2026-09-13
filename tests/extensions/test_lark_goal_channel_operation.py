@@ -406,6 +406,31 @@ def test_delivery_stops_before_provider_write_when_executor_revision_drifted(
     assert calls == []
 
 
+def test_operation_delivery_never_uses_an_unbound_registered_target(
+    tmp_path: Path,
+) -> None:
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare(store, registry)
+    binding.unlink()
+    calls: list[list[str]] = []
+
+    with pytest.raises(ValueError, match="durable binding"):
+        deliver_goal_channel_operation_card(
+            proposal_id=proposal["proposal_id"],
+            action_store_root=store.root,
+            runtime_root=runtime,
+            binding_path=binding,
+            target_path=target,
+            execute=True,
+            runner=_runner(calls, {}),
+            executor_binding_resolver=lambda _parameters, _runtime: {
+                "revision": "simulator-v0"
+            },
+        )
+
+    assert calls == []
+
+
 def test_delivery_callback_simulation_and_replay_share_one_claim(
     tmp_path: Path,
 ) -> None:
