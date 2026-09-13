@@ -14,6 +14,8 @@ import {
   validateTodoDecisionMetadata,
 } from "./decision_metadata.ts";
 
+import { normalizeMonitorConfiguration, validateMonitorConfigurationTarget } from "./monitor_metadata.ts";
+
 export const TODO_PUBLIC_UPDATE_REQUEST_SCHEMA = "todo_public_update_request_v0";
 
 const SCOPE_INTENT_FIELDS = ["task_class", "status", "claimed_by", "bound_agent", "goal_bound",
@@ -63,6 +65,11 @@ export function planPublicTodoUpdate(value: unknown): JsonObject {
   }
   validateTodoDecisionMetadata(todo, intent);
   const context = requireJsonObject(request.context, "public Todo update context");
+  if (context.monitor_observation == null && intent.monitor_metadata != null) {
+    const metadata = normalizeMonitorConfiguration(intent.monitor_metadata);
+    validateMonitorConfigurationTarget(todo, metadata);
+    intent.monitor_metadata = metadata;
+  }
   // Preserve omission at the authoring-scope boundary. Filling every field
   // with null made an unrelated metadata edit erase a retained gate scope.
   const scopeIntent = Object.fromEntries(SCOPE_INTENT_FIELDS.flatMap(key =>

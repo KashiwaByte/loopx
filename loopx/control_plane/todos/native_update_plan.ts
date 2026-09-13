@@ -15,11 +15,13 @@ import {
   validateTodoDecisionMetadata,
 } from "./decision_metadata.ts";
 
+import { normalizeMonitorConfiguration } from "./monitor_metadata.ts";
+
 const STRINGS = new Set(["status", "evidence", "reason", "task_class", "continuation_policy",
   "resume_when", "unblocks_todo_id", "bound_agent", "blocks_agent"]);
 const BOOLEANS = new Set(["clear_resume_when", "no_followup", "goal_bound", "clear_blocks_agent",
   "global_gate", "clear_global_gate"]);
-const FIELDS = new Set([...STRINGS, ...BOOLEANS, "successor_todo_ids",
+const FIELDS = new Set([...STRINGS, ...BOOLEANS, "successor_todo_ids", "monitor_metadata",
   ...TODO_WORK_REQUIREMENT_FIELDS, ...TODO_OWNERSHIP_INTENT_FIELDS, ...TODO_DECISION_METADATA_FIELDS]);
 
 /** A separate intent namespace preserves the shipped text/note patch and its
@@ -33,6 +35,10 @@ export function normalizeNativePlanningIntent(value: unknown): JsonObject {
     if (!FIELDS.has(field)) throw new AuthorityStoreProtocolError(`Todo planning update does not own ${field}`);
     if ((TODO_WORK_REQUIREMENT_FIELDS as readonly string[]).includes(field)) continue;
     if ((TODO_OWNERSHIP_INTENT_FIELDS as readonly string[]).includes(field)) continue;
+    if (field === "monitor_metadata") {
+      if (value != null) intent[field] = normalizeMonitorConfiguration(value);
+      continue;
+    }
     if (field === "decision_scope") {
       intent[field] = normalizeTodoDecisionScope(value, field);
       continue;
@@ -64,9 +70,6 @@ export function normalizeNativePlanningIntent(value: unknown): JsonObject {
 
 export function planNativeTodoUpdate(todo: JsonObject, intent: JsonObject,
   head: JsonObject, actor: string | null, agents: readonly string[], updatedAt: string): JsonObject {
-  if (todo.task_class === "continuous_monitor") {
-    throw new AuthorityStoreProtocolError("native Monitor planning updates require the atomic monitor writer; text/note correction remains supported");
-  }
   validateTodoDecisionMetadata(todo, intent);
   const planned = planPublicTodoUpdate({schema_version: TODO_PUBLIC_UPDATE_REQUEST_SCHEMA,
     todo, intent, updated_at: updatedAt,

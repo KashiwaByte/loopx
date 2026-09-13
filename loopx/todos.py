@@ -1154,7 +1154,9 @@ def update_goal_todo(
             operation_id=update_operation_id,
             task_lease_idempotency_key=task_lease_idempotency_key,
             task_lease_expected_version=task_lease_expected_version,
-            planning_intent=planning_intent,
+            planning_intent={**planning_intent, **(
+                {"monitor_metadata": monitor_metadata} if monitor_metadata else {}
+            )},
         )
         if canonical_edit is not None:
             return canonical_edit

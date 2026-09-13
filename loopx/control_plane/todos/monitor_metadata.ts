@@ -9,9 +9,37 @@ import { parseTodoTimestampMicros } from "../runtime_timestamp.ts";
 
 export const TODO_MONITOR_METADATA_REQUEST_SCHEMA = "loopx_todo_monitor_metadata_request_v0";
 export const TODO_MONITOR_METADATA_RESULT_SCHEMA = "loopx_todo_monitor_metadata_result_v0";
+export const MONITOR_CONFIGURATION_FIELDS = ["target_key", "cadence", "next_due_at", "expires_at", "watch_only"] as const;
 export const MONITOR_METADATA_FIELDS = ["target_key", "monitor_effect_id", "cadence", "next_due_at",
   "expires_at", "last_checked_at", "result_hash", "consecutive_no_change", "material_change",
   "material_change_generation", "max_no_change_before_replan", "watch_only"] as const;
+
+/** Public configuration is not an observation/import codec. Keep historical
+ * fields available to their existing lower-level owners, never to this intent. */
+export function normalizeMonitorConfiguration(value: unknown): JsonObject {
+  const raw = requireJsonObject(value, "Monitor configuration");
+  const input: JsonObject = {};
+  for (const [field, value] of Object.entries(raw)) {
+    if (!(MONITOR_CONFIGURATION_FIELDS as readonly string[]).includes(field)) {
+      throw new EffectRuntimeRequestError(`Monitor configuration does not own ${field}; use the observation lifecycle`);
+    }
+    if (value !== null && typeof value !== "string" && !(field === "watch_only" && typeof value === "boolean")) {
+      throw new EffectRuntimeRequestError(`Monitor configuration ${field} must be a string or null`);
+    }
+    input[field] = field === "watch_only" && value !== null ? String(value).toLowerCase() : value;
+  }
+  return normalizeMetadata(input);
+}
+
+export function validateMonitorConfigurationTarget(existing: JsonObject, metadata: JsonObject): void {
+  if (!Object.hasOwn(metadata, "target_key") || text(metadata.target_key) === text(existing.target_key)) return;
+  // Observations and dependent generation fences name this target's history.
+  // Changing its identity cannot reuse those receipts as evidence for a new target.
+  if (["monitor_effect_id", "result_hash", "last_checked_at"].some(field => text(existing[field])) ||
+      counter(existing.material_change_generation) > 0) {
+    throw new EffectRuntimeRequestError("an observed Monitor cannot change target_key; create an independent Monitor for the new target");
+  }
+}
 
 function text(value: unknown): string {
   if (value === null || value === undefined || value === false || value === 0) return "";
