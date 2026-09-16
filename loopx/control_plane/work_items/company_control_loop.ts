@@ -14,11 +14,6 @@ import type { JsonObject } from "../effect_program.ts";
 export const COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION =
   "company_control_loop_request_v0";
 export const COMPANY_CONTROL_LOOP_SCHEMA_VERSION = "company_control_loop_v0";
-export const COMPANY_CONTROL_LOOP_UPGRADE_SCHEMA_VERSION =
-  "company_control_loop_upgrade_v0";
-export const LEGACY_COMPANY_CONTROL_STATE_SCHEMA_VERSION =
-  "loopx_company_control_state_v0";
-
 const MAX_OUTCOMES = 128;
 const MAX_WORK_ITEMS = 256;
 const MAX_FEEDBACK_ITEMS = 256;
@@ -342,110 +337,5 @@ export function projectCompanyControlLoop(value: unknown): JsonObject {
     work_items: workItems,
     feedback,
     replan_required: feedback.some((item) => item.disposition === "replan"),
-  };
-}
-
-/**
- * Convert the executable reference implementation's persisted v0 state into
- * the native request contract. The upgrade is preview-only and fails closed
- * when legacy feedback points at Goal ids that cannot be proven to be Outcome
- * ids.
- */
-export function upgradeCompanyControlLoopState(value: unknown): JsonObject {
-  const source = requireJsonObject(value, "company_control_loop_state");
-  if (source.schema_version === COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION) {
-    projectCompanyControlLoop(source);
-    return {
-      schema_version: COMPANY_CONTROL_LOOP_UPGRADE_SCHEMA_VERSION,
-      source_schema_version: COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION,
-      target_schema_version: COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION,
-      changed: false,
-      state: structuredClone(source),
-    };
-  }
-  if (source.schema_version !== LEGACY_COMPANY_CONTROL_STATE_SCHEMA_VERSION) {
-    throw new EffectRuntimeRequestError(
-      "company_control_loop_state.schema_version is unsupported",
-    );
-  }
-  const outcomes = boundedArray(
-    source.outcomes,
-    "company_control_loop_state.outcomes",
-    MAX_OUTCOMES,
-  ).map((item, index) => {
-    const raw = requireJsonObject(item, `company_control_loop_state.outcomes[${index}]`);
-    return {
-      outcome_id: raw.outcome_id,
-      title: raw.title,
-      metric: raw.metric,
-      target: raw.target,
-      evidence_source: raw.evidence_source,
-    };
-  });
-  const outcomeIds = new Set(outcomes.map((item) => String(item.outcome_id)));
-  const feedback = boundedArray(
-    source.feedback ?? [],
-    "company_control_loop_state.feedback",
-    MAX_FEEDBACK_ITEMS,
-  ).map((item, index) => {
-    const raw = requireJsonObject(item, `company_control_loop_state.feedback[${index}]`);
-    const affected = raw.affected_outcome_ids ?? raw.affected_goal_ids;
-    const affectedIds = requireStringArray(
-      affected,
-      `company_control_loop_state.feedback[${index}].affected_outcome_ids`,
-    );
-    if (affectedIds.some((id) => !outcomeIds.has(id))) {
-      throw new EffectRuntimeRequestError(
-        `company_control_loop_state.feedback[${index}] needs an explicit Outcome mapping`,
-      );
-    }
-    return {
-      feedback_id: raw.feedback_id,
-      source: raw.source,
-      subject: raw.subject,
-      kind: raw.kind,
-      observed_at: raw.observed_at,
-      evidence_ref: raw.evidence_ref,
-      affected_outcome_ids: affectedIds,
-    };
-  });
-  const request: JsonObject = {
-    schema_version: COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION,
-    direction: source.company_direction,
-    cycle: source.cycle ?? 0,
-    outcomes,
-    work_items: boundedArray(
-      source.work_items,
-      "company_control_loop_state.work_items",
-      MAX_WORK_ITEMS,
-    ).map((item, index) => {
-      const raw = requireJsonObject(item, `company_control_loop_state.work_items[${index}]`);
-      return {
-        work_item_id: raw.work_item_id,
-        outcome_id: raw.outcome_id,
-        title: raw.title,
-        acceptance: raw.acceptance,
-        authority_tier: raw.authority_tier,
-        ai_capable: raw.ai_capable,
-        ...(raw.prohibited === undefined ? {} : { prohibited: raw.prohibited }),
-        ...(raw.material_decision === undefined
-          ? {}
-          : { material_decision: raw.material_decision }),
-        ...(raw.human_identity_required === undefined
-          ? {}
-          : { human_identity_required: raw.human_identity_required }),
-        ...(raw.wait_for === undefined ? {} : { wait_for: raw.wait_for }),
-        target_key: raw.target_key,
-      };
-    }),
-    feedback,
-  };
-  projectCompanyControlLoop(request);
-  return {
-    schema_version: COMPANY_CONTROL_LOOP_UPGRADE_SCHEMA_VERSION,
-    source_schema_version: LEGACY_COMPANY_CONTROL_STATE_SCHEMA_VERSION,
-    target_schema_version: COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION,
-    changed: true,
-    state: request,
   };
 }

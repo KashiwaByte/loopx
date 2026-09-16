@@ -58,9 +58,6 @@ loopx company-control-loop save \
 loopx company-control-loop show --goal-id company-goal
 ```
 
-Legacy `loopx_company_control_state_v0` files can be previewed with `upgrade`.
-Ambiguous legacy Goal-to-Outcome feedback mappings fail closed.
-
 ## Materialize work as Todos
 
 Preview the idempotent plan first, then execute it:

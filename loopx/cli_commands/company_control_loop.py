@@ -34,23 +34,17 @@ def register_company_control_loop_command(
         required=True,
         help="Path to a company_control_loop_request_v0 JSON object.",
     )
-    upgrade = actions.add_parser(
-        "upgrade",
-        help="Preview conversion of a legacy loopx_company_control_state_v0 file.",
-    )
-    add_subcommand_format(upgrade)
-    upgrade.add_argument(
-        "--state-json",
-        required=True,
-        help="Path to a legacy or current company control state JSON object.",
-    )
     save = actions.add_parser(
         "save",
         help="Validate and persist company control state under one Goal runtime.",
     )
     add_subcommand_format(save)
     save.add_argument("--goal-id", required=True, help="Goal that owns the company state.")
-    save.add_argument("--state-json", required=True, help="Legacy or current company state JSON.")
+    save.add_argument(
+        "--state-json",
+        required=True,
+        help="Path to a company_control_loop_request_v0 JSON object.",
+    )
     save.add_argument(
         "--expected-revision",
         help="Exact revision returned by show/save. Required to replace existing state.",
@@ -215,28 +209,19 @@ def handle_company_control_loop_command(
                 )
         else:
             request = _read_json_object(args.state_json)
-            method = (
-                "work_item.company_control_loop.upgrade"
-                if command in {"upgrade", "save"}
-                else "work_item.company_control_loop.project"
+            projection = effect_runtime_result(
+                "work_item.company_control_loop.project",
+                request,
             )
-            projection = effect_runtime_result(method, request)
             if command != "save":
                 payload = {"ok": True, **projection}
             else:
-                state = projection.get("state")
-                if not isinstance(state, dict):
-                    raise TypeError("company control upgrade did not return state")
-                preview = effect_runtime_result(
-                    "work_item.company_control_loop.project",
-                    state,
-                )
                 if not args.execute:
                     payload = {
                         "ok": True,
                         "dry_run": True,
                         "goal_id": args.goal_id,
-                        "projection": preview,
+                        "projection": projection,
                     }
                 else:
                     if runtime_root is None:
@@ -245,7 +230,7 @@ def handle_company_control_loop_command(
                         "schema_version": "company_control_state_store_request_v0",
                         "runtime_root": str(runtime_root),
                         "goal_id": args.goal_id,
-                        "state": state,
+                        "state": request,
                         "updated_at": datetime.now(UTC).isoformat(),
                     }
                     if args.expected_revision:

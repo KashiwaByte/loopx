@@ -174,7 +174,6 @@ import {
 import { resolveRefreshRecommendation } from "./work_items/refresh_recommendation.ts";
 import {
   projectCompanyControlLoop,
-  upgradeCompanyControlLoopState,
 } from "./work_items/company_control_loop.ts";
 import {
   loadCompanyControlState,
@@ -462,7 +461,6 @@ export function createEffectRuntimeHandlers(
     ["work_item.planning_inventory.detail", projectTodoPlanningInventoryDetail],
     ["work_item.refresh_recommendation.resolve", resolveRefreshRecommendation],
     ["work_item.company_control_loop.project", projectCompanyControlLoop],
-    ["work_item.company_control_loop.upgrade", upgradeCompanyControlLoopState],
     ["work_item.company_control_state.load", loadCompanyControlState],
     ["work_item.company_control_state.next_cycle", planCompanyControlNextCycle],
     ["work_item.company_control_state.reconcile", reconcileCompanyControlState],
