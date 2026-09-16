@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION,
   projectCompanyControlLoop,
+  upgradeCompanyControlLoopState,
 } from "../../loopx/control_plane/work_items/company_control_loop.ts";
 
 function request(overrides: Record<string, unknown> = {}) {
@@ -120,5 +121,51 @@ test("company control loop rejects dangling outcome references and unsafe ids", 
       work_items: [work({ target_key: "../../private" })],
     })),
     /target_key must be a public-safe id/,
+  );
+});
+
+test("legacy reference state upgrades into the native request contract", () => {
+  const legacy = {
+    schema_version: "loopx_company_control_state_v0",
+    company_direction: "Improve durable customer value.",
+    cycle: 2,
+    outcomes: request().outcomes,
+    work_items: [
+      {
+        ...work(),
+        route: "ai_execute",
+        route_reason: "legacy derived value",
+        status: "ready",
+        evidence_refs: [],
+      },
+    ],
+    feedback: [],
+    events: [],
+  };
+  const result = upgradeCompanyControlLoopState(legacy);
+  assert.equal(result.schema_version, "company_control_loop_upgrade_v0");
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.state, request({ cycle: 2, work_items: [work()] }));
+});
+
+test("legacy feedback with ambiguous Goal references fails closed", () => {
+  assert.throws(
+    () => upgradeCompanyControlLoopState({
+      schema_version: "loopx_company_control_state_v0",
+      company_direction: "Improve durable customer value.",
+      cycle: 1,
+      outcomes: request().outcomes,
+      work_items: [],
+      feedback: [{
+        feedback_id: "feedback_legacy",
+        source: "operator",
+        subject: "activation",
+        kind: "decision",
+        observed_at: "2026-09-17T00:00:00Z",
+        evidence_ref: "decision:42",
+        affected_goal_ids: ["goal_company"],
+      }],
+    }),
+    /needs an explicit Outcome mapping/,
   );
 });

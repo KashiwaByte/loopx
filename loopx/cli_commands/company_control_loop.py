@@ -32,6 +32,16 @@ def register_company_control_loop_command(
         required=True,
         help="Path to a company_control_loop_request_v0 JSON object.",
     )
+    upgrade = actions.add_parser(
+        "upgrade",
+        help="Preview conversion of a legacy loopx_company_control_state_v0 file.",
+    )
+    add_subcommand_format(upgrade)
+    upgrade.add_argument(
+        "--state-json",
+        required=True,
+        help="Path to a legacy or current company control state JSON object.",
+    )
 
 
 def render_company_control_loop_markdown(payload: dict[str, Any]) -> str:
@@ -82,10 +92,12 @@ def handle_company_control_loop_command(
         return None
     try:
         request = _read_json_object(args.state_json)
-        projection = effect_runtime_result(
-            "work_item.company_control_loop.project",
-            request,
+        method = (
+            "work_item.company_control_loop.upgrade"
+            if args.company_control_loop_command == "upgrade"
+            else "work_item.company_control_loop.project"
         )
+        projection = effect_runtime_result(method, request)
         payload = {"ok": True, **projection}
         exit_code = 0
     except Exception as exc:

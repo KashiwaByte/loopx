@@ -74,3 +74,33 @@ def test_company_control_loop_cli_rejects_non_object_json(tmp_path, capsys) -> N
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert "must contain an object" in payload["error"]
+
+
+def test_company_control_loop_cli_selects_upgrade_contract(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    state_path = tmp_path / "company.json"
+    state_path.write_text(json.dumps(_request()), encoding="utf-8")
+    calls: list[str] = []
+
+    def upgrade(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append(method)
+        return {
+            "schema_version": "company_control_loop_upgrade_v0",
+            "source_schema_version": params["schema_version"],
+            "target_schema_version": params["schema_version"],
+            "changed": False,
+            "state": params,
+        }
+
+    monkeypatch.setattr(company_control_loop, "effect_runtime_result", upgrade)
+    assert main([
+        "--format",
+        "json",
+        "company-control-loop",
+        "upgrade",
+        "--state-json",
+        str(state_path),
+    ]) == 0
+    json.loads(capsys.readouterr().out)
+    assert calls == ["work_item.company_control_loop.upgrade"]
