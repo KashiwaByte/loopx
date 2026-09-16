@@ -188,8 +188,14 @@ export function planMonitorMetadata(value: unknown): MonitorMetadataPlan {
   if (nonTarget && (request.role !== "agent" || request.task_class !== "continuous_monitor")) {
     throw new EffectRuntimeRequestError("monitor schedule metadata requires --role agent --task-class continuous_monitor");
   }
-  if (metadata.target_key != null && !["agent", "user"].includes(String(request.role))) {
-    throw new EffectRuntimeRequestError("target_key requires --role agent or user");
+  const targetAllowed = request.role === "agent" || (
+    request.role === "user" &&
+    ["user_gate", "user_action"].includes(String(request.task_class))
+  );
+  if (metadata.target_key != null && !targetAllowed) {
+    throw new EffectRuntimeRequestError(
+      "target_key requires an agent Todo or a user gate/action Todo",
+    );
   }
   if (request.generated_at != null && request.task_class === "continuous_monitor" && metadata.next_due_at == null && metadata.cadence != null) {
     const due = schedule(text(request.generated_at), metadata.cadence).next_due_at;
