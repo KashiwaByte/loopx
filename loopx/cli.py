@@ -787,9 +787,10 @@ def main(argv: list[str] | None = None) -> int:
                 else effective_runtime_root(registry_path, None)
             )
             if args.command == "company-control-loop"
-            and args.company_control_loop_command in {"save", "show"}
+            and args.company_control_loop_command in {"save", "show", "sync-todos"}
             else None
         ),
+        registry_path=registry_path,
     )
     if company_control_loop_result is not None:
         return company_control_loop_result

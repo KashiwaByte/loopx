@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..control_plane.effect_runtime import effect_runtime_result
+from ..todos import add_goal_todo, list_goal_todos
 
 
 def register_company_control_loop_command(
@@ -65,6 +66,25 @@ def register_company_control_loop_command(
     )
     add_subcommand_format(show)
     show.add_argument("--goal-id", required=True, help="Goal that owns the company state.")
+    sync = actions.add_parser(
+        "sync-todos",
+        help="Create missing LoopX Todos from persisted company work and verify readback.",
+    )
+    add_subcommand_format(sync)
+    sync.add_argument(
+        "--goal-id", required=True, help="Goal that owns the company state and Todos."
+    )
+    sync.add_argument(
+        "--agent-id",
+        required=True,
+        help="Registered agent that owns routed agent work.",
+    )
+    sync.add_argument("--project", help="Project containing the Goal active state.")
+    sync.add_argument(
+        "--execute",
+        action="store_true",
+        help="Create missing Todos. Without this flag, return the idempotent plan.",
+    )
 
 
 def render_company_control_loop_markdown(payload: dict[str, Any]) -> str:
@@ -111,12 +131,13 @@ def handle_company_control_loop_command(
     output_format: Callable[..., str],
     print_payload: Callable[[dict[str, Any], str, Callable[[dict[str, Any]], str]], None],
     runtime_root: Path | None = None,
+    registry_path: Path | None = None,
 ) -> int | None:
     if args.command != "company-control-loop":
         return None
     try:
         command = args.company_control_loop_command
-        if command == "show":
+        if command in {"show", "sync-todos"}:
             if runtime_root is None:
                 raise ValueError("company control state requires a runtime root")
             projection = effect_runtime_result(
@@ -127,7 +148,20 @@ def handle_company_control_loop_command(
                     "goal_id": args.goal_id,
                 },
             )
-            payload = {"ok": True, **projection}
+            if command == "show":
+                payload = {"ok": True, **projection}
+            else:
+                if registry_path is None:
+                    raise ValueError("company Todo sync requires a registry")
+                payload = _sync_todos(
+                    stored=projection,
+                    goal_id=args.goal_id,
+                    agent_id=args.agent_id,
+                    project=Path(args.project).expanduser() if args.project else None,
+                    registry_path=registry_path,
+                    runtime_root=runtime_root,
+                    execute=bool(args.execute),
+                )
         else:
             request = _read_json_object(args.state_json)
             method = (
@@ -180,3 +214,128 @@ def handle_company_control_loop_command(
         render_company_control_loop_markdown,
     )
     return exit_code
+
+
+def _sync_todos(
+    *,
+    stored: dict[str, Any],
+    goal_id: str,
+    agent_id: str,
+    project: Path | None,
+    registry_path: Path,
+    runtime_root: Path,
+    execute: bool,
+) -> dict[str, Any]:
+    state = stored.get("state")
+    if not isinstance(state, dict):
+        raise ValueError("persisted company control state does not exist")
+    company = state.get("projection")
+    if not isinstance(company, dict):
+        raise TypeError("persisted company control projection is invalid")
+    work_items = company.get("work_items")
+    if not isinstance(work_items, list):
+        raise TypeError("persisted company work_items must be an array")
+    listing = list_goal_todos(
+        registry_path=registry_path,
+        runtime_root_arg=str(runtime_root),
+        goal_id=goal_id,
+        agent_id=agent_id,
+        project=project,
+        limit=500,
+    )
+    todos = [item for item in listing.get("todos", []) if isinstance(item, dict)]
+    by_target: dict[str, dict[str, Any]] = {}
+    for todo in todos:
+        target = str(todo.get("target_key") or "").strip()
+        if not target:
+            continue
+        if target in by_target:
+            raise ValueError(f"multiple LoopX Todos use target_key {target!r}")
+        by_target[target] = todo
+    actions: list[dict[str, Any]] = []
+    seen_targets: set[str] = set()
+    for raw in work_items:
+        if not isinstance(raw, dict):
+            raise TypeError("persisted company work item is invalid")
+        todo_projection = raw.get("todo_projection")
+        if not isinstance(todo_projection, dict):
+            raise TypeError("persisted company Todo projection is invalid")
+        target = str(todo_projection.get("target_key") or "").strip()
+        if not target or target in seen_targets:
+            raise ValueError("company work target_key must be present and unique")
+        seen_targets.add(target)
+        matched = by_target.get(target)
+        if matched:
+            actions.append({
+                "work_item_id": raw.get("work_item_id"),
+                "target_key": target,
+                "action": "linked_existing",
+                "todo_id": matched.get("todo_id"),
+            })
+            continue
+        action: dict[str, Any] = {
+            "work_item_id": raw.get("work_item_id"),
+            "target_key": target,
+            "action": "would_create",
+            "role": todo_projection.get("role"),
+            "task_class": todo_projection.get("task_class"),
+        }
+        if execute:
+            role = str(todo_projection.get("role") or "")
+            task_class = str(todo_projection.get("task_class") or "")
+            monitor_metadata: dict[str, Any] = {"target_key": target}
+            if task_class == "continuous_monitor":
+                monitor_metadata["watch_only"] = "true"
+            created = add_goal_todo(
+                registry_path=registry_path,
+                runtime_root_arg=str(runtime_root),
+                goal_id=goal_id,
+                project=project,
+                role=role,
+                text=f"[P1] {todo_projection.get('text')}",
+                status="open",
+                note=f"Acceptance: {todo_projection.get('acceptance')}",
+                task_class=task_class,
+                action_kind=str(todo_projection.get("action_kind") or ""),
+                claimed_by=agent_id if role == "agent" else None,
+                agent_id=agent_id,
+                blocks_agent=agent_id if task_class == "user_gate" else None,
+                bound_agent=agent_id if task_class == "user_action" else None,
+                decision_scope=(
+                    f"direction:action:{target}"
+                    if task_class == "user_gate"
+                    else None
+                ),
+                monitor_metadata=monitor_metadata,
+            )
+            action["action"] = "created"
+            action["todo_id"] = created.get("todo_id")
+        actions.append(action)
+    if execute:
+        readback = list_goal_todos(
+            registry_path=registry_path,
+            runtime_root_arg=str(runtime_root),
+            goal_id=goal_id,
+            agent_id=agent_id,
+            project=project,
+            limit=500,
+        )
+        readback_by_target = {
+            str(item.get("target_key")): item
+            for item in readback.get("todos", [])
+            if isinstance(item, dict) and item.get("target_key")
+        }
+        missing = sorted(seen_targets - readback_by_target.keys())
+        if missing:
+            raise RuntimeError(f"LoopX Todo readback missing target keys: {missing}")
+        for action in actions:
+            item = readback_by_target[str(action["target_key"])]
+            action["todo_id"] = item.get("todo_id")
+    return {
+        "ok": True,
+        "dry_run": not execute,
+        "goal_id": goal_id,
+        "state_revision": state.get("revision"),
+        "actions": actions,
+        "readback_verified": execute,
+    }

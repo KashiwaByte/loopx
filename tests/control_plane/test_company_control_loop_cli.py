@@ -25,6 +25,42 @@ def _request() -> dict[str, object]:
     }
 
 
+def _stored_projection(*work_items: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": "company_control_state_store_result_v0",
+        "operation": "load",
+        "goal_id": "company-goal",
+        "state": {
+            "revision": "a" * 64,
+            "projection": {
+                "schema_version": "company_control_loop_v0",
+                "work_items": list(work_items),
+            },
+        },
+    }
+
+
+def _routed_work(
+    work_item_id: str,
+    target_key: str,
+    *,
+    role: str = "agent",
+    task_class: str = "advancement_task",
+    action_kind: str = "ai_execute",
+) -> dict[str, object]:
+    return {
+        "work_item_id": work_item_id,
+        "todo_projection": {
+            "role": role,
+            "task_class": task_class,
+            "action_kind": action_kind,
+            "target_key": target_key,
+            "text": f"Advance {work_item_id}",
+            "acceptance": f"Evidence for {work_item_id}",
+        },
+    }
+
+
 def test_company_control_loop_cli_calls_typed_projection(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -172,3 +208,137 @@ def test_company_control_loop_show_reads_goal_state(tmp_path, monkeypatch, capsy
     assert payload["operation"] == "load"
     assert calls[0][0] == "work_item.company_control_state.load"
     assert calls[0][1]["goal_id"] == "company-goal"
+
+
+def test_company_control_loop_sync_todos_previews_existing_and_missing(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        company_control_loop,
+        "effect_runtime_result",
+        lambda method, params: _stored_projection(
+            _routed_work("work_existing", "target_existing"),
+            _routed_work("work_missing", "target_missing"),
+        ),
+    )
+    monkeypatch.setattr(
+        company_control_loop,
+        "list_goal_todos",
+        lambda **kwargs: {
+            "todos": [{
+                "todo_id": "todo_existing",
+                "target_key": "target_existing",
+                "status": "open",
+            }]
+        },
+    )
+    writes: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        company_control_loop,
+        "add_goal_todo",
+        lambda **kwargs: writes.append(kwargs),
+    )
+
+    assert main([
+        "--format", "json", "--registry", str(tmp_path / "registry.json"),
+        "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "sync-todos", "--goal-id", "company-goal",
+        "--agent-id", "agent-ceo", "--project", str(tmp_path),
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["readback_verified"] is False
+    assert [item["action"] for item in payload["actions"]] == [
+        "linked_existing", "would_create",
+    ]
+    assert writes == []
+
+
+def test_company_control_loop_sync_todos_creates_and_verifies_readback(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        company_control_loop,
+        "effect_runtime_result",
+        lambda method, params: _stored_projection(
+            _routed_work(
+                "work_decision",
+                "target_decision",
+                role="user",
+                task_class="user_gate",
+                action_kind="human_decide",
+            ),
+            _routed_work(
+                "work_watch",
+                "target_watch",
+                task_class="continuous_monitor",
+                action_kind="observe",
+            ),
+        ),
+    )
+    listings = iter([
+        {"todos": []},
+        {"todos": [
+            {"todo_id": "todo_decision", "target_key": "target_decision"},
+            {"todo_id": "todo_watch", "target_key": "target_watch"},
+        ]},
+    ])
+    monkeypatch.setattr(
+        company_control_loop, "list_goal_todos", lambda **kwargs: next(listings)
+    )
+    writes: list[dict[str, object]] = []
+
+    def add(**kwargs: object) -> dict[str, object]:
+        writes.append(kwargs)
+        return {"todo_id": f"created_{len(writes)}"}
+
+    monkeypatch.setattr(company_control_loop, "add_goal_todo", add)
+
+    assert main([
+        "--format", "json", "--registry", str(tmp_path / "registry.json"),
+        "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "sync-todos", "--goal-id", "company-goal",
+        "--agent-id", "agent-ceo", "--project", str(tmp_path), "--execute",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["readback_verified"] is True
+    assert [item["todo_id"] for item in payload["actions"]] == [
+        "todo_decision", "todo_watch",
+    ]
+    assert writes[0]["blocks_agent"] == "agent-ceo"
+    assert writes[0]["decision_scope"] == "direction:action:target_decision"
+    assert writes[1]["monitor_metadata"] == {
+        "target_key": "target_watch",
+        "watch_only": "true",
+    }
+
+
+def test_company_control_loop_sync_todos_fails_on_missing_readback(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        company_control_loop,
+        "effect_runtime_result",
+        lambda method, params: _stored_projection(
+            _routed_work("work_missing", "target_missing")
+        ),
+    )
+    listings = iter([{"todos": []}, {"todos": []}])
+    monkeypatch.setattr(
+        company_control_loop, "list_goal_todos", lambda **kwargs: next(listings)
+    )
+    monkeypatch.setattr(
+        company_control_loop,
+        "add_goal_todo",
+        lambda **kwargs: {"todo_id": "todo_unreadable"},
+    )
+
+    assert main([
+        "--format", "json", "--registry", str(tmp_path / "registry.json"),
+        "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "sync-todos", "--goal-id", "company-goal",
+        "--agent-id", "agent-ceo", "--project", str(tmp_path), "--execute",
+    ]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "readback missing target keys" in payload["error"]
