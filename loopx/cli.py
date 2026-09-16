@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .cli_commands.agent_capabilities import register_agent_capabilities, handle_agent_capabilities
 from .cli_commands.agent_directory import register_agent_directory, handle_agent_directory
@@ -779,6 +780,16 @@ def main(argv: list[str] | None = None) -> int:
         args,
         output_format=output_format,
         print_payload=print_payload,
+        runtime_root=(
+            (
+                Path(args.runtime_root).expanduser().resolve()
+                if args.runtime_root
+                else effective_runtime_root(registry_path, None)
+            )
+            if args.command == "company-control-loop"
+            and args.company_control_loop_command in {"save", "show"}
+            else None
+        ),
     )
     if company_control_loop_result is not None:
         return company_control_loop_result

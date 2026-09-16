@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,28 @@ def register_company_control_loop_command(
         required=True,
         help="Path to a legacy or current company control state JSON object.",
     )
+    save = actions.add_parser(
+        "save",
+        help="Validate and persist company control state under one Goal runtime.",
+    )
+    add_subcommand_format(save)
+    save.add_argument("--goal-id", required=True, help="Goal that owns the company state.")
+    save.add_argument("--state-json", required=True, help="Legacy or current company state JSON.")
+    save.add_argument(
+        "--expected-revision",
+        help="Exact revision returned by show/save. Required to replace existing state.",
+    )
+    save.add_argument(
+        "--execute",
+        action="store_true",
+        help="Persist the validated projection. Without this flag, return a preview.",
+    )
+    show = actions.add_parser(
+        "show",
+        help="Read the persisted company control state for one Goal.",
+    )
+    add_subcommand_format(show)
+    show.add_argument("--goal-id", required=True, help="Goal that owns the company state.")
 
 
 def render_company_control_loop_markdown(payload: dict[str, Any]) -> str:
@@ -87,18 +110,66 @@ def handle_company_control_loop_command(
     *,
     output_format: Callable[..., str],
     print_payload: Callable[[dict[str, Any], str, Callable[[dict[str, Any]], str]], None],
+    runtime_root: Path | None = None,
 ) -> int | None:
     if args.command != "company-control-loop":
         return None
     try:
-        request = _read_json_object(args.state_json)
-        method = (
-            "work_item.company_control_loop.upgrade"
-            if args.company_control_loop_command == "upgrade"
-            else "work_item.company_control_loop.project"
-        )
-        projection = effect_runtime_result(method, request)
-        payload = {"ok": True, **projection}
+        command = args.company_control_loop_command
+        if command == "show":
+            if runtime_root is None:
+                raise ValueError("company control state requires a runtime root")
+            projection = effect_runtime_result(
+                "work_item.company_control_state.load",
+                {
+                    "schema_version": "company_control_state_store_request_v0",
+                    "runtime_root": str(runtime_root),
+                    "goal_id": args.goal_id,
+                },
+            )
+            payload = {"ok": True, **projection}
+        else:
+            request = _read_json_object(args.state_json)
+            method = (
+                "work_item.company_control_loop.upgrade"
+                if command in {"upgrade", "save"}
+                else "work_item.company_control_loop.project"
+            )
+            projection = effect_runtime_result(method, request)
+            if command != "save":
+                payload = {"ok": True, **projection}
+            else:
+                state = projection.get("state")
+                if not isinstance(state, dict):
+                    raise TypeError("company control upgrade did not return state")
+                preview = effect_runtime_result(
+                    "work_item.company_control_loop.project",
+                    state,
+                )
+                if not args.execute:
+                    payload = {
+                        "ok": True,
+                        "dry_run": True,
+                        "goal_id": args.goal_id,
+                        "projection": preview,
+                    }
+                else:
+                    if runtime_root is None:
+                        raise ValueError("company control state requires a runtime root")
+                    write_request: dict[str, Any] = {
+                        "schema_version": "company_control_state_store_request_v0",
+                        "runtime_root": str(runtime_root),
+                        "goal_id": args.goal_id,
+                        "state": state,
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
+                    if args.expected_revision:
+                        write_request["expected_revision"] = args.expected_revision
+                    saved = effect_runtime_result(
+                        "work_item.company_control_state.write",
+                        write_request,
+                    )
+                    payload = {"ok": True, "dry_run": False, **saved}
         exit_code = 0
     except Exception as exc:
         payload = {"ok": False, "error": str(exc)}

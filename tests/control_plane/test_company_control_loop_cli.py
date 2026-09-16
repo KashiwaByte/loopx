@@ -104,3 +104,71 @@ def test_company_control_loop_cli_selects_upgrade_contract(
     ]) == 0
     json.loads(capsys.readouterr().out)
     assert calls == ["work_item.company_control_loop.upgrade"]
+
+
+def test_company_control_loop_save_previews_then_writes_with_revision(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    state_path = tmp_path / "company.json"
+    state_path.write_text(json.dumps(_request()), encoding="utf-8")
+    calls: list[str] = []
+
+    def runtime(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append(method)
+        if method.endswith("upgrade"):
+            return {"state": params}
+        if method.endswith("project"):
+            return {"schema_version": "company_control_loop_v0"}
+        assert params["expected_revision"] == "a" * 64
+        return {
+            "schema_version": "company_control_state_store_result_v0",
+            "operation": "write",
+            "written": True,
+            "replayed": False,
+            "state": {"revision": "b" * 64},
+        }
+
+    monkeypatch.setattr(company_control_loop, "effect_runtime_result", runtime)
+    common = [
+        "--format", "json", "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "save", "--goal-id", "company-goal",
+        "--state-json", str(state_path),
+    ]
+    assert main(common) == 0
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
+    assert calls == [
+        "work_item.company_control_loop.upgrade",
+        "work_item.company_control_loop.project",
+    ]
+
+    calls.clear()
+    assert main([*common, "--expected-revision", "a" * 64, "--execute"]) == 0
+    assert json.loads(capsys.readouterr().out)["written"] is True
+    assert calls == [
+        "work_item.company_control_loop.upgrade",
+        "work_item.company_control_loop.project",
+        "work_item.company_control_state.write",
+    ]
+
+
+def test_company_control_loop_show_reads_goal_state(tmp_path, monkeypatch, capsys) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def runtime(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {
+            "schema_version": "company_control_state_store_result_v0",
+            "operation": "load",
+            "goal_id": params["goal_id"],
+            "state": None,
+        }
+
+    monkeypatch.setattr(company_control_loop, "effect_runtime_result", runtime)
+    assert main([
+        "--format", "json", "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "show", "--goal-id", "company-goal",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["operation"] == "load"
+    assert calls[0][0] == "work_item.company_control_state.load"
+    assert calls[0][1]["goal_id"] == "company-goal"
