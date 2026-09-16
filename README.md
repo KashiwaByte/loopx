@@ -414,6 +414,7 @@ evidence → recovery; continuation → governance.
 | --- | --- | --- |
 | Goal state and status | Tracks active state, todos, claims, gates, evidence, run history, and first-screen attention. | `loopx status`, `loopx diagnose`, `loopx review-packet` |
 | Quota and interaction contract | Decides whether a turn should deliver, ask, wait, self-repair, or stay quiet. | `loopx quota should-run`, [quota allocation](docs/quota-allocation.md) |
+| Company control loop | Routes company work to AI, human decisions, human execution, monitors, or blockers; reconciles evidence into the next planning cycle. | `loopx company-control-loop`, [company control loop](docs/reference/company-control-loop.md) |
 | Agent runtime bridges | Keeps Codex App, Codex CLI, Claude Code, and generic workers aligned with the same guard. | `loopx heartbeat-prompt`, `loopx codex-cli-bootstrap-message`, `loopx worker-bridge` |
 | Operator surfaces | Renders compact status without making the browser the state authority. | `loopx serve-status`, [dashboard](apps/presentation/dashboard/README.md) |
 | Session dash | Starts a live single-page panel that tracks fleet progress: sessions, their goals, and each goal's status/todo progress, with result statistics; auto-refreshes in place. | `loopx dash`, [session dash design](docs/product/surfaces/session-dash-panel-design.md) |
