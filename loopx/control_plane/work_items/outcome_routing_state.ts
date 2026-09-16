@@ -16,24 +16,26 @@ import {
   requireStringLiteral,
 } from "../runtime_decode.ts";
 import {
-  COMPANY_CONTROL_LOOP_SCHEMA_VERSION,
-  projectCompanyControlLoop,
-} from "./company_control_loop.ts";
+  OUTCOME_ROUTING_PLAN_SCHEMA_VERSION,
+  projectOutcomeRoutingPlan,
+} from "./outcome_routing_plan.ts";
 
-export const COMPANY_CONTROL_STATE_STORE_REQUEST_SCHEMA =
-  "company_control_state_store_request_v0";
-export const COMPANY_CONTROL_STATE_STORE_SCHEMA =
-  "company_control_state_store_v0";
-export const COMPANY_CONTROL_STATE_STORE_RESULT_SCHEMA =
-  "company_control_state_store_result_v0";
-export const COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA =
-  "company_control_state_reconcile_request_v0";
-export const COMPANY_CONTROL_STATE_RECONCILIATION_SCHEMA =
-  "company_control_state_reconciliation_v0";
-export const COMPANY_CONTROL_NEXT_CYCLE_REQUEST_SCHEMA =
-  "company_control_next_cycle_request_v0";
-export const COMPANY_CONTROL_NEXT_CYCLE_SCHEMA =
-  "company_control_next_cycle_v0";
+export const OUTCOME_ROUTING_STATE_STORE_REQUEST_SCHEMA =
+  "outcome_routing_state_store_request_v0";
+export const OUTCOME_ROUTING_STATE_STORE_SCHEMA =
+  "outcome_routing_state_store_v0";
+export const OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA =
+  "outcome_routing_state_store_result_v0";
+export const OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA =
+  "outcome_routing_state_reconcile_request_v0";
+export const OUTCOME_ROUTING_STATE_RECONCILIATION_SCHEMA =
+  "outcome_routing_state_reconciliation_v0";
+export const OUTCOME_ROUTING_STATE_BIND_REQUEST_SCHEMA =
+  "outcome_routing_state_bind_request_v0";
+export const OUTCOME_ROUTING_NEXT_CYCLE_REQUEST_SCHEMA =
+  "outcome_routing_next_cycle_request_v0";
+export const OUTCOME_ROUTING_NEXT_CYCLE_SCHEMA =
+  "outcome_routing_next_cycle_v0";
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -74,7 +76,7 @@ function safeGoalSegment(goalId: string): string {
   return `${label}-${digest}`;
 }
 
-export function companyControlStatePath(runtimeRoot: string, goalId: string): string {
+export function outcomeRoutingStatePath(runtimeRoot: string, goalId: string): string {
   if (!isAbsolute(runtimeRoot)) {
     throw new EffectRuntimeRequestError("runtime_root must be absolute");
   }
@@ -82,7 +84,7 @@ export function companyControlStatePath(runtimeRoot: string, goalId: string): st
     runtimeRoot,
     "goals",
     safeGoalSegment(goalId),
-    "company-control-loop",
+    "outcome-routing",
     "state.json",
   );
 }
@@ -92,45 +94,87 @@ function storeRequest(value: unknown): {
   goalId: string;
   path: string;
 } {
-  const request = requireJsonObject(value, "company_control_state_store params");
-  if (request.schema_version !== COMPANY_CONTROL_STATE_STORE_REQUEST_SCHEMA) {
-    throw new EffectRuntimeRequestError("company control state store request schema mismatch");
+  const request = requireJsonObject(value, "outcome_routing_state_store params");
+  if (request.schema_version !== OUTCOME_ROUTING_STATE_STORE_REQUEST_SCHEMA) {
+    throw new EffectRuntimeRequestError("outcome routing state store request schema mismatch");
   }
   const runtimeRoot = requireNonEmptyString(request.runtime_root, "runtime_root");
   const goalId = requireNonEmptyString(request.goal_id, "goal_id");
-  return { request, goalId, path: companyControlStatePath(runtimeRoot, goalId) };
+  return { request, goalId, path: outcomeRoutingStatePath(runtimeRoot, goalId) };
 }
 
 function decodeStoredState(value: unknown, goalId: string): JsonObject {
-  const stored = requireJsonObject(value, "stored company control state");
+  const stored = requireJsonObject(value, "stored outcome routing state");
   if (
-    stored.schema_version !== COMPANY_CONTROL_STATE_STORE_SCHEMA ||
+    stored.schema_version !== OUTCOME_ROUTING_STATE_STORE_SCHEMA ||
     stored.goal_id !== goalId ||
     typeof stored.revision !== "string" ||
     !/^[a-f0-9]{64}$/.test(stored.revision)
   ) {
-    throw new EffectRuntimeRequestError("stored company control state is invalid");
+    throw new EffectRuntimeRequestError("stored outcome routing state is invalid");
   }
   const projection = requireJsonObject(stored.projection, "stored projection");
-  if (projection.schema_version !== COMPANY_CONTROL_LOOP_SCHEMA_VERSION) {
-    throw new EffectRuntimeRequestError("stored company control projection schema is invalid");
+  if (projection.schema_version !== OUTCOME_ROUTING_PLAN_SCHEMA_VERSION) {
+    throw new EffectRuntimeRequestError("stored outcome routing projection schema is invalid");
   }
+  const bindings = stored.todo_bindings === undefined
+    ? []
+    : requireBindings(stored.todo_bindings, projection);
   const reconciliation = stored.reconciliation === undefined
     ? null
     : requireJsonObject(stored.reconciliation, "stored reconciliation");
   if (
     reconciliation !== null &&
-    reconciliation.schema_version !== COMPANY_CONTROL_STATE_RECONCILIATION_SCHEMA
+    reconciliation.schema_version !== OUTCOME_ROUTING_STATE_RECONCILIATION_SCHEMA
   ) {
-    throw new EffectRuntimeRequestError("stored company control reconciliation is invalid");
+    throw new EffectRuntimeRequestError("stored outcome routing reconciliation is invalid");
   }
-  const revisionContent = reconciliation === null
-    ? projection
-    : { projection, reconciliation };
+  const revisionContent: JsonObject = { projection };
+  if (bindings.length > 0) revisionContent.todo_bindings = bindings;
+  if (reconciliation !== null) revisionContent.reconciliation = reconciliation;
   if (revision(revisionContent) !== stored.revision) {
-    throw new EffectRuntimeRequestError("stored company control state revision does not match content");
+    throw new EffectRuntimeRequestError("stored outcome routing state revision does not match content");
   }
   return stored;
+}
+
+function requireBindings(value: unknown, projection: JsonObject): JsonObject[] {
+  if (!Array.isArray(value)) {
+    throw new EffectRuntimeRequestError("outcome routing Todo bindings must be an array");
+  }
+  const workItems = projection.work_items;
+  if (!Array.isArray(workItems)) {
+    throw new EffectRuntimeRequestError("stored outcome work_items must be an array");
+  }
+  const targets = new Map(workItems.map((value) => {
+    const work = requireJsonObject(value, "stored outcome work item");
+    return [
+      requireNonEmptyString(work.work_item_id, "stored work_item_id"),
+      requireNonEmptyString(work.target_key, "stored target_key"),
+    ];
+  }));
+  const workIds = new Set<string>();
+  const todoIds = new Set<string>();
+  return value.map((value, index) => {
+    const binding = requireJsonObject(value, `todo_bindings[${index}]`);
+    const workItemId = requireNonEmptyString(binding.work_item_id, `todo_bindings[${index}].work_item_id`);
+    const targetKey = requireNonEmptyString(binding.target_key, `todo_bindings[${index}].target_key`);
+    const todoId = requireNonEmptyString(binding.todo_id, `todo_bindings[${index}].todo_id`);
+    if (targets.get(workItemId) !== targetKey) {
+      throw new EffectRuntimeRequestError("Todo binding must match a projected work item and target");
+    }
+    if (workIds.has(workItemId) || todoIds.has(todoId)) {
+      throw new EffectRuntimeRequestError("Todo bindings must have unique work_item_id and todo_id values");
+    }
+    workIds.add(workItemId);
+    todoIds.add(todoId);
+    return {
+      work_item_id: workItemId,
+      target_key: targetKey,
+      todo_id: todoId,
+      role: requireStringLiteral(binding.role, ["agent", "user"] as const, `todo_bindings[${index}].role`),
+    };
+  });
 }
 
 async function readStoredState(path: string, goalId: string): Promise<JsonObject | null> {
@@ -142,10 +186,10 @@ async function readStoredState(path: string, goalId: string): Promise<JsonObject
   }
 }
 
-export async function loadCompanyControlState(value: unknown): Promise<JsonObject> {
+export async function loadOutcomeRoutingState(value: unknown): Promise<JsonObject> {
   const { goalId, path } = storeRequest(value);
   return {
-    schema_version: COMPANY_CONTROL_STATE_STORE_RESULT_SCHEMA,
+    schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA,
     operation: "load",
     goal_id: goalId,
     path,
@@ -153,19 +197,19 @@ export async function loadCompanyControlState(value: unknown): Promise<JsonObjec
   };
 }
 
-export async function writeCompanyControlState(value: unknown): Promise<JsonObject> {
+export async function writeOutcomeRoutingState(value: unknown): Promise<JsonObject> {
   const { request, goalId, path } = storeRequest(value);
   const expectedRevision = optionalNonEmptyString(
     request.expected_revision,
     "expected_revision",
   );
-  const projection = projectCompanyControlLoop(request.state);
-  const nextRevision = revision(projection);
+  const projection = projectOutcomeRoutingPlan(request.state);
+  const nextRevision = revision({ projection });
   return await withFileMutationLock(path, async () => {
     const existing = await readStoredState(path, goalId);
     if (existing?.revision === nextRevision) {
       return {
-        schema_version: COMPANY_CONTROL_STATE_STORE_RESULT_SCHEMA,
+        schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA,
         operation: "write",
         goal_id: goalId,
         path,
@@ -176,14 +220,14 @@ export async function writeCompanyControlState(value: unknown): Promise<JsonObje
     }
     if (existing && expectedRevision === null) {
       throw new EffectRuntimeConflictError(
-        "expected_revision is required when company control state already exists",
+        "expected_revision is required when outcome routing state already exists",
       );
     }
     if (expectedRevision !== (existing?.revision ?? null)) {
-      throw new EffectRuntimeConflictError("company control state revision changed");
+      throw new EffectRuntimeConflictError("outcome routing state revision changed");
     }
     const stored: JsonObject = {
-      schema_version: COMPANY_CONTROL_STATE_STORE_SCHEMA,
+      schema_version: OUTCOME_ROUTING_STATE_STORE_SCHEMA,
       goal_id: goalId,
       revision: nextRevision,
       updated_at: requireNonEmptyString(request.updated_at, "updated_at"),
@@ -192,10 +236,10 @@ export async function writeCompanyControlState(value: unknown): Promise<JsonObje
     await atomicWriteJson(path, stored);
     const readback = await readStoredState(path, goalId);
     if (!readback || readback.revision !== nextRevision) {
-      throw new Error("company control state readback failed");
+      throw new Error("outcome routing state readback failed");
     }
     return {
-      schema_version: COMPANY_CONTROL_STATE_STORE_RESULT_SCHEMA,
+      schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA,
       operation: "write",
       goal_id: goalId,
       path,
@@ -206,21 +250,56 @@ export async function writeCompanyControlState(value: unknown): Promise<JsonObje
   });
 }
 
+export async function bindOutcomeRoutingTodos(value: unknown): Promise<JsonObject> {
+  const request = requireJsonObject(value, "outcome_routing_state_bind params");
+  if (request.schema_version !== OUTCOME_ROUTING_STATE_BIND_REQUEST_SCHEMA) {
+    throw new EffectRuntimeRequestError("outcome routing Todo bind request schema mismatch");
+  }
+  const runtimeRoot = requireNonEmptyString(request.runtime_root, "runtime_root");
+  const goalId = requireNonEmptyString(request.goal_id, "goal_id");
+  const path = outcomeRoutingStatePath(runtimeRoot, goalId);
+  const expectedRevision = requireNonEmptyString(request.expected_revision, "expected_revision");
+  const updatedAt = requireNonEmptyString(request.updated_at, "updated_at");
+  return await withFileMutationLock(path, async () => {
+    const existing = await readStoredState(path, goalId);
+    if (!existing) throw new EffectRuntimeRequestError("persisted outcome routing state does not exist");
+    if (existing.revision !== expectedRevision) {
+      throw new EffectRuntimeConflictError("outcome routing state revision changed");
+    }
+    const projection = requireJsonObject(existing.projection, "stored projection");
+    const todoBindings = requireBindings(request.todo_bindings, projection);
+    const revisionContent: JsonObject = { projection };
+    if (todoBindings.length > 0) revisionContent.todo_bindings = todoBindings;
+    if (existing.reconciliation !== undefined) {
+      revisionContent.reconciliation = requireJsonObject(existing.reconciliation, "stored reconciliation");
+    }
+    const nextRevision = revision(revisionContent);
+    if (nextRevision === existing.revision) {
+      return { schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA, operation: "bind", goal_id: goalId, path, state: existing, written: false, replayed: true };
+    }
+    const nextState: JsonObject = { ...existing, ...revisionContent, revision: nextRevision, updated_at: updatedAt };
+    await atomicWriteJson(path, nextState);
+    const readback = await readStoredState(path, goalId);
+    if (!readback || readback.revision !== nextRevision) throw new Error("outcome routing Todo binding readback failed");
+    return { schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA, operation: "bind", goal_id: goalId, path, state: readback, written: true, replayed: false };
+  });
+}
+
 function todoReconciliation(value: unknown, projection: JsonObject): JsonObject {
-  const request = requireJsonObject(value, "company control reconciliation");
+  const request = requireJsonObject(value, "outcome routing reconciliation");
   if (!Array.isArray(request.observations)) {
-    throw new EffectRuntimeRequestError("company control observations must be an array");
+    throw new EffectRuntimeRequestError("outcome routing observations must be an array");
   }
   const workItems = projection.work_items;
   if (!Array.isArray(workItems)) {
-    throw new EffectRuntimeRequestError("stored company work_items must be an array");
+    throw new EffectRuntimeRequestError("stored outcome work_items must be an array");
   }
   const byTarget = new Map<string, JsonObject>();
   for (const item of workItems) {
-    const work = requireJsonObject(item, "stored company work item");
+    const work = requireJsonObject(item, "stored outcome work item");
     const target = requireNonEmptyString(work.target_key, "stored work target_key");
     if (byTarget.has(target)) {
-      throw new EffectRuntimeRequestError("stored company work target_key must be unique");
+      throw new EffectRuntimeRequestError("stored outcome work target_key must be unique");
     }
     byTarget.set(target, work);
   }
@@ -229,13 +308,13 @@ function todoReconciliation(value: unknown, projection: JsonObject): JsonObject 
     const raw = requireJsonObject(value, `observations[${index}]`);
     const targetKey = requireNonEmptyString(raw.target_key, `observations[${index}].target_key`);
     if (seenTargets.has(targetKey)) {
-      throw new EffectRuntimeRequestError("company Todo observations must have unique target_key values");
+      throw new EffectRuntimeRequestError("routed Todo observations must have unique target_key values");
     }
     seenTargets.add(targetKey);
     const work = byTarget.get(targetKey);
     if (!work) {
       throw new EffectRuntimeRequestError(
-        `company Todo observation target_key ${JSON.stringify(targetKey)} is unknown`,
+        `routed Todo observation target_key ${JSON.stringify(targetKey)} is unknown`,
       );
     }
     const todoStatus = requireStringLiteral(
@@ -265,7 +344,7 @@ function todoReconciliation(value: unknown, projection: JsonObject): JsonObject 
     };
   });
   return {
-    schema_version: COMPANY_CONTROL_STATE_RECONCILIATION_SCHEMA,
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILIATION_SCHEMA,
     observations,
     replan_required: observations.some((item) =>
       item.next_status === "replanning" || item.next_status === "awaiting_evidence"
@@ -273,14 +352,14 @@ function todoReconciliation(value: unknown, projection: JsonObject): JsonObject 
   };
 }
 
-export async function reconcileCompanyControlState(value: unknown): Promise<JsonObject> {
-  const request = requireJsonObject(value, "company_control_state_reconcile params");
-  if (request.schema_version !== COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA) {
-    throw new EffectRuntimeRequestError("company control reconciliation request schema mismatch");
+export async function reconcileOutcomeRoutingState(value: unknown): Promise<JsonObject> {
+  const request = requireJsonObject(value, "outcome_routing_state_reconcile params");
+  if (request.schema_version !== OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA) {
+    throw new EffectRuntimeRequestError("outcome routing reconciliation request schema mismatch");
   }
   const runtimeRoot = requireNonEmptyString(request.runtime_root, "runtime_root");
   const goalId = requireNonEmptyString(request.goal_id, "goal_id");
-  const path = companyControlStatePath(runtimeRoot, goalId);
+  const path = outcomeRoutingStatePath(runtimeRoot, goalId);
   const expectedRevision = requireNonEmptyString(
     request.expected_revision,
     "expected_revision",
@@ -290,14 +369,18 @@ export async function reconcileCompanyControlState(value: unknown): Promise<Json
   return await withFileMutationLock(path, async () => {
     const existing = await readStoredState(path, goalId);
     if (!existing) {
-      throw new EffectRuntimeRequestError("persisted company control state does not exist");
+      throw new EffectRuntimeRequestError("persisted outcome routing state does not exist");
     }
     if (existing.revision !== expectedRevision) {
-      throw new EffectRuntimeConflictError("company control state revision changed");
+      throw new EffectRuntimeConflictError("outcome routing state revision changed");
     }
     const projection = requireJsonObject(existing.projection, "stored projection");
     const reconciliation = todoReconciliation(request, projection);
-    const nextRevision = revision({ projection, reconciliation });
+    const revisionContent: JsonObject = { projection, reconciliation };
+    if (Array.isArray(existing.todo_bindings) && existing.todo_bindings.length > 0) {
+      revisionContent.todo_bindings = existing.todo_bindings;
+    }
+    const nextRevision = revision(revisionContent);
     const nextState: JsonObject = {
       ...existing,
       revision: nextRevision,
@@ -306,7 +389,7 @@ export async function reconcileCompanyControlState(value: unknown): Promise<Json
     };
     if (!execute) {
       return {
-        schema_version: COMPANY_CONTROL_STATE_STORE_RESULT_SCHEMA,
+        schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA,
         operation: "reconcile",
         goal_id: goalId,
         path,
@@ -318,7 +401,7 @@ export async function reconcileCompanyControlState(value: unknown): Promise<Json
     }
     if (existing.revision === nextRevision) {
       return {
-        schema_version: COMPANY_CONTROL_STATE_STORE_RESULT_SCHEMA,
+        schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA,
         operation: "reconcile",
         goal_id: goalId,
         path,
@@ -331,10 +414,10 @@ export async function reconcileCompanyControlState(value: unknown): Promise<Json
     await atomicWriteJson(path, nextState);
     const readback = await readStoredState(path, goalId);
     if (!readback || readback.revision !== nextRevision) {
-      throw new Error("company control reconciliation readback failed");
+      throw new Error("outcome routing reconciliation readback failed");
     }
     return {
-      schema_version: COMPANY_CONTROL_STATE_STORE_RESULT_SCHEMA,
+      schema_version: OUTCOME_ROUTING_STATE_STORE_RESULT_SCHEMA,
       operation: "reconcile",
       goal_id: goalId,
       path,
@@ -346,10 +429,10 @@ export async function reconcileCompanyControlState(value: unknown): Promise<Json
   });
 }
 
-export function planCompanyControlNextCycle(value: unknown): JsonObject {
-  const request = requireJsonObject(value, "company_control_next_cycle params");
-  if (request.schema_version !== COMPANY_CONTROL_NEXT_CYCLE_REQUEST_SCHEMA) {
-    throw new EffectRuntimeRequestError("company control next-cycle request schema mismatch");
+export function planOutcomeRoutingNextCycle(value: unknown): JsonObject {
+  const request = requireJsonObject(value, "outcome_routing_next_cycle params");
+  if (request.schema_version !== OUTCOME_ROUTING_NEXT_CYCLE_REQUEST_SCHEMA) {
+    throw new EffectRuntimeRequestError("outcome routing next-cycle request schema mismatch");
   }
   const goalId = requireNonEmptyString(request.goal_id, "goal_id");
   const stored = decodeStoredState(request.state, goalId);
@@ -359,7 +442,7 @@ export function planCompanyControlNextCycle(value: unknown): JsonObject {
     : requireJsonObject(stored.reconciliation, "stored reconciliation");
   const observations = reconciliation?.observations;
   if (!Array.isArray(observations) || observations.length === 0) {
-    throw new EffectRuntimeRequestError("company control next cycle requires Todo reconciliation");
+    throw new EffectRuntimeRequestError("outcome routing next cycle requires Todo reconciliation");
   }
   const byTarget = new Map<string, JsonObject>();
   for (const value of observations) {
@@ -371,19 +454,19 @@ export function planCompanyControlNextCycle(value: unknown): JsonObject {
   }
   const workItems = projection.work_items;
   if (!Array.isArray(workItems)) {
-    throw new EffectRuntimeRequestError("stored company work_items must be an array");
+    throw new EffectRuntimeRequestError("stored outcome work_items must be an array");
   }
   const nextWorkItems: JsonObject[] = [];
   const feedback: JsonObject[] = Array.isArray(projection.feedback)
     ? projection.feedback.map((item) => {
-      const prior = requireJsonObject(item, "stored company feedback");
+      const prior = requireJsonObject(item, "stored routing feedback");
       const { disposition: _disposition, ...requestFeedback } = prior;
       return requestFeedback;
     })
     : [];
   let convergedCount = 0;
   for (const value of workItems) {
-    const work = requireJsonObject(value, "stored company work item");
+    const work = requireJsonObject(value, "stored outcome work item");
     const targetKey = requireNonEmptyString(work.target_key, "stored work target_key");
     const observation = byTarget.get(targetKey);
     const nextStatus = observation?.next_status;
@@ -438,16 +521,16 @@ export function planCompanyControlNextCycle(value: unknown): JsonObject {
     }
   }
   const nextState: JsonObject = {
-    schema_version: "company_control_loop_request_v0",
+    schema_version: "outcome_routing_plan_request_v0",
     direction: projection.direction,
     cycle: Number(projection.cycle) + 1,
     outcomes: projection.outcomes,
     work_items: nextWorkItems,
     feedback,
   };
-  const nextProjection = projectCompanyControlLoop(nextState);
+  const nextProjection = projectOutcomeRoutingPlan(nextState);
   return {
-    schema_version: COMPANY_CONTROL_NEXT_CYCLE_SCHEMA,
+    schema_version: OUTCOME_ROUTING_NEXT_CYCLE_SCHEMA,
     goal_id: goalId,
     source_revision: stored.revision,
     converged_work_item_count: convergedCount,

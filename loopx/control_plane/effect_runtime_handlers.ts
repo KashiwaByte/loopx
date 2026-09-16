@@ -173,14 +173,15 @@ import {
 } from "./work_items/planning_inventory.ts";
 import { resolveRefreshRecommendation } from "./work_items/refresh_recommendation.ts";
 import {
-  projectCompanyControlLoop,
-} from "./work_items/company_control_loop.ts";
+  projectOutcomeRoutingPlan,
+} from "./work_items/outcome_routing_plan.ts";
 import {
-  loadCompanyControlState,
-  planCompanyControlNextCycle,
-  reconcileCompanyControlState,
-  writeCompanyControlState,
-} from "./work_items/company_control_state.ts";
+  bindOutcomeRoutingTodos,
+  loadOutcomeRoutingState,
+  planOutcomeRoutingNextCycle,
+  reconcileOutcomeRoutingState,
+  writeOutcomeRoutingState,
+} from "./work_items/outcome_routing_state.ts";
 import {
   validateInteractionProjectionHookInvocation,
   validateInteractionProjectionHookRegistration,
@@ -460,11 +461,12 @@ export function createEffectRuntimeHandlers(
     ["work_item.planning_inventory.project", projectTodoPlanningInventory],
     ["work_item.planning_inventory.detail", projectTodoPlanningInventoryDetail],
     ["work_item.refresh_recommendation.resolve", resolveRefreshRecommendation],
-    ["work_item.company_control_loop.project", projectCompanyControlLoop],
-    ["work_item.company_control_state.load", loadCompanyControlState],
-    ["work_item.company_control_state.next_cycle", planCompanyControlNextCycle],
-    ["work_item.company_control_state.reconcile", reconcileCompanyControlState],
-    ["work_item.company_control_state.write", writeCompanyControlState],
+    ["work_item.outcome_routing_plan.project", projectOutcomeRoutingPlan],
+    ["work_item.outcome_routing_state.bind", bindOutcomeRoutingTodos],
+    ["work_item.outcome_routing_state.load", loadOutcomeRoutingState],
+    ["work_item.outcome_routing_state.next_cycle", planOutcomeRoutingNextCycle],
+    ["work_item.outcome_routing_state.reconcile", reconcileOutcomeRoutingState],
+    ["work_item.outcome_routing_state.write", writeOutcomeRoutingState],
     ["work_item.delivery_history.project", projectDeliveryHistory],
     ["work_item.delivery_response.project", projectDeliveryResponse],
     ["work_item.delivery_claim.validate", validateDeliveryClaim],

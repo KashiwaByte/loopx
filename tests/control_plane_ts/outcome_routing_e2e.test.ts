@@ -5,17 +5,17 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
-  COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
-  COMPANY_CONTROL_STATE_STORE_REQUEST_SCHEMA,
-  loadCompanyControlState,
-  planCompanyControlNextCycle,
-  reconcileCompanyControlState,
-  writeCompanyControlState,
-} from "../../loopx/control_plane/work_items/company_control_state.ts";
+  OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
+  OUTCOME_ROUTING_STATE_STORE_REQUEST_SCHEMA,
+  loadOutcomeRoutingState,
+  planOutcomeRoutingNextCycle,
+  reconcileOutcomeRoutingState,
+  writeOutcomeRoutingState,
+} from "../../loopx/control_plane/work_items/outcome_routing_state.ts";
 
 function state() {
   return {
-    schema_version: "company_control_loop_request_v0",
+    schema_version: "outcome_routing_plan_request_v0",
     direction: "Improve durable customer value.",
     cycle: 1,
     outcomes: [{
@@ -62,18 +62,18 @@ function state() {
 
 function storeRequest(runtimeRoot: string, extra: Record<string, unknown>) {
   return {
-    schema_version: COMPANY_CONTROL_STATE_STORE_REQUEST_SCHEMA,
+    schema_version: OUTCOME_ROUTING_STATE_STORE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     ...extra,
   };
 }
 
-test("company CEO v0 closes AI, human, restart, escalation, and convergence scenarios", async (t) => {
+test("outcome routing v0 closes AI, human, restart, escalation, and convergence scenarios", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-e2e-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
 
-  const first = await writeCompanyControlState(storeRequest(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(storeRequest(runtimeRoot, {
     state: state(),
     updated_at: "2026-09-17T00:00:00Z",
   }));
@@ -83,11 +83,11 @@ test("company CEO v0 closes AI, human, restart, escalation, and convergence scen
     ["ai_execute", "human_decide", "human_execute"],
   );
 
-  const restarted = await loadCompanyControlState(storeRequest(runtimeRoot, {}));
+  const restarted = await loadOutcomeRoutingState(storeRequest(runtimeRoot, {}));
   assert.deepEqual(restarted.state, first.state);
 
-  const failedCycle = await reconcileCompanyControlState({
-    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+  const failedCycle = await reconcileOutcomeRoutingState({
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     expected_revision: firstState.revision,
@@ -113,8 +113,8 @@ test("company CEO v0 closes AI, human, restart, escalation, and convergence scen
       },
     ],
   });
-  const replan = planCompanyControlNextCycle({
-    schema_version: "company_control_next_cycle_request_v0",
+  const replan = planOutcomeRoutingNextCycle({
+    schema_version: "outcome_routing_next_cycle_request_v0",
     goal_id: "company-goal",
     state: failedCycle.state,
   });
@@ -125,13 +125,13 @@ test("company CEO v0 closes AI, human, restart, escalation, and convergence scen
   assert.equal(replannedState.feedback.at(-1).kind, "risk");
   assert.equal(replannedState.work_items[0].work_item_id, "work_human_execution");
 
-  const second = await writeCompanyControlState(storeRequest(runtimeRoot, {
+  const second = await writeOutcomeRoutingState(storeRequest(runtimeRoot, {
     state: replannedState,
     expected_revision: (failedCycle.state as Record<string, unknown>).revision,
     updated_at: "2026-09-17T00:02:00Z",
   }));
-  const completedCycle = await reconcileCompanyControlState({
-    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+  const completedCycle = await reconcileOutcomeRoutingState({
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     expected_revision: (second.state as Record<string, unknown>).revision,
@@ -144,8 +144,8 @@ test("company CEO v0 closes AI, human, restart, escalation, and convergence scen
       evidence_ref: "record:customer-interview",
     }],
   });
-  const converged = planCompanyControlNextCycle({
-    schema_version: "company_control_next_cycle_request_v0",
+  const converged = planOutcomeRoutingNextCycle({
+    schema_version: "outcome_routing_next_cycle_request_v0",
     goal_id: "company-goal",
     state: completedCycle.state,
   });

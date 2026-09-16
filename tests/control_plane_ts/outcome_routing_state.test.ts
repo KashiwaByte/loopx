@@ -5,18 +5,19 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
-  COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
-  COMPANY_CONTROL_STATE_STORE_REQUEST_SCHEMA,
-  companyControlStatePath,
-  loadCompanyControlState,
-  planCompanyControlNextCycle,
-  reconcileCompanyControlState,
-  writeCompanyControlState,
-} from "../../loopx/control_plane/work_items/company_control_state.ts";
+  bindOutcomeRoutingTodos,
+  OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
+  OUTCOME_ROUTING_STATE_STORE_REQUEST_SCHEMA,
+  outcomeRoutingStatePath,
+  loadOutcomeRoutingState,
+  planOutcomeRoutingNextCycle,
+  reconcileOutcomeRoutingState,
+  writeOutcomeRoutingState,
+} from "../../loopx/control_plane/work_items/outcome_routing_state.ts";
 
 function state(direction = "Improve durable customer value.") {
   return {
-    schema_version: "company_control_loop_request_v0",
+    schema_version: "outcome_routing_plan_request_v0",
     direction,
     cycle: 1,
     outcomes: [{
@@ -49,18 +50,18 @@ function stateWithWork() {
 
 function request(runtimeRoot: string, extra: Record<string, unknown> = {}) {
   return {
-    schema_version: COMPANY_CONTROL_STATE_STORE_REQUEST_SCHEMA,
+    schema_version: OUTCOME_ROUTING_STATE_STORE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     ...extra,
   };
 }
 
-test("company control state writes atomically and reads back exact revision", async (t) => {
+test("outcome routing state writes atomically and reads back exact revision", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
 
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: state(),
     updated_at: "2026-09-17T00:00:00Z",
   }));
@@ -68,11 +69,11 @@ test("company control state writes atomically and reads back exact revision", as
   const stored = first.state as Record<string, unknown>;
   assert.match(String(stored.revision), /^[a-f0-9]{64}$/);
 
-  const loaded = await loadCompanyControlState(request(runtimeRoot));
+  const loaded = await loadOutcomeRoutingState(request(runtimeRoot));
   assert.deepEqual(loaded.state, first.state);
-  assert.equal(loaded.path, companyControlStatePath(runtimeRoot, "company-goal"));
+  assert.equal(loaded.path, outcomeRoutingStatePath(runtimeRoot, "company-goal"));
 
-  const replay = await writeCompanyControlState(request(runtimeRoot, {
+  const replay = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: state(),
     updated_at: "2026-09-17T00:01:00Z",
   }));
@@ -80,31 +81,31 @@ test("company control state writes atomically and reads back exact revision", as
   assert.equal(replay.replayed, true);
 });
 
-test("company control state requires revision matching for updates", async (t) => {
+test("outcome routing state requires revision matching for updates", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: state(),
     updated_at: "2026-09-17T00:00:00Z",
   }));
   const stored = first.state as Record<string, unknown>;
 
   await assert.rejects(
-    writeCompanyControlState(request(runtimeRoot, {
+    writeOutcomeRoutingState(request(runtimeRoot, {
       state: state("Changed direction."),
       updated_at: "2026-09-17T00:01:00Z",
     })),
     /expected_revision is required/,
   );
   await assert.rejects(
-    writeCompanyControlState(request(runtimeRoot, {
+    writeOutcomeRoutingState(request(runtimeRoot, {
       state: state("Changed direction."),
       expected_revision: "0".repeat(64),
       updated_at: "2026-09-17T00:01:00Z",
     })),
     /revision changed/,
   );
-  const updated = await writeCompanyControlState(request(runtimeRoot, {
+  const updated = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: state("Changed direction."),
     expected_revision: stored.revision,
     updated_at: "2026-09-17T00:01:00Z",
@@ -116,27 +117,76 @@ test("company control state requires revision matching for updates", async (t) =
   );
 });
 
-test("company control state path is bounded and rejects relative runtime roots", () => {
-  const left = companyControlStatePath("/runtime", "company goal");
-  const right = companyControlStatePath("/runtime", "company-goal");
+test("Todo bindings are revisioned profile state with exact work identity", async (t) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-outcome-bind-"));
+  t.after(async () => await rm(runtimeRoot, { recursive: true, force: true }));
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
+    state: {
+      ...stateWithWork(),
+      direction: "Route human work without widening shared Todo identity.",
+    },
+    updated_at: "2026-09-17T00:00:00Z",
+  }));
+  const stored = first.state as Record<string, any>;
+  const bound = await bindOutcomeRoutingTodos({
+    schema_version: "outcome_routing_state_bind_request_v0",
+    runtime_root: runtimeRoot,
+    goal_id: "company-goal",
+    expected_revision: stored.revision,
+    updated_at: "2026-09-17T00:01:00Z",
+    todo_bindings: [{
+      work_item_id: "work_activation",
+      target_key: "activation_delivery",
+      todo_id: "todo_human_decision",
+      role: "user",
+    }],
+  });
+  assert.notEqual((bound.state as Record<string, any>).revision, stored.revision);
+  assert.deepEqual((bound.state as Record<string, any>).todo_bindings, [{
+    work_item_id: "work_activation",
+    target_key: "activation_delivery",
+    todo_id: "todo_human_decision",
+    role: "user",
+  }]);
+  await assert.rejects(
+    bindOutcomeRoutingTodos({
+      schema_version: "outcome_routing_state_bind_request_v0",
+      runtime_root: runtimeRoot,
+      goal_id: "company-goal",
+      expected_revision: (bound.state as Record<string, any>).revision,
+      updated_at: "2026-09-17T00:02:00Z",
+      todo_bindings: [{
+        work_item_id: "work_activation",
+        target_key: "wrong_target",
+        todo_id: "todo_human_decision",
+        role: "user",
+      }],
+    }),
+    /must match a projected work item and target/,
+  );
+});
+
+test("outcome routing state path is bounded and rejects relative runtime roots", () => {
+  const left = outcomeRoutingStatePath("/runtime", "company goal");
+  const right = outcomeRoutingStatePath("/runtime", "company-goal");
   assert.notEqual(left, right);
-  assert.match(left, /company-control-loop\/state\.json$/);
+  assert.match(left, /outcome-routing\/state\.json$/);
   assert.throws(
-    () => companyControlStatePath("relative", "company-goal"),
+    () => outcomeRoutingStatePath("relative", "company-goal"),
     /runtime_root must be absolute/,
   );
 });
 
-test("company control reconciliation previews and persists evidence-gated Todo status", async (t) => {
+test("outcome routing reconciliation previews and persists evidence-gated Todo status", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: stateWithWork(),
     updated_at: "2026-09-17T00:00:00Z",
   }));
   const original = first.state as Record<string, unknown>;
   const reconcileRequest = {
-    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     expected_revision: original.revision,
@@ -149,16 +199,16 @@ test("company control reconciliation previews and persists evidence-gated Todo s
       evidence_ref: "artifact:activation-report",
     }],
   };
-  const preview = await reconcileCompanyControlState(reconcileRequest);
+  const preview = await reconcileOutcomeRoutingState(reconcileRequest);
   assert.equal(preview.dry_run, true);
   assert.equal(preview.written, false);
   assert.equal(
     ((preview.state as Record<string, any>).reconciliation.observations[0]).next_status,
     "done",
   );
-  assert.deepEqual((await loadCompanyControlState(request(runtimeRoot))).state, first.state);
+  assert.deepEqual((await loadOutcomeRoutingState(request(runtimeRoot))).state, first.state);
 
-  const written = await reconcileCompanyControlState({
+  const written = await reconcileOutcomeRoutingState({
     ...reconcileRequest,
     execute: true,
   });
@@ -168,7 +218,7 @@ test("company control reconciliation previews and persists evidence-gated Todo s
   assert.equal(reconciled.reconciliation.replan_required, false);
   assert.equal(reconciled.reconciliation.observations[0].evidence_ref, "artifact:activation-report");
 
-  const replay = await reconcileCompanyControlState({
+  const replay = await reconcileOutcomeRoutingState({
     ...reconcileRequest,
     expected_revision: reconciled.revision,
     updated_at: "2026-09-17T00:02:00Z",
@@ -178,10 +228,10 @@ test("company control reconciliation previews and persists evidence-gated Todo s
   assert.equal(replay.replayed, true);
 });
 
-test("company control reconciliation requests replanning for blocked or unproven completion", async (t) => {
+test("outcome routing reconciliation requests replanning for blocked or unproven completion", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: stateWithWork(),
     updated_at: "2026-09-17T00:00:00Z",
   }));
@@ -191,8 +241,8 @@ test("company control reconciliation requests replanning for blocked or unproven
     ["blocked", "replanning"],
     ["done", "awaiting_evidence"],
   ] as const) {
-    const result = await reconcileCompanyControlState({
-      schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+    const result = await reconcileOutcomeRoutingState({
+      schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
       runtime_root: runtimeRoot,
       goal_id: "company-goal",
       expected_revision: revision,
@@ -210,16 +260,16 @@ test("company control reconciliation requests replanning for blocked or unproven
   }
 });
 
-test("company control reconciliation rejects stale revisions and unknown targets", async (t) => {
+test("outcome routing reconciliation rejects stale revisions and unknown targets", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: stateWithWork(),
     updated_at: "2026-09-17T00:00:00Z",
   }));
   const revision = (first.state as Record<string, unknown>).revision;
   const base = {
-    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     expected_revision: revision,
@@ -227,7 +277,7 @@ test("company control reconciliation rejects stale revisions and unknown targets
     execute: false,
   };
   await assert.rejects(
-    reconcileCompanyControlState({
+    reconcileOutcomeRoutingState({
       ...base,
       expected_revision: "0".repeat(64),
       observations: [],
@@ -235,7 +285,7 @@ test("company control reconciliation rejects stale revisions and unknown targets
     /revision changed/,
   );
   await assert.rejects(
-    reconcileCompanyControlState({
+    reconcileOutcomeRoutingState({
       ...base,
       observations: [{
         target_key: "unknown_target",
@@ -260,12 +310,12 @@ test("next company cycle converts evidence and blockers into feedback and replan
     ai_capable: true,
     target_key: "retention_risk",
   });
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: input,
     updated_at: "2026-09-17T00:00:00Z",
   }));
-  const reconciled = await reconcileCompanyControlState({
-    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+  const reconciled = await reconcileOutcomeRoutingState({
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     expected_revision: (first.state as Record<string, unknown>).revision,
@@ -285,8 +335,8 @@ test("next company cycle converts evidence and blockers into feedback and replan
       },
     ],
   });
-  const next = planCompanyControlNextCycle({
-    schema_version: "company_control_next_cycle_request_v0",
+  const next = planOutcomeRoutingNextCycle({
+    schema_version: "outcome_routing_next_cycle_request_v0",
     goal_id: "company-goal",
     state: reconciled.state,
   });
@@ -309,12 +359,12 @@ test("next company cycle converts evidence and blockers into feedback and replan
 test("next company cycle reports goal convergence after all work has evidence", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: stateWithWork(),
     updated_at: "2026-09-17T00:00:00Z",
   }));
-  const reconciled = await reconcileCompanyControlState({
-    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+  const reconciled = await reconcileOutcomeRoutingState({
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     expected_revision: (first.state as Record<string, unknown>).revision,
@@ -327,8 +377,8 @@ test("next company cycle reports goal convergence after all work has evidence", 
       evidence_ref: "artifact:activation-report",
     }],
   });
-  const next = planCompanyControlNextCycle({
-    schema_version: "company_control_next_cycle_request_v0",
+  const next = planOutcomeRoutingNextCycle({
+    schema_version: "outcome_routing_next_cycle_request_v0",
     goal_id: "company-goal",
     state: reconciled.state,
   });
@@ -342,12 +392,12 @@ test("next company cycle keeps derived feedback ids valid for maximum-length wor
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
   const input = stateWithWork();
   input.work_items[0].work_item_id = `w${"a".repeat(127)}`;
-  const first = await writeCompanyControlState(request(runtimeRoot, {
+  const first = await writeOutcomeRoutingState(request(runtimeRoot, {
     state: input,
     updated_at: "2026-09-17T00:00:00Z",
   }));
-  const reconciled = await reconcileCompanyControlState({
-    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+  const reconciled = await reconcileOutcomeRoutingState({
+    schema_version: OUTCOME_ROUTING_STATE_RECONCILE_REQUEST_SCHEMA,
     runtime_root: runtimeRoot,
     goal_id: "company-goal",
     expected_revision: (first.state as Record<string, unknown>).revision,
@@ -361,8 +411,8 @@ test("next company cycle keeps derived feedback ids valid for maximum-length wor
     }],
   });
 
-  const next = planCompanyControlNextCycle({
-    schema_version: "company_control_next_cycle_request_v0",
+  const next = planOutcomeRoutingNextCycle({
+    schema_version: "outcome_routing_next_cycle_request_v0",
     goal_id: "company-goal",
     state: reconciled.state,
   });
@@ -370,8 +420,8 @@ test("next company cycle keeps derived feedback ids valid for maximum-length wor
   assert.match(feedback.feedback_id, /^todo_feedback_[a-f0-9]{24}$/);
   assert.ok(feedback.feedback_id.length <= 128);
   assert.deepEqual(
-    planCompanyControlNextCycle({
-      schema_version: "company_control_next_cycle_request_v0",
+    planOutcomeRoutingNextCycle({
+      schema_version: "outcome_routing_next_cycle_request_v0",
       goal_id: "company-goal",
       state: reconciled.state,
     }).state,

@@ -11,15 +11,15 @@ import {
 
 import type { JsonObject } from "../effect_program.ts";
 
-export const COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION =
-  "company_control_loop_request_v0";
-export const COMPANY_CONTROL_LOOP_SCHEMA_VERSION = "company_control_loop_v0";
+export const OUTCOME_ROUTING_PLAN_REQUEST_SCHEMA_VERSION =
+  "outcome_routing_plan_request_v0";
+export const OUTCOME_ROUTING_PLAN_SCHEMA_VERSION = "outcome_routing_plan_v0";
 const MAX_OUTCOMES = 128;
 const MAX_WORK_ITEMS = 256;
 const MAX_FEEDBACK_ITEMS = 256;
 const PUBLIC_ID = /^[a-z][a-z0-9_-]{2,127}$/;
 
-export const COMPANY_WORK_ROUTES = [
+export const OUTCOME_WORK_ROUTES = [
   "ai_execute",
   "human_decide",
   "human_execute",
@@ -27,15 +27,15 @@ export const COMPANY_WORK_ROUTES = [
   "reject",
 ] as const;
 
-export type CompanyWorkRoute = (typeof COMPANY_WORK_ROUTES)[number];
-export type CompanyAuthorityTier = "A" | "B" | "C" | "D";
+export type OutcomeWorkRoute = (typeof OUTCOME_WORK_ROUTES)[number];
+export type OutcomeAuthorityTier = "A" | "B" | "C" | "D";
 
-interface CompanyWorkItem extends JsonObject {
+interface OutcomeWorkItem extends JsonObject {
   work_item_id: string;
   outcome_id: string;
   title: string;
   acceptance: string;
-  authority_tier: CompanyAuthorityTier;
+  authority_tier: OutcomeAuthorityTier;
   ai_capable: boolean;
   prohibited: boolean;
   material_decision: boolean;
@@ -44,8 +44,8 @@ interface CompanyWorkItem extends JsonObject {
   target_key: string;
 }
 
-interface RoutedCompanyWorkItem extends CompanyWorkItem {
-  route: CompanyWorkRoute;
+interface RoutedOutcomeWorkItem extends OutcomeWorkItem {
+  route: OutcomeWorkRoute;
   route_reason: string;
   status:
     | "ready"
@@ -95,7 +95,7 @@ function requireUniqueIds(
   }
 }
 
-function companyWorkItem(value: unknown, label: string): CompanyWorkItem {
+function outcomeWorkItem(value: unknown, label: string): OutcomeWorkItem {
   const raw = requireJsonObject(value, label);
   const waitFor = optionalNonEmptyString(raw.wait_for, `${label}.wait_for`);
   return {
@@ -126,9 +126,9 @@ function companyWorkItem(value: unknown, label: string): CompanyWorkItem {
   };
 }
 
-export function routeCompanyWorkItem(
-  item: CompanyWorkItem,
-): { route: CompanyWorkRoute; reason: string } {
+export function routeOutcomeWorkItem(
+  item: OutcomeWorkItem,
+): { route: OutcomeWorkRoute; reason: string } {
   if (item.prohibited || item.authority_tier === "D") {
     return {
       route: "reject",
@@ -165,7 +165,7 @@ export function routeCompanyWorkItem(
   };
 }
 
-function routeStatus(route: CompanyWorkRoute): RoutedCompanyWorkItem["status"] {
+function routeStatus(route: OutcomeWorkRoute): RoutedOutcomeWorkItem["status"] {
   switch (route) {
     case "ai_execute": return "ready";
     case "human_decide": return "waiting_human_decision";
@@ -175,8 +175,8 @@ function routeStatus(route: CompanyWorkRoute): RoutedCompanyWorkItem["status"] {
   }
 }
 
-function todoProjection(item: CompanyWorkItem, route: CompanyWorkRoute): JsonObject {
-  const mapping: Record<CompanyWorkRoute, readonly [string, string]> = {
+function todoProjection(item: OutcomeWorkItem, route: OutcomeWorkRoute): JsonObject {
+  const mapping: Record<OutcomeWorkRoute, readonly [string, string]> = {
     ai_execute: ["agent", "advancement_task"],
     human_decide: ["user", "user_gate"],
     human_execute: ["user", "user_action"],
@@ -194,9 +194,9 @@ function todoProjection(item: CompanyWorkItem, route: CompanyWorkRoute): JsonObj
   };
 }
 
-function projectWorkItem(value: unknown, label: string): RoutedCompanyWorkItem {
-  const item = companyWorkItem(value, label);
-  const decision = routeCompanyWorkItem(item);
+function projectWorkItem(value: unknown, label: string): RoutedOutcomeWorkItem {
+  const item = outcomeWorkItem(value, label);
+  const decision = routeOutcomeWorkItem(item);
   return {
     ...item,
     route: decision.route,
@@ -239,98 +239,98 @@ function projectFeedback(value: unknown, label: string): JsonObject {
 }
 
 /**
- * Validate one company-level planning snapshot and project each open unit of
+ * Validate one outcome-level planning snapshot and project each open unit of
  * work into LoopX's existing Todo lanes. This is a pure control-plane
  * contract: providers own collection and execution, while LoopX owns routing
  * precedence and the provider-neutral projection.
  */
-export function projectCompanyControlLoop(value: unknown): JsonObject {
-  const request = requireJsonObject(value, "company_control_loop_request");
-  if (request.schema_version !== COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION) {
+export function projectOutcomeRoutingPlan(value: unknown): JsonObject {
+  const request = requireJsonObject(value, "outcome_routing_plan_request");
+  if (request.schema_version !== OUTCOME_ROUTING_PLAN_REQUEST_SCHEMA_VERSION) {
     throw new EffectRuntimeRequestError(
-      `company_control_loop_request.schema_version must be ${COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION}`,
+      `outcome_routing_plan_request.schema_version must be ${OUTCOME_ROUTING_PLAN_REQUEST_SCHEMA_VERSION}`,
     );
   }
-  const cycle = requireInteger(request.cycle, "company_control_loop_request.cycle");
+  const cycle = requireInteger(request.cycle, "outcome_routing_plan_request.cycle");
   if (cycle < 0 || !Number.isSafeInteger(cycle)) {
     throw new EffectRuntimeRequestError(
-      "company_control_loop_request.cycle must be a non-negative safe integer",
+      "outcome_routing_plan_request.cycle must be a non-negative safe integer",
     );
   }
   const outcomes = boundedArray(
     request.outcomes,
-    "company_control_loop_request.outcomes",
+    "outcome_routing_plan_request.outcomes",
     MAX_OUTCOMES,
   ).map((value, index) => {
     const raw = requireJsonObject(
       value,
-      `company_control_loop_request.outcomes[${index}]`,
+      `outcome_routing_plan_request.outcomes[${index}]`,
     );
     return {
       outcome_id: publicId(
         raw.outcome_id,
-        `company_control_loop_request.outcomes[${index}].outcome_id`,
+        `outcome_routing_plan_request.outcomes[${index}].outcome_id`,
       ),
       title: requireNonEmptyString(
         raw.title,
-        `company_control_loop_request.outcomes[${index}].title`,
+        `outcome_routing_plan_request.outcomes[${index}].title`,
       ),
       metric: requireNonEmptyString(
         raw.metric,
-        `company_control_loop_request.outcomes[${index}].metric`,
+        `outcome_routing_plan_request.outcomes[${index}].metric`,
       ),
       target: requireNonEmptyString(
         raw.target,
-        `company_control_loop_request.outcomes[${index}].target`,
+        `outcome_routing_plan_request.outcomes[${index}].target`,
       ),
       evidence_source: requireNonEmptyString(
         raw.evidence_source,
-        `company_control_loop_request.outcomes[${index}].evidence_source`,
+        `outcome_routing_plan_request.outcomes[${index}].evidence_source`,
       ),
     };
   });
-  requireUniqueIds(outcomes, "outcome_id", "company outcome_id values");
+  requireUniqueIds(outcomes, "outcome_id", "outcome_id values");
   const outcomeIds = new Set(outcomes.map((outcome) => outcome.outcome_id));
   const workItems = boundedArray(
     request.work_items,
-    "company_control_loop_request.work_items",
+    "outcome_routing_plan_request.work_items",
     MAX_WORK_ITEMS,
   ).map((item, index) => projectWorkItem(
     item,
-    `company_control_loop_request.work_items[${index}]`,
+    `outcome_routing_plan_request.work_items[${index}]`,
   ));
-  requireUniqueIds(workItems, "work_item_id", "company work_item_id values");
-  requireUniqueIds(workItems, "target_key", "company work target_key values");
+  requireUniqueIds(workItems, "work_item_id", "outcome work_item_id values");
+  requireUniqueIds(workItems, "target_key", "outcome work target_key values");
   for (const [index, item] of workItems.entries()) {
     if (!outcomeIds.has(item.outcome_id)) {
       throw new EffectRuntimeRequestError(
-        `company_control_loop_request.work_items[${index}].outcome_id must reference an outcome`,
+        `outcome_routing_plan_request.work_items[${index}].outcome_id must reference an outcome`,
       );
     }
   }
   const feedback = boundedArray(
     request.feedback,
-    "company_control_loop_request.feedback",
+    "outcome_routing_plan_request.feedback",
     MAX_FEEDBACK_ITEMS,
   ).map((item, index) => projectFeedback(
     item,
-    `company_control_loop_request.feedback[${index}]`,
+    `outcome_routing_plan_request.feedback[${index}]`,
   ));
-  requireUniqueIds(feedback, "feedback_id", "company feedback_id values");
+  requireUniqueIds(feedback, "feedback_id", "feedback_id values");
   for (const [index, item] of feedback.entries()) {
     for (const outcomeId of item.affected_outcome_ids as string[]) {
       if (!outcomeIds.has(outcomeId)) {
         throw new EffectRuntimeRequestError(
-          `company_control_loop_request.feedback[${index}].affected_outcome_ids must reference outcomes`,
+          `outcome_routing_plan_request.feedback[${index}].affected_outcome_ids must reference outcomes`,
         );
       }
     }
   }
   return {
-    schema_version: COMPANY_CONTROL_LOOP_SCHEMA_VERSION,
+    schema_version: OUTCOME_ROUTING_PLAN_SCHEMA_VERSION,
     direction: requireNonEmptyString(
       request.direction,
-      "company_control_loop_request.direction",
+      "outcome_routing_plan_request.direction",
     ),
     cycle,
     outcomes,

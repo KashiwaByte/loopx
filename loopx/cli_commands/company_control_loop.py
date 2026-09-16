@@ -26,13 +26,13 @@ def register_company_control_loop_command(
     )
     project = actions.add_parser(
         "project",
-        help="Project a company_control_loop_request_v0 JSON object without writing state.",
+        help="Project a outcome_routing_plan_request_v0 JSON object without writing state.",
     )
     add_subcommand_format(project)
     project.add_argument(
         "--state-json",
         required=True,
-        help="Path to a company_control_loop_request_v0 JSON object.",
+        help="Path to a outcome_routing_plan_request_v0 JSON object.",
     )
     save = actions.add_parser(
         "save",
@@ -43,7 +43,7 @@ def register_company_control_loop_command(
     save.add_argument(
         "--state-json",
         required=True,
-        help="Path to a company_control_loop_request_v0 JSON object.",
+        help="Path to a outcome_routing_plan_request_v0 JSON object.",
     )
     save.add_argument(
         "--expected-revision",
@@ -162,9 +162,9 @@ def handle_company_control_loop_command(
             if runtime_root is None:
                 raise ValueError("company control state requires a runtime root")
             projection = effect_runtime_result(
-                "work_item.company_control_state.load",
+                "work_item.outcome_routing_state.load",
                 {
-                    "schema_version": "company_control_state_store_request_v0",
+                    "schema_version": "outcome_routing_state_store_request_v0",
                     "runtime_root": str(runtime_root),
                     "goal_id": args.goal_id,
                 },
@@ -175,9 +175,9 @@ def handle_company_control_loop_command(
                 payload = {
                     "ok": True,
                     **effect_runtime_result(
-                        "work_item.company_control_state.next_cycle",
+                        "work_item.outcome_routing_state.next_cycle",
                         {
-                            "schema_version": "company_control_next_cycle_request_v0",
+                            "schema_version": "outcome_routing_next_cycle_request_v0",
                             "goal_id": args.goal_id,
                             "state": projection.get("state"),
                         },
@@ -210,7 +210,7 @@ def handle_company_control_loop_command(
         else:
             request = _read_json_object(args.state_json)
             projection = effect_runtime_result(
-                "work_item.company_control_loop.project",
+                "work_item.outcome_routing_plan.project",
                 request,
             )
             if command != "save":
@@ -227,7 +227,7 @@ def handle_company_control_loop_command(
                     if runtime_root is None:
                         raise ValueError("company control state requires a runtime root")
                     write_request: dict[str, Any] = {
-                        "schema_version": "company_control_state_store_request_v0",
+                        "schema_version": "outcome_routing_state_store_request_v0",
                         "runtime_root": str(runtime_root),
                         "goal_id": args.goal_id,
                         "state": request,
@@ -236,7 +236,7 @@ def handle_company_control_loop_command(
                     if args.expected_revision:
                         write_request["expected_revision"] = args.expected_revision
                     saved = effect_runtime_result(
-                        "work_item.company_control_state.write",
+                        "work_item.outcome_routing_state.write",
                         write_request,
                     )
                     payload = {"ok": True, "dry_run": False, **saved}
@@ -280,6 +280,11 @@ def _sync_todos(
         limit=500,
     )
     todos = [item for item in listing.get("todos", []) if isinstance(item, dict)]
+    by_id = {
+        str(todo.get("todo_id")): todo
+        for todo in todos
+        if todo.get("todo_id")
+    }
     by_target: dict[str, dict[str, Any]] = {}
     for todo in todos:
         target = str(todo.get("target_key") or "").strip()
@@ -288,6 +293,11 @@ def _sync_todos(
         if target in by_target:
             raise ValueError(f"multiple LoopX Todos use target_key {target!r}")
         by_target[target] = todo
+    stored_bindings = {
+        str(binding.get("work_item_id")): binding
+        for binding in state.get("todo_bindings", [])
+        if isinstance(binding, dict) and binding.get("work_item_id")
+    }
     actions: list[dict[str, Any]] = []
     seen_targets: set[str] = set()
     for raw in work_items:
@@ -300,7 +310,10 @@ def _sync_todos(
         if not target or target in seen_targets:
             raise ValueError("company work target_key must be present and unique")
         seen_targets.add(target)
-        matched = by_target.get(target)
+        binding = stored_bindings.get(str(raw.get("work_item_id")))
+        matched = by_id.get(str(binding.get("todo_id"))) if binding else None
+        if matched is None and todo_projection.get("role") == "agent":
+            matched = by_target.get(target)
         if matched:
             actions.append({
                 "work_item_id": raw.get("work_item_id"),
@@ -319,7 +332,9 @@ def _sync_todos(
         if execute:
             role = str(todo_projection.get("role") or "")
             task_class = str(todo_projection.get("task_class") or "")
-            monitor_metadata: dict[str, Any] = {"target_key": target}
+            monitor_metadata: dict[str, Any] = {}
+            if role == "agent":
+                monitor_metadata["target_key"] = target
             if task_class == "continuous_monitor":
                 monitor_metadata["watch_only"] = "true"
             created = add_goal_todo(
@@ -356,17 +371,44 @@ def _sync_todos(
             project=project,
             limit=500,
         )
-        readback_by_target = {
-            str(item.get("target_key")): item
+        readback_by_id = {
+            str(item.get("todo_id")): item
             for item in readback.get("todos", [])
-            if isinstance(item, dict) and item.get("target_key")
+            if isinstance(item, dict) and item.get("todo_id")
         }
-        missing = sorted(seen_targets - readback_by_target.keys())
+        missing = sorted(
+            str(action.get("todo_id"))
+            for action in actions
+            if str(action.get("todo_id")) not in readback_by_id
+        )
         if missing:
-            raise RuntimeError(f"LoopX Todo readback missing target keys: {missing}")
-        for action in actions:
-            item = readback_by_target[str(action["target_key"])]
-            action["todo_id"] = item.get("todo_id")
+            raise RuntimeError(f"LoopX Todo readback missing ids: {missing}")
+        binding_result = effect_runtime_result(
+            "work_item.outcome_routing_state.bind",
+            {
+                "schema_version": "outcome_routing_state_bind_request_v0",
+                "runtime_root": str(runtime_root),
+                "goal_id": goal_id,
+                "expected_revision": state.get("revision"),
+                "updated_at": datetime.now(UTC).isoformat(),
+                "todo_bindings": [
+                    {
+                        "work_item_id": action["work_item_id"],
+                        "target_key": action["target_key"],
+                        "todo_id": action["todo_id"],
+                        "role": action.get("role") or next(
+                            str(item["todo_projection"].get("role"))
+                            for item in work_items
+                            if isinstance(item, dict)
+                            and item.get("work_item_id") == action["work_item_id"]
+                            and isinstance(item.get("todo_projection"), dict)
+                        ),
+                    }
+                    for action in actions
+                ],
+            },
+        )
+        state = binding_result.get("state", state)
     return {
         "ok": True,
         "dry_run": not execute,
@@ -396,10 +438,13 @@ def _reconcile_todos(
     work_items = company.get("work_items")
     if not isinstance(work_items, list):
         raise TypeError("persisted company work_items must be an array")
-    targets = {
-        str(item.get("target_key"))
-        for item in work_items
-        if isinstance(item, dict) and item.get("target_key")
+    bindings = [item for item in state.get("todo_bindings", []) if isinstance(item, dict)]
+    if not bindings:
+        raise ValueError("persisted outcome routing state has no Todo bindings; run sync-todos first")
+    bindings_by_todo = {
+        str(item.get("todo_id")): item
+        for item in bindings
+        if item.get("todo_id")
     }
     listing = list_goal_todos(
         registry_path=registry_path,
@@ -414,9 +459,10 @@ def _reconcile_todos(
     for raw in listing.get("todos", []):
         if not isinstance(raw, dict):
             continue
-        target = str(raw.get("target_key") or "").strip()
-        if target not in targets:
+        binding = bindings_by_todo.get(str(raw.get("todo_id") or ""))
+        if binding is None:
             continue
+        target = str(binding.get("target_key") or "").strip()
         if target in seen_targets:
             raise ValueError(f"multiple LoopX Todos use target_key {target!r}")
         seen_targets.add(target)
@@ -430,11 +476,11 @@ def _reconcile_todos(
             observation["evidence_ref"] = evidence.strip()
         observations.append(observation)
     if not observations:
-        raise ValueError("no LoopX Todos match persisted company work targets")
+        raise ValueError("no LoopX Todos match persisted outcome routing bindings")
     result = effect_runtime_result(
-        "work_item.company_control_state.reconcile",
+        "work_item.outcome_routing_state.reconcile",
         {
-            "schema_version": "company_control_state_reconcile_request_v0",
+            "schema_version": "outcome_routing_state_reconcile_request_v0",
             "runtime_root": str(runtime_root),
             "goal_id": goal_id,
             "expected_revision": state.get("revision"),

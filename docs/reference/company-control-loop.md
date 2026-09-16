@@ -34,8 +34,13 @@ a blocked Todo becomes `replanning`.
 
 ## State lifecycle
 
-Start with a `company_control_loop_request_v0` JSON object. It contains one
+Start with a `outcome_routing_plan_request_v0` JSON object. It contains one
 direction, a cycle number, outcomes, work items, and feedback.
+
+`company-control-loop` is the product profile. Its control-plane contracts,
+effect IDs, state directory, and schemas use the domain-neutral
+`outcome_routing_*` family so the shared work-item kernel does not acquire
+company-specific vocabulary.
 
 ```sh
 loopx company-control-loop project --state-json company.json
@@ -75,12 +80,11 @@ loopx company-control-loop sync-todos \
   --execute
 ```
 
-`target_key` links each work item to exactly one Todo. Existing links are
-reused. Duplicate links and failed write readback stop the command.
-Agent Todos retain the existing target identity behavior. Human work uses the
-same identity only on the typed `user_gate` and `user_action` lanes. This is an
-identity correlation rule, not execution authority, and monitor scheduling
-fields remain restricted to agent continuous monitors.
+The profile persists a revisioned `work_item_id` to `todo_id` binding after
+Todo readback. Agent Todos may still use the kernel's existing `target_key`
+identity. Human Todos remain ordinary `user_gate` and `user_action` records;
+their correlation identity stays inside profile state. Failed readback or a
+stale state revision stops the command.
 
 ## Reconcile and plan the next cycle
 

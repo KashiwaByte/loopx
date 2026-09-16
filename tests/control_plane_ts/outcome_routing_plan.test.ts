@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION,
-  projectCompanyControlLoop,
-} from "../../loopx/control_plane/work_items/company_control_loop.ts";
+  OUTCOME_ROUTING_PLAN_REQUEST_SCHEMA_VERSION,
+  projectOutcomeRoutingPlan,
+} from "../../loopx/control_plane/work_items/outcome_routing_plan.ts";
 
 function request(overrides: Record<string, unknown> = {}) {
   return {
-    schema_version: COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION,
+    schema_version: OUTCOME_ROUTING_PLAN_REQUEST_SCHEMA_VERSION,
     direction: "Improve durable customer value.",
     cycle: 3,
     outcomes: [{
@@ -37,11 +37,11 @@ function work(overrides: Record<string, unknown> = {}) {
   };
 }
 
-test("company control loop routes AI work into an advancement Todo", () => {
-  const result = projectCompanyControlLoop(request({ work_items: [work()] }));
+test("outcome routing loop routes AI work into an advancement Todo", () => {
+  const result = projectOutcomeRoutingPlan(request({ work_items: [work()] }));
   const item = (result.work_items as Record<string, unknown>[])[0];
 
-  assert.equal(result.schema_version, "company_control_loop_v0");
+  assert.equal(result.schema_version, "outcome_routing_plan_v0");
   assert.equal(item.route, "ai_execute");
   assert.equal(item.status, "ready");
   assert.deepEqual(item.todo_projection, {
@@ -55,7 +55,7 @@ test("company control loop routes AI work into an advancement Todo", () => {
 });
 
 test("routing precedence preserves authority, waiting, and human boundaries", () => {
-  const result = projectCompanyControlLoop(request({
+  const result = projectOutcomeRoutingPlan(request({
     work_items: [
       work({ work_item_id: "work_rejected", target_key: "target_rejected", prohibited: true }),
       work({ work_item_id: "work_observe", target_key: "target_observe", wait_for: "provider result" }),
@@ -78,7 +78,7 @@ test("routing precedence preserves authority, waiting, and human boundaries", ()
 });
 
 test("material feedback creates an explicit replan signal", () => {
-  const result = projectCompanyControlLoop(request({
+  const result = projectOutcomeRoutingPlan(request({
     feedback: [
       {
         feedback_id: "feedback_metric_change",
@@ -108,30 +108,30 @@ test("material feedback creates an explicit replan signal", () => {
   );
 });
 
-test("company control loop rejects dangling outcome references and unsafe ids", () => {
+test("outcome routing loop rejects dangling outcome references and unsafe ids", () => {
   assert.throws(
-    () => projectCompanyControlLoop(request({
+    () => projectOutcomeRoutingPlan(request({
       work_items: [work({ outcome_id: "outcome_missing" })],
     })),
     /outcome_id must reference an outcome/,
   );
   assert.throws(
-    () => projectCompanyControlLoop(request({
+    () => projectOutcomeRoutingPlan(request({
       work_items: [work({ target_key: "../../private" })],
     })),
     /target_key must be a public-safe id/,
   );
 });
 
-test("company control loop rejects ambiguous identifiers and unsafe cycle integers", () => {
+test("outcome routing loop rejects ambiguous identifiers and unsafe cycle integers", () => {
   assert.throws(
-    () => projectCompanyControlLoop(request({
+    () => projectOutcomeRoutingPlan(request({
       outcomes: [request().outcomes[0], request().outcomes[0]],
     })),
     /outcome_id values must be unique/,
   );
   assert.throws(
-    () => projectCompanyControlLoop(request({
+    () => projectOutcomeRoutingPlan(request({
       work_items: [
         work({ work_item_id: "work_first" }),
         work({ work_item_id: "work_second" }),
@@ -140,7 +140,7 @@ test("company control loop rejects ambiguous identifiers and unsafe cycle intege
     /target_key values must be unique/,
   );
   assert.throws(
-    () => projectCompanyControlLoop(request({
+    () => projectOutcomeRoutingPlan(request({
       work_items: [
         work({ target_key: "target_first" }),
         work({ target_key: "target_second" }),
@@ -158,11 +158,11 @@ test("company control loop rejects ambiguous identifiers and unsafe cycle intege
     affected_outcome_ids: ["outcome_activation"],
   };
   assert.throws(
-    () => projectCompanyControlLoop(request({ feedback: [feedback, feedback] })),
+    () => projectOutcomeRoutingPlan(request({ feedback: [feedback, feedback] })),
     /feedback_id values must be unique/,
   );
   assert.throws(
-    () => projectCompanyControlLoop(request({ cycle: Number.MAX_SAFE_INTEGER + 1 })),
+    () => projectOutcomeRoutingPlan(request({ cycle: Number.MAX_SAFE_INTEGER + 1 })),
     /non-negative safe integer/,
   );
 });

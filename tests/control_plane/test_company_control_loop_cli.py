@@ -8,7 +8,7 @@ from loopx.cli_commands import company_control_loop
 
 def _request() -> dict[str, object]:
     return {
-        "schema_version": "company_control_loop_request_v0",
+        "schema_version": "outcome_routing_plan_request_v0",
         "direction": "Improve durable customer value.",
         "cycle": 1,
         "outcomes": [
@@ -25,17 +25,21 @@ def _request() -> dict[str, object]:
     }
 
 
-def _stored_projection(*work_items: dict[str, object]) -> dict[str, object]:
+def _stored_projection(
+    *work_items: dict[str, object],
+    bindings: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
-        "schema_version": "company_control_state_store_result_v0",
+        "schema_version": "outcome_routing_state_store_result_v0",
         "operation": "load",
         "goal_id": "company-goal",
         "state": {
             "revision": "a" * 64,
             "projection": {
-                "schema_version": "company_control_loop_v0",
+                "schema_version": "outcome_routing_plan_v0",
                 "work_items": list(work_items),
             },
+            **({"todo_bindings": bindings} if bindings is not None else {}),
         },
     }
 
@@ -62,7 +66,7 @@ def _routed_work(
     }
 
 
-def test_company_control_loop_cli_calls_typed_projection(
+def test_outcome_routing_plan_cli_calls_typed_projection(
     tmp_path, monkeypatch, capsys
 ) -> None:
     state_path = tmp_path / "company.json"
@@ -72,7 +76,7 @@ def test_company_control_loop_cli_calls_typed_projection(
     def project(method: str, params: dict[str, object]) -> dict[str, object]:
         calls.append((method, params))
         return {
-            "schema_version": "company_control_loop_v0",
+            "schema_version": "outcome_routing_plan_v0",
             "direction": params["direction"],
             "cycle": params["cycle"],
             "outcomes": params["outcomes"],
@@ -92,11 +96,11 @@ def test_company_control_loop_cli_calls_typed_projection(
         str(state_path),
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == "company_control_loop_v0"
-    assert calls == [("work_item.company_control_loop.project", _request())]
+    assert payload["schema_version"] == "outcome_routing_plan_v0"
+    assert calls == [("work_item.outcome_routing_plan.project", _request())]
 
 
-def test_company_control_loop_cli_rejects_non_object_json(tmp_path, capsys) -> None:
+def test_outcome_routing_plan_cli_rejects_non_object_json(tmp_path, capsys) -> None:
     state_path = tmp_path / "company.json"
     state_path.write_text("[]", encoding="utf-8")
 
@@ -113,7 +117,7 @@ def test_company_control_loop_cli_rejects_non_object_json(tmp_path, capsys) -> N
     assert "must contain an object" in payload["error"]
 
 
-def test_company_control_loop_save_previews_then_writes_with_revision(
+def test_outcome_routing_plan_save_previews_then_writes_with_revision(
     tmp_path, monkeypatch, capsys
 ) -> None:
     state_path = tmp_path / "company.json"
@@ -123,10 +127,10 @@ def test_company_control_loop_save_previews_then_writes_with_revision(
     def runtime(method: str, params: dict[str, object]) -> dict[str, object]:
         calls.append(method)
         if method.endswith("project"):
-            return {"schema_version": "company_control_loop_v0"}
+            return {"schema_version": "outcome_routing_plan_v0"}
         assert params["expected_revision"] == "a" * 64
         return {
-            "schema_version": "company_control_state_store_result_v0",
+            "schema_version": "outcome_routing_state_store_result_v0",
             "operation": "write",
             "written": True,
             "replayed": False,
@@ -141,24 +145,24 @@ def test_company_control_loop_save_previews_then_writes_with_revision(
     ]
     assert main(common) == 0
     assert json.loads(capsys.readouterr().out)["dry_run"] is True
-    assert calls == ["work_item.company_control_loop.project"]
+    assert calls == ["work_item.outcome_routing_plan.project"]
 
     calls.clear()
     assert main([*common, "--expected-revision", "a" * 64, "--execute"]) == 0
     assert json.loads(capsys.readouterr().out)["written"] is True
     assert calls == [
-        "work_item.company_control_loop.project",
-        "work_item.company_control_state.write",
+        "work_item.outcome_routing_plan.project",
+        "work_item.outcome_routing_state.write",
     ]
 
 
-def test_company_control_loop_show_reads_goal_state(tmp_path, monkeypatch, capsys) -> None:
+def test_outcome_routing_plan_show_reads_goal_state(tmp_path, monkeypatch, capsys) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def runtime(method: str, params: dict[str, object]) -> dict[str, object]:
         calls.append((method, params))
         return {
-            "schema_version": "company_control_state_store_result_v0",
+            "schema_version": "outcome_routing_state_store_result_v0",
             "operation": "load",
             "goal_id": params["goal_id"],
             "state": None,
@@ -171,11 +175,11 @@ def test_company_control_loop_show_reads_goal_state(tmp_path, monkeypatch, capsy
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["operation"] == "load"
-    assert calls[0][0] == "work_item.company_control_state.load"
+    assert calls[0][0] == "work_item.outcome_routing_state.load"
     assert calls[0][1]["goal_id"] == "company-goal"
 
 
-def test_company_control_loop_sync_todos_previews_existing_and_missing(
+def test_outcome_routing_plan_sync_todos_previews_existing_and_missing(
     tmp_path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setattr(
@@ -219,14 +223,16 @@ def test_company_control_loop_sync_todos_previews_existing_and_missing(
     assert writes == []
 
 
-def test_company_control_loop_sync_todos_creates_and_verifies_readback(
+def test_outcome_routing_plan_sync_todos_creates_and_verifies_readback(
     tmp_path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setattr(
         company_control_loop,
         "effect_runtime_result",
-        lambda method, params: _stored_projection(
-            _routed_work(
+        lambda method, params: (
+            {"state": {"revision": "b" * 64}}
+            if method.endswith(".bind")
+            else _stored_projection(_routed_work(
                 "work_decision",
                 "target_decision",
                 role="user",
@@ -238,14 +244,14 @@ def test_company_control_loop_sync_todos_creates_and_verifies_readback(
                 "target_watch",
                 task_class="continuous_monitor",
                 action_kind="observe",
-            ),
+            ))
         ),
     )
     listings = iter([
         {"todos": []},
         {"todos": [
-            {"todo_id": "todo_decision", "target_key": "target_decision"},
-            {"todo_id": "todo_watch", "target_key": "target_watch"},
+            {"todo_id": "created_1"},
+            {"todo_id": "created_2", "target_key": "target_watch"},
         ]},
     ])
     monkeypatch.setattr(
@@ -268,17 +274,18 @@ def test_company_control_loop_sync_todos_creates_and_verifies_readback(
     payload = json.loads(capsys.readouterr().out)
     assert payload["readback_verified"] is True
     assert [item["todo_id"] for item in payload["actions"]] == [
-        "todo_decision", "todo_watch",
+        "created_1", "created_2",
     ]
     assert writes[0]["blocks_agent"] == "agent-ceo"
     assert writes[0]["decision_scope"] == "direction:action:target_decision"
+    assert writes[0]["monitor_metadata"] == {}
     assert writes[1]["monitor_metadata"] == {
         "target_key": "target_watch",
         "watch_only": "true",
     }
 
 
-def test_company_control_loop_sync_todos_fails_on_missing_readback(
+def test_outcome_routing_plan_sync_todos_fails_on_missing_readback(
     tmp_path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setattr(
@@ -306,10 +313,10 @@ def test_company_control_loop_sync_todos_fails_on_missing_readback(
     ]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert "readback missing target keys" in payload["error"]
+    assert "readback missing ids" in payload["error"]
 
 
-def test_company_control_loop_reconcile_todos_sends_evidence_to_typed_owner(
+def test_outcome_routing_plan_reconcile_todos_sends_evidence_to_typed_owner(
     tmp_path, monkeypatch, capsys
 ) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
@@ -318,10 +325,16 @@ def test_company_control_loop_reconcile_todos_sends_evidence_to_typed_owner(
         calls.append((method, params))
         if method.endswith(".load"):
             return _stored_projection(
-                _routed_work("work_activation", "target_activation")
+                _routed_work("work_activation", "target_activation"),
+                bindings=[{
+                    "work_item_id": "work_activation",
+                    "target_key": "target_activation",
+                    "todo_id": "todo_activation",
+                    "role": "agent",
+                }],
             )
         return {
-            "schema_version": "company_control_state_store_result_v0",
+            "schema_version": "outcome_routing_state_store_result_v0",
             "operation": "reconcile",
             "dry_run": True,
             "written": False,
@@ -354,7 +367,7 @@ def test_company_control_loop_reconcile_todos_sends_evidence_to_typed_owner(
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
-    assert calls[1][0] == "work_item.company_control_state.reconcile"
+    assert calls[1][0] == "work_item.outcome_routing_state.reconcile"
     assert calls[1][1]["expected_revision"] == "a" * 64
     assert calls[1][1]["execute"] is False
     assert calls[1][1]["observations"] == [{
@@ -365,14 +378,20 @@ def test_company_control_loop_reconcile_todos_sends_evidence_to_typed_owner(
     }]
 
 
-def test_company_control_loop_reconcile_todos_rejects_duplicate_targets(
+def test_outcome_routing_plan_reconcile_todos_uses_persisted_todo_identity(
     tmp_path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setattr(
         company_control_loop,
         "effect_runtime_result",
         lambda method, params: _stored_projection(
-            _routed_work("work_activation", "target_activation")
+            _routed_work("work_activation", "target_activation"),
+            bindings=[{
+                "work_item_id": "work_activation",
+                "target_key": "target_activation",
+                "todo_id": "todo_first",
+                "role": "agent",
+            }],
         ),
     )
     monkeypatch.setattr(
@@ -388,13 +407,12 @@ def test_company_control_loop_reconcile_todos_rejects_duplicate_targets(
         "--runtime-root", str(tmp_path / "runtime"),
         "company-control-loop", "reconcile-todos", "--goal-id", "company-goal",
         "--agent-id", "agent-ceo", "--execute",
-    ]) == 1
+    ]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert "multiple LoopX Todos" in payload["error"]
+    assert payload["ok"] is True
 
 
-def test_company_control_loop_next_cycle_uses_persisted_reconciliation(
+def test_outcome_routing_plan_next_cycle_uses_persisted_reconciliation(
     tmp_path, monkeypatch, capsys
 ) -> None:
     stored = _stored_projection(
@@ -403,7 +421,7 @@ def test_company_control_loop_next_cycle_uses_persisted_reconciliation(
     state = stored["state"]
     assert isinstance(state, dict)
     state["reconciliation"] = {
-        "schema_version": "company_control_state_reconciliation_v0",
+        "schema_version": "outcome_routing_state_reconciliation_v0",
         "observations": [{
             "work_item_id": "work_activation",
             "target_key": "target_activation",
@@ -423,7 +441,7 @@ def test_company_control_loop_next_cycle_uses_persisted_reconciliation(
         if method.endswith(".load"):
             return stored
         return {
-            "schema_version": "company_control_next_cycle_v0",
+            "schema_version": "outcome_routing_next_cycle_v0",
             "goal_id": "company-goal",
             "goal_converged": True,
             "remaining_work_item_count": 0,
@@ -436,5 +454,5 @@ def test_company_control_loop_next_cycle_uses_persisted_reconciliation(
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["goal_converged"] is True
-    assert calls[1][0] == "work_item.company_control_state.next_cycle"
+    assert calls[1][0] == "work_item.outcome_routing_state.next_cycle"
     assert calls[1][1]["state"] == state
