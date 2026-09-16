@@ -1,0 +1,323 @@
+import { EffectRuntimeRequestError } from "../effect_runtime_errors.ts";
+import {
+  optionalNonEmptyString,
+  requireBoolean,
+  requireInteger,
+  requireJsonObject,
+  requireNonEmptyString,
+  requireStringArray,
+  requireStringLiteral,
+} from "../runtime_decode.ts";
+
+import type { JsonObject } from "../effect_program.ts";
+
+export const COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION =
+  "company_control_loop_request_v0";
+export const COMPANY_CONTROL_LOOP_SCHEMA_VERSION = "company_control_loop_v0";
+
+const MAX_OUTCOMES = 128;
+const MAX_WORK_ITEMS = 256;
+const MAX_FEEDBACK_ITEMS = 256;
+const PUBLIC_ID = /^[a-z][a-z0-9_-]{2,127}$/;
+
+export const COMPANY_WORK_ROUTES = [
+  "ai_execute",
+  "human_decide",
+  "human_execute",
+  "observe",
+  "reject",
+] as const;
+
+export type CompanyWorkRoute = (typeof COMPANY_WORK_ROUTES)[number];
+export type CompanyAuthorityTier = "A" | "B" | "C" | "D";
+
+interface CompanyWorkItem extends JsonObject {
+  work_item_id: string;
+  outcome_id: string;
+  title: string;
+  acceptance: string;
+  authority_tier: CompanyAuthorityTier;
+  ai_capable: boolean;
+  prohibited: boolean;
+  material_decision: boolean;
+  human_identity_required: boolean;
+  wait_for?: string;
+  target_key: string;
+}
+
+interface RoutedCompanyWorkItem extends CompanyWorkItem {
+  route: CompanyWorkRoute;
+  route_reason: string;
+  status:
+    | "ready"
+    | "waiting_human_decision"
+    | "waiting_human_execution"
+    | "waiting_external_evidence"
+    | "cancelled";
+  todo_projection: JsonObject;
+}
+
+function boundedArray(
+  value: unknown,
+  label: string,
+  maximum: number,
+): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new EffectRuntimeRequestError(`${label} must be an array`);
+  }
+  if (value.length > maximum) {
+    throw new EffectRuntimeRequestError(
+      `${label} must contain at most ${maximum} items`,
+    );
+  }
+  return value;
+}
+
+function publicId(value: unknown, label: string): string {
+  const normalized = requireNonEmptyString(value, label);
+  if (!PUBLIC_ID.test(normalized)) {
+    throw new EffectRuntimeRequestError(`${label} must be a public-safe id`);
+  }
+  return normalized;
+}
+
+function companyWorkItem(value: unknown, label: string): CompanyWorkItem {
+  const raw = requireJsonObject(value, label);
+  const waitFor = optionalNonEmptyString(raw.wait_for, `${label}.wait_for`);
+  return {
+    work_item_id: publicId(raw.work_item_id, `${label}.work_item_id`),
+    outcome_id: publicId(raw.outcome_id, `${label}.outcome_id`),
+    title: requireNonEmptyString(raw.title, `${label}.title`),
+    acceptance: requireNonEmptyString(raw.acceptance, `${label}.acceptance`),
+    authority_tier: requireStringLiteral(
+      raw.authority_tier,
+      ["A", "B", "C", "D"] as const,
+      `${label}.authority_tier`,
+    ),
+    ai_capable: requireBoolean(raw.ai_capable, `${label}.ai_capable`),
+    prohibited: raw.prohibited === undefined
+      ? false
+      : requireBoolean(raw.prohibited, `${label}.prohibited`),
+    material_decision: raw.material_decision === undefined
+      ? false
+      : requireBoolean(raw.material_decision, `${label}.material_decision`),
+    human_identity_required: raw.human_identity_required === undefined
+      ? false
+      : requireBoolean(
+        raw.human_identity_required,
+        `${label}.human_identity_required`,
+      ),
+    ...(waitFor === null ? {} : { wait_for: waitFor }),
+    target_key: publicId(raw.target_key, `${label}.target_key`),
+  };
+}
+
+export function routeCompanyWorkItem(
+  item: CompanyWorkItem,
+): { route: CompanyWorkRoute; reason: string } {
+  if (item.prohibited || item.authority_tier === "D") {
+    return {
+      route: "reject",
+      reason: "policy or current authority prohibits execution",
+    };
+  }
+  if (item.wait_for) {
+    return {
+      route: "observe",
+      reason: "work depends on a future external state",
+    };
+  }
+  if (item.material_decision || item.authority_tier === "B") {
+    return {
+      route: "human_decide",
+      reason: "a material choice or authority grant is required",
+    };
+  }
+  if (item.human_identity_required || item.authority_tier === "C") {
+    return {
+      route: "human_execute",
+      reason: "a human identity or physical action is required",
+    };
+  }
+  if (item.ai_capable && item.authority_tier === "A") {
+    return {
+      route: "ai_execute",
+      reason: "AI capability, authority, and acceptance criteria are present",
+    };
+  }
+  return {
+    route: "human_decide",
+    reason: "AI execution preconditions are incomplete",
+  };
+}
+
+function routeStatus(route: CompanyWorkRoute): RoutedCompanyWorkItem["status"] {
+  switch (route) {
+    case "ai_execute": return "ready";
+    case "human_decide": return "waiting_human_decision";
+    case "human_execute": return "waiting_human_execution";
+    case "observe": return "waiting_external_evidence";
+    case "reject": return "cancelled";
+  }
+}
+
+function todoProjection(item: CompanyWorkItem, route: CompanyWorkRoute): JsonObject {
+  const mapping: Record<CompanyWorkRoute, readonly [string, string]> = {
+    ai_execute: ["agent", "advancement_task"],
+    human_decide: ["user", "user_gate"],
+    human_execute: ["user", "user_action"],
+    observe: ["agent", "continuous_monitor"],
+    reject: ["agent", "blocker"],
+  };
+  const [role, taskClass] = mapping[route];
+  return {
+    role,
+    task_class: taskClass,
+    action_kind: route,
+    target_key: item.target_key,
+    text: item.title,
+    acceptance: item.acceptance,
+  };
+}
+
+function projectWorkItem(value: unknown, label: string): RoutedCompanyWorkItem {
+  const item = companyWorkItem(value, label);
+  const decision = routeCompanyWorkItem(item);
+  return {
+    ...item,
+    route: decision.route,
+    route_reason: decision.reason,
+    status: routeStatus(decision.route),
+    todo_projection: todoProjection(item, decision.route),
+  };
+}
+
+function projectFeedback(value: unknown, label: string): JsonObject {
+  const raw = requireJsonObject(value, label);
+  const kind = requireStringLiteral(
+    raw.kind,
+    [
+      "fact",
+      "decision",
+      "execution_result",
+      "risk",
+      "metric_change",
+      "comment",
+    ] as const,
+    `${label}.kind`,
+  );
+  return {
+    feedback_id: publicId(raw.feedback_id, `${label}.feedback_id`),
+    source: requireNonEmptyString(raw.source, `${label}.source`),
+    subject: requireNonEmptyString(raw.subject, `${label}.subject`),
+    kind,
+    observed_at: requireNonEmptyString(raw.observed_at, `${label}.observed_at`),
+    evidence_ref: requireNonEmptyString(raw.evidence_ref, `${label}.evidence_ref`),
+    affected_outcome_ids: requireStringArray(
+      raw.affected_outcome_ids,
+      `${label}.affected_outcome_ids`,
+    ).map((item, index) => publicId(
+      item,
+      `${label}.affected_outcome_ids[${index}]`,
+    )),
+    disposition: kind === "comment" ? "recorded" : "replan",
+  };
+}
+
+/**
+ * Validate one company-level planning snapshot and project each open unit of
+ * work into LoopX's existing Todo lanes. This is a pure control-plane
+ * contract: providers own collection and execution, while LoopX owns routing
+ * precedence and the provider-neutral projection.
+ */
+export function projectCompanyControlLoop(value: unknown): JsonObject {
+  const request = requireJsonObject(value, "company_control_loop_request");
+  if (request.schema_version !== COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION) {
+    throw new EffectRuntimeRequestError(
+      `company_control_loop_request.schema_version must be ${COMPANY_CONTROL_LOOP_REQUEST_SCHEMA_VERSION}`,
+    );
+  }
+  const cycle = requireInteger(request.cycle, "company_control_loop_request.cycle");
+  if (cycle < 0) {
+    throw new EffectRuntimeRequestError(
+      "company_control_loop_request.cycle must be non-negative",
+    );
+  }
+  const outcomes = boundedArray(
+    request.outcomes,
+    "company_control_loop_request.outcomes",
+    MAX_OUTCOMES,
+  ).map((value, index) => {
+    const raw = requireJsonObject(
+      value,
+      `company_control_loop_request.outcomes[${index}]`,
+    );
+    return {
+      outcome_id: publicId(
+        raw.outcome_id,
+        `company_control_loop_request.outcomes[${index}].outcome_id`,
+      ),
+      title: requireNonEmptyString(
+        raw.title,
+        `company_control_loop_request.outcomes[${index}].title`,
+      ),
+      metric: requireNonEmptyString(
+        raw.metric,
+        `company_control_loop_request.outcomes[${index}].metric`,
+      ),
+      target: requireNonEmptyString(
+        raw.target,
+        `company_control_loop_request.outcomes[${index}].target`,
+      ),
+      evidence_source: requireNonEmptyString(
+        raw.evidence_source,
+        `company_control_loop_request.outcomes[${index}].evidence_source`,
+      ),
+    };
+  });
+  const outcomeIds = new Set(outcomes.map((outcome) => outcome.outcome_id));
+  const workItems = boundedArray(
+    request.work_items,
+    "company_control_loop_request.work_items",
+    MAX_WORK_ITEMS,
+  ).map((item, index) => projectWorkItem(
+    item,
+    `company_control_loop_request.work_items[${index}]`,
+  ));
+  for (const [index, item] of workItems.entries()) {
+    if (!outcomeIds.has(item.outcome_id)) {
+      throw new EffectRuntimeRequestError(
+        `company_control_loop_request.work_items[${index}].outcome_id must reference an outcome`,
+      );
+    }
+  }
+  const feedback = boundedArray(
+    request.feedback,
+    "company_control_loop_request.feedback",
+    MAX_FEEDBACK_ITEMS,
+  ).map((item, index) => projectFeedback(
+    item,
+    `company_control_loop_request.feedback[${index}]`,
+  ));
+  for (const [index, item] of feedback.entries()) {
+    for (const outcomeId of item.affected_outcome_ids as string[]) {
+      if (!outcomeIds.has(outcomeId)) {
+        throw new EffectRuntimeRequestError(
+          `company_control_loop_request.feedback[${index}].affected_outcome_ids must reference outcomes`,
+        );
+      }
+    }
+  }
+  return {
+    schema_version: COMPANY_CONTROL_LOOP_SCHEMA_VERSION,
+    direction: requireNonEmptyString(
+      request.direction,
+      "company_control_loop_request.direction",
+    ),
+    cycle,
+    outcomes,
+    work_items: workItems,
+    feedback,
+    replan_required: feedback.some((item) => item.disposition === "replan"),
+  };
+}
