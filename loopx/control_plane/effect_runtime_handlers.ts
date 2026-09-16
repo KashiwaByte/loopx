@@ -172,6 +172,7 @@ import {
   projectTodoPlanningInventoryDetail,
 } from "./work_items/planning_inventory.ts";
 import { resolveRefreshRecommendation } from "./work_items/refresh_recommendation.ts";
+import { projectCompanyControlLoop } from "./work_items/company_control_loop.ts";
 import {
   validateInteractionProjectionHookInvocation,
   validateInteractionProjectionHookRegistration,
@@ -451,6 +452,7 @@ export function createEffectRuntimeHandlers(
     ["work_item.planning_inventory.project", projectTodoPlanningInventory],
     ["work_item.planning_inventory.detail", projectTodoPlanningInventoryDetail],
     ["work_item.refresh_recommendation.resolve", resolveRefreshRecommendation],
+    ["work_item.company_control_loop.project", projectCompanyControlLoop],
     ["work_item.delivery_history.project", projectDeliveryHistory],
     ["work_item.delivery_response.project", projectDeliveryResponse],
     ["work_item.delivery_claim.validate", validateDeliveryClaim],

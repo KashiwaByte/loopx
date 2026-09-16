@@ -6,6 +6,10 @@ import sys
 from .cli_commands.agent_capabilities import register_agent_capabilities, handle_agent_capabilities
 from .cli_commands.agent_directory import register_agent_directory, handle_agent_directory
 from .cli_commands.agent_context import register_agent_context, handle_agent_context
+from .cli_commands.company_control_loop import (
+    handle_company_control_loop_command,
+    register_company_control_loop_command,
+)
 from .cli_commands.todo_continuation import register_todo_continuation, handle_todo_continuation
 from .cli_commands.manager_inbox import register_manager_inbox, handle_manager_inbox
 from .capabilities.content_ops.cli import (
@@ -330,6 +334,7 @@ def build_parser() -> LoopXArgumentParser:
     register_manager_inbox(sub, add_subcommand_format)
     register_agent_capabilities(sub, add_subcommand_format)
     register_agent_context(sub, add_subcommand_format)
+    register_company_control_loop_command(sub, add_subcommand_format)
     register_agent_directory(sub, add_subcommand_format)
     register_lark_inbox_commands(sub, add_subcommand_format)
     register_lark_kanban_commands(sub, add_subcommand_format)
@@ -769,6 +774,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "agent-context":
         return handle_agent_context(args, registry_path, print_payload, output_format)
+
+    company_control_loop_result = handle_company_control_loop_command(
+        args,
+        output_format=output_format,
+        print_payload=print_payload,
+    )
+    if company_control_loop_result is not None:
+        return company_control_loop_result
 
     if args.command == "agent-directory":
         return handle_agent_directory(
