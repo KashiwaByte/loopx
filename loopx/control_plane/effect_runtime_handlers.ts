@@ -178,6 +178,7 @@ import {
 } from "./work_items/company_control_loop.ts";
 import {
   loadCompanyControlState,
+  reconcileCompanyControlState,
   writeCompanyControlState,
 } from "./work_items/company_control_state.ts";
 import {
@@ -462,6 +463,7 @@ export function createEffectRuntimeHandlers(
     ["work_item.company_control_loop.project", projectCompanyControlLoop],
     ["work_item.company_control_loop.upgrade", upgradeCompanyControlLoopState],
     ["work_item.company_control_state.load", loadCompanyControlState],
+    ["work_item.company_control_state.reconcile", reconcileCompanyControlState],
     ["work_item.company_control_state.write", writeCompanyControlState],
     ["work_item.delivery_history.project", projectDeliveryHistory],
     ["work_item.delivery_response.project", projectDeliveryResponse],

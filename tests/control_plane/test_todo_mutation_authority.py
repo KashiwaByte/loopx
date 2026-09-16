@@ -708,6 +708,28 @@ def test_advancement_todo_preserves_public_target_key(tmp_path: Path) -> None:
     assert projected["target_key"] == "issue-fix:owner/repo:issue_42"
 
 
+def test_user_gate_preserves_company_target_key(tmp_path: Path) -> None:
+    registry, state = _write_fixture(tmp_path)
+    todo = add_goal_todo(
+        registry_path=registry,
+        goal_id=GOAL_ID,
+        role="user",
+        text="Decide the activation direction.",
+        task_class="user_gate",
+        action_kind="human_decide",
+        agent_id=AUTHOR_AGENT,
+        blocks_agent=AUTHOR_AGENT,
+        decision_scope="direction:action:activation_decision",
+        monitor_metadata={"target_key": "activation_decision"},
+    )
+    projected = parse_active_state_todos(state.read_text(encoding="utf-8"))
+    user = next(
+        item for item in projected["user_todos"]["items"]
+        if item["todo_id"] == todo["todo_id"]
+    )
+    assert user["target_key"] == "activation_decision"
+
+
 def test_capability_binding_follows_generated_agent_successor(tmp_path: Path) -> None:
     registry, state = _write_fixture(tmp_path)
     todo = add_goal_todo(

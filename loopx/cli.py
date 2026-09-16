@@ -787,7 +787,8 @@ def main(argv: list[str] | None = None) -> int:
                 else effective_runtime_root(registry_path, None)
             )
             if args.command == "company-control-loop"
-            and args.company_control_loop_command in {"save", "show", "sync-todos"}
+            and args.company_control_loop_command
+            in {"save", "show", "sync-todos", "reconcile-todos"}
             else None
         ),
         registry_path=registry_path,

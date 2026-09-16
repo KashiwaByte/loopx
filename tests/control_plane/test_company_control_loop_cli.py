@@ -50,6 +50,7 @@ def _routed_work(
 ) -> dict[str, object]:
     return {
         "work_item_id": work_item_id,
+        "target_key": target_key,
         "todo_projection": {
             "role": role,
             "task_class": task_class,
@@ -342,3 +343,88 @@ def test_company_control_loop_sync_todos_fails_on_missing_readback(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert "readback missing target keys" in payload["error"]
+
+
+def test_company_control_loop_reconcile_todos_sends_evidence_to_typed_owner(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def runtime(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        if method.endswith(".load"):
+            return _stored_projection(
+                _routed_work("work_activation", "target_activation")
+            )
+        return {
+            "schema_version": "company_control_state_store_result_v0",
+            "operation": "reconcile",
+            "dry_run": True,
+            "written": False,
+        }
+
+    monkeypatch.setattr(company_control_loop, "effect_runtime_result", runtime)
+    monkeypatch.setattr(
+        company_control_loop,
+        "list_goal_todos",
+        lambda **kwargs: {"todos": [
+            {
+                "todo_id": "todo_activation",
+                "target_key": "target_activation",
+                "status": "done",
+                "evidence": "artifact:activation-report",
+            },
+            {
+                "todo_id": "todo_unrelated",
+                "target_key": "other_target",
+                "status": "done",
+            },
+        ]},
+    )
+
+    assert main([
+        "--format", "json", "--registry", str(tmp_path / "registry.json"),
+        "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "reconcile-todos", "--goal-id", "company-goal",
+        "--agent-id", "agent-ceo", "--project", str(tmp_path),
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert calls[1][0] == "work_item.company_control_state.reconcile"
+    assert calls[1][1]["expected_revision"] == "a" * 64
+    assert calls[1][1]["execute"] is False
+    assert calls[1][1]["observations"] == [{
+        "target_key": "target_activation",
+        "todo_id": "todo_activation",
+        "status": "done",
+        "evidence_ref": "artifact:activation-report",
+    }]
+
+
+def test_company_control_loop_reconcile_todos_rejects_duplicate_targets(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        company_control_loop,
+        "effect_runtime_result",
+        lambda method, params: _stored_projection(
+            _routed_work("work_activation", "target_activation")
+        ),
+    )
+    monkeypatch.setattr(
+        company_control_loop,
+        "list_goal_todos",
+        lambda **kwargs: {"todos": [
+            {"todo_id": "todo_first", "target_key": "target_activation", "status": "open"},
+            {"todo_id": "todo_second", "target_key": "target_activation", "status": "done"},
+        ]},
+    )
+    assert main([
+        "--format", "json", "--registry", str(tmp_path / "registry.json"),
+        "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "reconcile-todos", "--goal-id", "company-goal",
+        "--agent-id", "agent-ceo", "--execute",
+    ]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "multiple LoopX Todos" in payload["error"]

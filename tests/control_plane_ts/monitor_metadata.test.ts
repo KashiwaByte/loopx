@@ -67,7 +67,10 @@ test("create/edit scope, boundedness and explicit clearing share one owner", () 
   assert.doesNotThrow(() => planMonitorMetadata(request({metadata: {watch_only: null}, resume_when: "todo_done:todo_dependency"})));
   assert.doesNotThrow(() => planMonitorMetadata(request({metadata: {watch_only: null}, enforce_boundedness: false})));
   assert.throws(() => planMonitorMetadata(request({role: "user", metadata: {cadence: "1h"}})), /schedule metadata/);
-  assert.throws(() => planMonitorMetadata(request({role: "user", metadata: {target_key: "fixture"}})), /target_key/);
+  assert.deepEqual(
+    planMonitorMetadata(request({role: "user", metadata: {target_key: "fixture"}})).metadata,
+    {target_key: "fixture"},
+  );
   assert.throws(() => planMonitorMetadata(request({metadata: {cadence: "never"}})), /cadence/);
   for (const field of ["consecutive_no_change", "material_change_generation"]) {
     for (const value of ["-1", "9007199254740993", "1.5"]) {

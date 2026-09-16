@@ -85,6 +85,25 @@ def register_company_control_loop_command(
         action="store_true",
         help="Create missing Todos. Without this flag, return the idempotent plan.",
     )
+    reconcile = actions.add_parser(
+        "reconcile-todos",
+        help="Reconcile Todo status and evidence into persisted company state.",
+    )
+    add_subcommand_format(reconcile)
+    reconcile.add_argument(
+        "--goal-id", required=True, help="Goal that owns the company state and Todos."
+    )
+    reconcile.add_argument(
+        "--agent-id",
+        required=True,
+        help="Registered agent whose routed Todo lane is reconciled.",
+    )
+    reconcile.add_argument("--project", help="Project containing the Goal active state.")
+    reconcile.add_argument(
+        "--execute",
+        action="store_true",
+        help="Persist reconciliation. Without this flag, return a preview.",
+    )
 
 
 def render_company_control_loop_markdown(payload: dict[str, Any]) -> str:
@@ -137,7 +156,7 @@ def handle_company_control_loop_command(
         return None
     try:
         command = args.company_control_loop_command
-        if command in {"show", "sync-todos"}:
+        if command in {"show", "sync-todos", "reconcile-todos"}:
             if runtime_root is None:
                 raise ValueError("company control state requires a runtime root")
             projection = effect_runtime_result(
@@ -150,10 +169,22 @@ def handle_company_control_loop_command(
             )
             if command == "show":
                 payload = {"ok": True, **projection}
-            else:
+            elif command == "sync-todos":
                 if registry_path is None:
                     raise ValueError("company Todo sync requires a registry")
                 payload = _sync_todos(
+                    stored=projection,
+                    goal_id=args.goal_id,
+                    agent_id=args.agent_id,
+                    project=Path(args.project).expanduser() if args.project else None,
+                    registry_path=registry_path,
+                    runtime_root=runtime_root,
+                    execute=bool(args.execute),
+                )
+            else:
+                if registry_path is None:
+                    raise ValueError("company Todo reconciliation requires a registry")
+                payload = _reconcile_todos(
                     stored=projection,
                     goal_id=args.goal_id,
                     agent_id=args.agent_id,
@@ -339,3 +370,72 @@ def _sync_todos(
         "actions": actions,
         "readback_verified": execute,
     }
+
+
+def _reconcile_todos(
+    *,
+    stored: dict[str, Any],
+    goal_id: str,
+    agent_id: str,
+    project: Path | None,
+    registry_path: Path,
+    runtime_root: Path,
+    execute: bool,
+) -> dict[str, Any]:
+    state = stored.get("state")
+    if not isinstance(state, dict):
+        raise ValueError("persisted company control state does not exist")
+    company = state.get("projection")
+    if not isinstance(company, dict):
+        raise TypeError("persisted company control projection is invalid")
+    work_items = company.get("work_items")
+    if not isinstance(work_items, list):
+        raise TypeError("persisted company work_items must be an array")
+    targets = {
+        str(item.get("target_key"))
+        for item in work_items
+        if isinstance(item, dict) and item.get("target_key")
+    }
+    listing = list_goal_todos(
+        registry_path=registry_path,
+        runtime_root_arg=str(runtime_root),
+        goal_id=goal_id,
+        agent_id=agent_id,
+        project=project,
+        limit=500,
+    )
+    observations: list[dict[str, Any]] = []
+    seen_targets: set[str] = set()
+    for raw in listing.get("todos", []):
+        if not isinstance(raw, dict):
+            continue
+        target = str(raw.get("target_key") or "").strip()
+        if target not in targets:
+            continue
+        if target in seen_targets:
+            raise ValueError(f"multiple LoopX Todos use target_key {target!r}")
+        seen_targets.add(target)
+        observation: dict[str, Any] = {
+            "target_key": target,
+            "todo_id": raw.get("todo_id"),
+            "status": raw.get("status"),
+        }
+        evidence = raw.get("evidence")
+        if isinstance(evidence, str) and evidence.strip():
+            observation["evidence_ref"] = evidence.strip()
+        observations.append(observation)
+    if not observations:
+        raise ValueError("no LoopX Todos match persisted company work targets")
+    result = effect_runtime_result(
+        "work_item.company_control_state.reconcile",
+        {
+            "schema_version": "company_control_state_reconcile_request_v0",
+            "runtime_root": str(runtime_root),
+            "goal_id": goal_id,
+            "expected_revision": state.get("revision"),
+            "updated_at": datetime.now(UTC).isoformat(),
+            "execute": execute,
+            "observations": observations,
+        },
+    )
+    return {"ok": True, **result}
