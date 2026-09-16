@@ -85,6 +85,21 @@ function publicId(value: unknown, label: string): string {
   return normalized;
 }
 
+function requireUniqueIds(
+  values: readonly JsonObject[],
+  field: string,
+  label: string,
+): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    const identifier = String(value[field]);
+    if (seen.has(identifier)) {
+      throw new EffectRuntimeRequestError(`${label} must be unique`);
+    }
+    seen.add(identifier);
+  }
+}
+
 function companyWorkItem(value: unknown, label: string): CompanyWorkItem {
   const raw = requireJsonObject(value, label);
   const waitFor = optionalNonEmptyString(raw.wait_for, `${label}.wait_for`);
@@ -242,9 +257,9 @@ export function projectCompanyControlLoop(value: unknown): JsonObject {
     );
   }
   const cycle = requireInteger(request.cycle, "company_control_loop_request.cycle");
-  if (cycle < 0) {
+  if (cycle < 0 || !Number.isSafeInteger(cycle)) {
     throw new EffectRuntimeRequestError(
-      "company_control_loop_request.cycle must be non-negative",
+      "company_control_loop_request.cycle must be a non-negative safe integer",
     );
   }
   const outcomes = boundedArray(
@@ -279,6 +294,7 @@ export function projectCompanyControlLoop(value: unknown): JsonObject {
       ),
     };
   });
+  requireUniqueIds(outcomes, "outcome_id", "company outcome_id values");
   const outcomeIds = new Set(outcomes.map((outcome) => outcome.outcome_id));
   const workItems = boundedArray(
     request.work_items,
@@ -288,6 +304,8 @@ export function projectCompanyControlLoop(value: unknown): JsonObject {
     item,
     `company_control_loop_request.work_items[${index}]`,
   ));
+  requireUniqueIds(workItems, "work_item_id", "company work_item_id values");
+  requireUniqueIds(workItems, "target_key", "company work target_key values");
   for (const [index, item] of workItems.entries()) {
     if (!outcomeIds.has(item.outcome_id)) {
       throw new EffectRuntimeRequestError(
@@ -303,6 +321,7 @@ export function projectCompanyControlLoop(value: unknown): JsonObject {
     item,
     `company_control_loop_request.feedback[${index}]`,
   ));
+  requireUniqueIds(feedback, "feedback_id", "company feedback_id values");
   for (const [index, item] of feedback.entries()) {
     for (const outcomeId of item.affected_outcome_ids as string[]) {
       if (!outcomeIds.has(outcomeId)) {

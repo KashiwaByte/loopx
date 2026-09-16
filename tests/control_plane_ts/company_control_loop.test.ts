@@ -58,11 +58,11 @@ test("company control loop routes AI work into an advancement Todo", () => {
 test("routing precedence preserves authority, waiting, and human boundaries", () => {
   const result = projectCompanyControlLoop(request({
     work_items: [
-      work({ work_item_id: "work_rejected", prohibited: true }),
-      work({ work_item_id: "work_observe", wait_for: "provider result" }),
-      work({ work_item_id: "work_decide", material_decision: true }),
-      work({ work_item_id: "work_execute", human_identity_required: true }),
-      work({ work_item_id: "work_incomplete", ai_capable: false }),
+      work({ work_item_id: "work_rejected", target_key: "target_rejected", prohibited: true }),
+      work({ work_item_id: "work_observe", target_key: "target_observe", wait_for: "provider result" }),
+      work({ work_item_id: "work_decide", target_key: "target_decide", material_decision: true }),
+      work({ work_item_id: "work_execute", target_key: "target_execute", human_identity_required: true }),
+      work({ work_item_id: "work_incomplete", target_key: "target_incomplete", ai_capable: false }),
     ],
   }));
 
@@ -121,6 +121,50 @@ test("company control loop rejects dangling outcome references and unsafe ids", 
       work_items: [work({ target_key: "../../private" })],
     })),
     /target_key must be a public-safe id/,
+  );
+});
+
+test("company control loop rejects ambiguous identifiers and unsafe cycle integers", () => {
+  assert.throws(
+    () => projectCompanyControlLoop(request({
+      outcomes: [request().outcomes[0], request().outcomes[0]],
+    })),
+    /outcome_id values must be unique/,
+  );
+  assert.throws(
+    () => projectCompanyControlLoop(request({
+      work_items: [
+        work({ work_item_id: "work_first" }),
+        work({ work_item_id: "work_second" }),
+      ],
+    })),
+    /target_key values must be unique/,
+  );
+  assert.throws(
+    () => projectCompanyControlLoop(request({
+      work_items: [
+        work({ target_key: "target_first" }),
+        work({ target_key: "target_second" }),
+      ],
+    })),
+    /work_item_id values must be unique/,
+  );
+  const feedback = {
+    feedback_id: "feedback_duplicate",
+    source: "analytics",
+    subject: "activation",
+    kind: "fact",
+    observed_at: "2026-09-17T00:00:00Z",
+    evidence_ref: "report:activation",
+    affected_outcome_ids: ["outcome_activation"],
+  };
+  assert.throws(
+    () => projectCompanyControlLoop(request({ feedback: [feedback, feedback] })),
+    /feedback_id values must be unique/,
+  );
+  assert.throws(
+    () => projectCompanyControlLoop(request({ cycle: Number.MAX_SAFE_INTEGER + 1 })),
+    /non-negative safe integer/,
   );
 });
 
