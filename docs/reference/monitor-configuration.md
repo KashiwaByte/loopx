@@ -41,6 +41,15 @@ successor may carry `target_key` as its route identity without becoming a
 Monitor, while cadence, due time, expiry and watch-only require
 `task_class=continuous_monitor`.
 
+The default target-identity rule is intentionally narrow. Agent Todos may
+carry `target_key` as before. User Todos may carry it only when their typed
+lane is `user_gate` or `user_action`; this lets an external planner correlate
+human decisions and actions with its work item without turning user Todos into
+Monitors. Other user task classes still reject `target_key`, and every cadence,
+due-time, expiry, watch-only, and observation field remains agent-monitor only.
+Consumers must continue to enforce their own authority checks: a target key is
+an identity link and grants no claim, lease, execution, or capability access.
+
 Once a Monitor has observation evidence, its target identity cannot be changed
 or cleared by configuration. Create a new independent Monitor for a different
 target; do not reuse the former target's generations as new evidence. An
@@ -77,6 +86,12 @@ Monitor 配置修改复用 `todo update`。晋升后由 TS 在同一个 canonica
 已有观察证据时不能更换／清除 target，新目标应新建独立 Monitor。target 是路由身份
 而非调度字段：Monitor 后继 Todo 可以只带 target 而不成为 Monitor，频率、到期、
 检查时间和 watch-only 仍要求 task_class=continuous_monitor。
+
+target 身份的默认规则只做窄幅扩展：Agent Todo 继续可以携带 `target_key`；User
+Todo 仅在 typed lane 为 `user_gate` 或 `user_action` 时可以携带它，以便外部规划器
+把人类决策／执行结果关联回工作项。其他 User task class 仍拒绝 `target_key`，所有
+频率、下次检查、到期、watch-only 与观察字段仍只属于 Agent Monitor。`target_key`
+只提供身份关联，不授予 claim、lease、执行或 capability 权限。
 
 已有 claim／exclusion／lease 检查继续生效，lease proof 不会因配置而续期。Chat
 委托 owner 动作和带 lease 的 polling 尚未闭合，文字理由不能替代可信授权。

@@ -56,6 +56,7 @@ LoopX 的目标是让人用本地前端或 Lark 提出、修订和验收复杂�
 | 领域与已有入口 | 所属工作流 | 当前总纲要求的下一步 |
 | --- | --- | --- |
 | [Goal Vision/replan](../../reference/protocols/goal-vision-replan-contract-v0.md)、[work graph](../../reference/protocols/task-graph-projection-v0.md)、[peer runtime](../../reference/protocols/peer-agent-runtime-v1.md)、[监督](../../reference/protocols/peer-supervisor-v0.md) | S2/S3 | 将跨工作依赖、重规划、验收与 handoff 放进同一个真实案例；aggregate closeout 必须消费验收事实 |
+| [公司控制闭环 profile](../../reference/company-control-loop.md) | S1/S3 | 保持为 Goal/Todo/证据 owner 的有界 caller；更广的 steward 主张必须通过 R2/R3 的多 Agent adoption、依赖产物、独立验收、恢复和结果返回来验收 |
 | [quota](../../quota-allocation.md)、[cadence](../../operations/long-task-cadence-policy.md)、[attention](../../operations/attention-queue.md) | S5/S7 | 预算耗尽/延期/被阻塞时有明确下一次触发及用户回读；百 Agent 不靠高频全文轮询 |
 | [材料生命周期](../../reference/protocols/material-lifecycle-architecture-v0.zh-CN.md)、[材料 frontier](../../reference/protocols/agent-material-frontier-v0.md)、[authority 注册](../../operations/authority-source-registration.md) | S6 | 路线/RFC 更新能由 Agent 按 revision 发现并登记阅读；read receipt 不表示同意或获得权限；归档不丢原始来源 |
 | [Decision Context](../../../loopx/capabilities/decision_context/README.md)、[Reward Memory](../../../loopx/capabilities/reward_memory/README.md)、[Semantic Preference](../../../loopx/capabilities/semantic_preference/README.md)、[Turn Recall](../../../loopx/capabilities/agent_turn_recall/README.md) | S6/S11 | 区分事实、偏好、建议、归因和权威；同一 scope 的回忆/失效/结果反馈负例先行 |

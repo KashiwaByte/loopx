@@ -5,6 +5,17 @@ long-running company direction. It routes bounded work to AI or people, keeps
 the result under one Goal, reconciles Todo evidence, and produces the next
 planning cycle.
 
+## Roadmap placement
+
+This command is a bounded planning profile for the persistent steward path in
+the [LoopX overall roadmap](../architecture/rfcs/loopx-overall-roadmap-v0.md),
+primarily S1 and S3. It exercises existing Goal, Todo, evidence, quota, and
+replan owners; it does not create a second steward, work ledger, scheduler, or
+authority model. Its current acceptance boundary is the documented CLI and
+packaged runtime lifecycle. The broader R2/R3 journey still requires real
+multi-Agent adoption, dependent artifacts, independent acceptance, restart
+recovery, and automatic result return through their existing owners.
+
 ## Authority boundary
 
 The command does not grant execution authority. Existing LoopX Todo rules own
@@ -69,6 +80,10 @@ loopx company-control-loop sync-todos \
 
 `target_key` links each work item to exactly one Todo. Existing links are
 reused. Duplicate links and failed write readback stop the command.
+Agent Todos retain the existing target identity behavior. Human work uses the
+same identity only on the typed `user_gate` and `user_action` lanes. This is an
+identity correlation rule, not execution authority, and monitor scheduling
+fields remain restricted to agent continuous monitors.
 
 ## Reconcile and plan the next cycle
 
