@@ -428,3 +428,49 @@ def test_company_control_loop_reconcile_todos_rejects_duplicate_targets(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert "multiple LoopX Todos" in payload["error"]
+
+
+def test_company_control_loop_next_cycle_uses_persisted_reconciliation(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    stored = _stored_projection(
+        _routed_work("work_activation", "target_activation")
+    )
+    state = stored["state"]
+    assert isinstance(state, dict)
+    state["reconciliation"] = {
+        "schema_version": "company_control_state_reconciliation_v0",
+        "observations": [{
+            "work_item_id": "work_activation",
+            "target_key": "target_activation",
+            "todo_id": "todo_activation",
+            "todo_status": "done",
+            "prior_status": "ready",
+            "next_status": "done",
+            "evidence_ref": "artifact:activation-report",
+            "changed": True,
+        }],
+        "replan_required": False,
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def runtime(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        if method.endswith(".load"):
+            return stored
+        return {
+            "schema_version": "company_control_next_cycle_v0",
+            "goal_id": "company-goal",
+            "goal_converged": True,
+            "remaining_work_item_count": 0,
+        }
+
+    monkeypatch.setattr(company_control_loop, "effect_runtime_result", runtime)
+    assert main([
+        "--format", "json", "--runtime-root", str(tmp_path / "runtime"),
+        "company-control-loop", "next-cycle", "--goal-id", "company-goal",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["goal_converged"] is True
+    assert calls[1][0] == "work_item.company_control_state.next_cycle"
+    assert calls[1][1]["state"] == state

@@ -30,6 +30,10 @@ export const COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA =
   "company_control_state_reconcile_request_v0";
 export const COMPANY_CONTROL_STATE_RECONCILIATION_SCHEMA =
   "company_control_state_reconciliation_v0";
+export const COMPANY_CONTROL_NEXT_CYCLE_REQUEST_SCHEMA =
+  "company_control_next_cycle_request_v0";
+export const COMPANY_CONTROL_NEXT_CYCLE_SCHEMA =
+  "company_control_next_cycle_v0";
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -327,4 +331,106 @@ export async function reconcileCompanyControlState(value: unknown): Promise<Json
       replayed: false,
     };
   });
+}
+
+export function planCompanyControlNextCycle(value: unknown): JsonObject {
+  const request = requireJsonObject(value, "company_control_next_cycle params");
+  if (request.schema_version !== COMPANY_CONTROL_NEXT_CYCLE_REQUEST_SCHEMA) {
+    throw new EffectRuntimeRequestError("company control next-cycle request schema mismatch");
+  }
+  const goalId = requireNonEmptyString(request.goal_id, "goal_id");
+  const stored = decodeStoredState(request.state, goalId);
+  const projection = requireJsonObject(stored.projection, "stored projection");
+  const reconciliation = stored.reconciliation === undefined
+    ? null
+    : requireJsonObject(stored.reconciliation, "stored reconciliation");
+  const observations = reconciliation?.observations;
+  if (!Array.isArray(observations) || observations.length === 0) {
+    throw new EffectRuntimeRequestError("company control next cycle requires Todo reconciliation");
+  }
+  const byTarget = new Map<string, JsonObject>();
+  for (const value of observations) {
+    const observation = requireJsonObject(value, "reconciliation observation");
+    byTarget.set(
+      requireNonEmptyString(observation.target_key, "observation target_key"),
+      observation,
+    );
+  }
+  const workItems = projection.work_items;
+  if (!Array.isArray(workItems)) {
+    throw new EffectRuntimeRequestError("stored company work_items must be an array");
+  }
+  const nextWorkItems: JsonObject[] = [];
+  const feedback: JsonObject[] = Array.isArray(projection.feedback)
+    ? projection.feedback.map((item) => {
+      const prior = requireJsonObject(item, "stored company feedback");
+      const { disposition: _disposition, ...requestFeedback } = prior;
+      return requestFeedback;
+    })
+    : [];
+  let convergedCount = 0;
+  for (const value of workItems) {
+    const work = requireJsonObject(value, "stored company work item");
+    const targetKey = requireNonEmptyString(work.target_key, "stored work target_key");
+    const observation = byTarget.get(targetKey);
+    const nextStatus = observation?.next_status;
+    if (nextStatus === "done") {
+      convergedCount += 1;
+      feedback.push({
+        feedback_id: `todo_${work.work_item_id}_done`,
+        source: "loopx_todo",
+        subject: `Todo completed: ${work.title}`,
+        kind: "execution_result",
+        observed_at: requireNonEmptyString(stored.updated_at, "stored updated_at"),
+        evidence_ref: requireNonEmptyString(
+          observation?.evidence_ref,
+          "completion evidence_ref",
+        ),
+        affected_outcome_ids: [work.outcome_id],
+      });
+      continue;
+    }
+    const {
+      route: _route,
+      route_reason: _routeReason,
+      status: _status,
+      todo_projection: _todoProjection,
+      ...nextWork
+    } = work;
+    nextWorkItems.push(nextWork);
+    if (nextStatus === "replanning" || nextStatus === "awaiting_evidence") {
+      const todoId = requireNonEmptyString(observation?.todo_id, "observation todo_id");
+      feedback.push({
+        feedback_id: `todo_${work.work_item_id}_${nextStatus}`,
+        source: "loopx_todo",
+        subject: nextStatus === "replanning"
+          ? `Todo blocked: ${work.title}`
+          : `Todo completion needs evidence: ${work.title}`,
+        kind: "risk",
+        observed_at: requireNonEmptyString(stored.updated_at, "stored updated_at"),
+        evidence_ref: `loopx-todo:${todoId}`,
+        affected_outcome_ids: [work.outcome_id],
+      });
+    }
+  }
+  const nextState: JsonObject = {
+    schema_version: "company_control_loop_request_v0",
+    direction: projection.direction,
+    cycle: Number(projection.cycle) + 1,
+    outcomes: projection.outcomes,
+    work_items: nextWorkItems,
+    feedback,
+  };
+  const nextProjection = projectCompanyControlLoop(nextState);
+  return {
+    schema_version: COMPANY_CONTROL_NEXT_CYCLE_SCHEMA,
+    goal_id: goalId,
+    source_revision: stored.revision,
+    converged_work_item_count: convergedCount,
+    remaining_work_item_count: nextWorkItems.length,
+    goal_converged: nextWorkItems.length === 0,
+    replan_required: nextProjection.replan_required,
+    state: nextState,
+    projection: nextProjection,
+  };
 }

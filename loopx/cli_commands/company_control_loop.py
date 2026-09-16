@@ -104,6 +104,14 @@ def register_company_control_loop_command(
         action="store_true",
         help="Persist reconciliation. Without this flag, return a preview.",
     )
+    next_cycle = actions.add_parser(
+        "next-cycle",
+        help="Plan the next company cycle from reconciled Todo outcomes.",
+    )
+    add_subcommand_format(next_cycle)
+    next_cycle.add_argument(
+        "--goal-id", required=True, help="Goal that owns the reconciled company state."
+    )
 
 
 def render_company_control_loop_markdown(payload: dict[str, Any]) -> str:
@@ -156,7 +164,7 @@ def handle_company_control_loop_command(
         return None
     try:
         command = args.company_control_loop_command
-        if command in {"show", "sync-todos", "reconcile-todos"}:
+        if command in {"show", "sync-todos", "reconcile-todos", "next-cycle"}:
             if runtime_root is None:
                 raise ValueError("company control state requires a runtime root")
             projection = effect_runtime_result(
@@ -169,6 +177,18 @@ def handle_company_control_loop_command(
             )
             if command == "show":
                 payload = {"ok": True, **projection}
+            elif command == "next-cycle":
+                payload = {
+                    "ok": True,
+                    **effect_runtime_result(
+                        "work_item.company_control_state.next_cycle",
+                        {
+                            "schema_version": "company_control_next_cycle_request_v0",
+                            "goal_id": args.goal_id,
+                            "state": projection.get("state"),
+                        },
+                    ),
+                }
             elif command == "sync-todos":
                 if registry_path is None:
                     raise ValueError("company Todo sync requires a registry")

@@ -9,6 +9,7 @@ import {
   COMPANY_CONTROL_STATE_STORE_REQUEST_SCHEMA,
   companyControlStatePath,
   loadCompanyControlState,
+  planCompanyControlNextCycle,
   reconcileCompanyControlState,
   writeCompanyControlState,
 } from "../../loopx/control_plane/work_items/company_control_state.ts";
@@ -244,4 +245,94 @@ test("company control reconciliation rejects stale revisions and unknown targets
     }),
     /is unknown/,
   );
+});
+
+test("next company cycle converts evidence and blockers into feedback and replanning", async (t) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const input = stateWithWork();
+  input.work_items.push({
+    work_item_id: "work_retention",
+    outcome_id: "outcome_activation",
+    title: "Resolve retention risk",
+    acceptance: "risk is cleared",
+    authority_tier: "A",
+    ai_capable: true,
+    target_key: "retention_risk",
+  });
+  const first = await writeCompanyControlState(request(runtimeRoot, {
+    state: input,
+    updated_at: "2026-09-17T00:00:00Z",
+  }));
+  const reconciled = await reconcileCompanyControlState({
+    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+    runtime_root: runtimeRoot,
+    goal_id: "company-goal",
+    expected_revision: (first.state as Record<string, unknown>).revision,
+    updated_at: "2026-09-17T00:01:00Z",
+    execute: true,
+    observations: [
+      {
+        target_key: "activation_delivery",
+        todo_id: "todo_activation",
+        status: "done",
+        evidence_ref: "artifact:activation-report",
+      },
+      {
+        target_key: "retention_risk",
+        todo_id: "todo_retention",
+        status: "blocked",
+      },
+    ],
+  });
+  const next = planCompanyControlNextCycle({
+    schema_version: "company_control_next_cycle_request_v0",
+    goal_id: "company-goal",
+    state: reconciled.state,
+  });
+  assert.equal(next.goal_converged, false);
+  assert.equal(next.converged_work_item_count, 1);
+  assert.equal(next.remaining_work_item_count, 1);
+  assert.equal(next.replan_required, true);
+  const nextState = next.state as Record<string, any>;
+  assert.equal(nextState.cycle, 2);
+  assert.deepEqual(
+    nextState.work_items.map((item: Record<string, unknown>) => item.work_item_id),
+    ["work_retention"],
+  );
+  assert.deepEqual(
+    nextState.feedback.map((item: Record<string, unknown>) => item.kind),
+    ["execution_result", "risk"],
+  );
+});
+
+test("next company cycle reports goal convergence after all work has evidence", async (t) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-company-state-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const first = await writeCompanyControlState(request(runtimeRoot, {
+    state: stateWithWork(),
+    updated_at: "2026-09-17T00:00:00Z",
+  }));
+  const reconciled = await reconcileCompanyControlState({
+    schema_version: COMPANY_CONTROL_STATE_RECONCILE_REQUEST_SCHEMA,
+    runtime_root: runtimeRoot,
+    goal_id: "company-goal",
+    expected_revision: (first.state as Record<string, unknown>).revision,
+    updated_at: "2026-09-17T00:01:00Z",
+    execute: true,
+    observations: [{
+      target_key: "activation_delivery",
+      todo_id: "todo_activation",
+      status: "done",
+      evidence_ref: "artifact:activation-report",
+    }],
+  });
+  const next = planCompanyControlNextCycle({
+    schema_version: "company_control_next_cycle_request_v0",
+    goal_id: "company-goal",
+    state: reconciled.state,
+  });
+  assert.equal(next.goal_converged, true);
+  assert.equal(next.remaining_work_item_count, 0);
+  assert.equal(next.replan_required, true);
 });
