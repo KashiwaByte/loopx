@@ -51,6 +51,19 @@ function revision(projection: JsonObject): string {
     .digest("hex");
 }
 
+function todoFeedbackId(
+  workItemId: string,
+  nextStatus: string,
+  todoId: string,
+  cycle: number,
+): string {
+  const digest = createHash("sha256")
+    .update(`${workItemId}\u001f${nextStatus}\u001f${todoId}\u001f${cycle}`, "utf8")
+    .digest("hex")
+    .slice(0, 24);
+  return `todo_feedback_${digest}`;
+}
+
 function safeGoalSegment(goalId: string): string {
   const label = goalId
     .toLowerCase()
@@ -375,9 +388,15 @@ export function planCompanyControlNextCycle(value: unknown): JsonObject {
     const observation = byTarget.get(targetKey);
     const nextStatus = observation?.next_status;
     if (nextStatus === "done") {
+      const todoId = requireNonEmptyString(observation?.todo_id, "observation todo_id");
       convergedCount += 1;
       feedback.push({
-        feedback_id: `todo_${work.work_item_id}_done`,
+        feedback_id: todoFeedbackId(
+          requireNonEmptyString(work.work_item_id, "stored work work_item_id"),
+          nextStatus,
+          todoId,
+          Number(projection.cycle),
+        ),
         source: "loopx_todo",
         subject: `Todo completed: ${work.title}`,
         kind: "execution_result",
@@ -401,7 +420,12 @@ export function planCompanyControlNextCycle(value: unknown): JsonObject {
     if (nextStatus === "replanning" || nextStatus === "awaiting_evidence") {
       const todoId = requireNonEmptyString(observation?.todo_id, "observation todo_id");
       feedback.push({
-        feedback_id: `todo_${work.work_item_id}_${nextStatus}`,
+        feedback_id: todoFeedbackId(
+          requireNonEmptyString(work.work_item_id, "stored work work_item_id"),
+          nextStatus,
+          todoId,
+          Number(projection.cycle),
+        ),
         source: "loopx_todo",
         subject: nextStatus === "replanning"
           ? `Todo blocked: ${work.title}`
