@@ -71,6 +71,21 @@ own Topic are negative cases. This admission probe does not qualify autonomous
 execution: the external read-only profile and recipient grants must be evaluated
 separately. Passing transport fixtures is not evidence of a deployed group run.
 
+### GQ01 conversational preparation variant
+
+“研究微软近三年的现金流，先把目标理清。” / “Help me shape a goal to research
+Microsoft's cash flow over the last three years.” The evaluator accepts a partial
+editable goal draft and at most one consequential question with contextual
+suggestions. Unknown requirements stay unspecified. Selecting a suggestion must
+only fill the composer; a free-text correction must remain usable. After a reply,
+reload and recover the corrected draft, open the existing Goal form, edit its
+criteria, preview and explicitly apply once, then inspect the creation receipt.
+Before confirmation there is no Goal/action write or worker launch. A draft is
+neither a created Goal nor completed research. Ask an ordinary explanatory question
+and confirm no draft appears. Reject an attempted permission/Agent-binding field
+inside a draft. Qualify model response quality separately from scripted transport
+and packaged-browser tests; the full GQ01 start-and-return outcome remains open.
+
 ### App-first execution profiles and ordinary questions
 
 Qualify the installed App first; Lark is independently scored, not required to

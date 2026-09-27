@@ -1,3 +1,5 @@
+import { GoalDraftCard } from "./goal-draft-card";
+import type { GoalDraft } from "../../../../../../loopx/control_plane/collaboration/goal_draft.js";
 import { CollaborationCard } from "./collaboration-card";
 import {
   compileActionReviewPlan,
@@ -257,6 +259,8 @@ function ManagerConversationTray({
   messages,
   onClose,
   onDraftTask,
+  onReviewGoalDraft,
+  onSuggestReply,
   onOpenConversation,
   title,
 }: {
@@ -264,6 +268,8 @@ function ManagerConversationTray({
   messages: Array<Extract<WorkspaceTimelineItem, { kind: "message" }>['message']>;
   onClose?: () => void;
   onDraftTask?: (text: string) => void;
+  onReviewGoalDraft?: (draft: GoalDraft) => void;
+  onSuggestReply?: (text: string) => void;
   onOpenConversation: () => void;
   title?: string;
 }) {
@@ -323,6 +329,7 @@ function ManagerConversationTray({
             <div className="personal-manager-conversation-bubble">
               {message.role === "user" ? <p>{message.text}</p> : <MarkdownText text={message.text} />}
               {message.pending ? <small>{t("conversation.agentPending")}</small> : null}
+              {message.role === "assistant" && !message.pending && message.goalDraft ? <GoalDraftCard draft={message.goalDraft} onReview={onReviewGoalDraft} onSuggest={onSuggestReply}/> : null}
               <CollaborationCard request={message.collaboration} />
               <ReturnDeliveryStatus delivery={message.returnDelivery} />
             </div>
@@ -820,6 +827,15 @@ export function PersonalWorkspacePage({
   }
   function setComposer(value: string) {
     setComposerDraft(composerDraftKey, value);
+  }
+  function reviewGoalDraft(draft: GoalDraft) {
+    setActionDraft({ kind: "goal", goalId: null, goalTitle: "", agentId: selectedAgentId,
+      text: draft.objective, completionCriteria: draft.completion_criteria,
+      executionBoundary: draft.execution_boundary, permission: "read_only" });
+  }
+  function suggestReply(text: string) {
+    setComposer(composer ? `${composer}\n${text}` : text);
+    composerRef.current?.focus();
   }
   // The steward prompt set is owned by the client model; the quick-prompt row
   // reuses it so one affordance answers "what now / what blocks / what is proven".
@@ -1781,7 +1797,7 @@ export function PersonalWorkspacePage({
                         run={activeSessionRun}
                       />
                     ) : null}
-                    <ChannelTimeline items={visibleTimelineItems} onSelect={setSelection} selectedGoal={selectedGoal}
+                    <ChannelTimeline onReviewGoalDraft={readOnly ? undefined : reviewGoalDraft} onSuggestReply={readOnly ? undefined : suggestReply} items={visibleTimelineItems} onSelect={setSelection} selectedGoal={selectedGoal}
                       onSteerTurn={!readOnly && callbacks.onSteerConversationTurn
                         ? (turnId, text, ingressId) => callbacks.onSteerConversationTurn!(selectedGoal.goalId, turnId, text, ingressId)
                         : undefined}
@@ -1793,7 +1809,7 @@ export function PersonalWorkspacePage({
             ) : !managerChatOpen ? (
               <ManagerHomeBoard goals={workspaceGoals} onRetry={() => void callbacks.onRefresh?.()} onSelectGoal={selectGoal} systemHealth={model.systemHealth} />
             ) : (
-              <ChannelTimeline items={managerChatItems} onSelect={setSelection} selectedGoal={null} showManagerTeamResults
+              <ChannelTimeline onReviewGoalDraft={readOnly ? undefined : reviewGoalDraft} onSuggestReply={readOnly ? undefined : suggestReply} items={managerChatItems} onSelect={setSelection} selectedGoal={null} showManagerTeamResults
                 onSteerTurn={!readOnly && callbacks.onSteerConversationTurn
                   ? (turnId, text, ingressId) => callbacks.onSteerConversationTurn!("manager", turnId, text, ingressId)
                   : undefined}
@@ -1809,7 +1825,7 @@ export function PersonalWorkspacePage({
               <div className="personal-read-only-notice"><strong>{t("source.readOnlyNoticeTitle")}</strong><span>{t("source.readOnlyNoticeDescription")}</span></div>
             ) : <>
             {!selectedGoal && !managerChatOpen && managerConversationReceiptVisible && managerMessages.length ? (
-              <ManagerConversationTray
+              <ManagerConversationTray onReviewGoalDraft={reviewGoalDraft} onSuggestReply={suggestReply}
                 messages={managerMessages}
                 onClose={() => setManagerConversationReceiptVisible(false)}
                 onOpenConversation={() => {
@@ -1818,7 +1834,7 @@ export function PersonalWorkspacePage({
                 }} />
             ) : null}
             {selectedGoal && selectedGoalTab !== "chat" && goalConversationReceiptVisible && goalMessages.length ? (
-              <ManagerConversationTray
+              <ManagerConversationTray onReviewGoalDraft={reviewGoalDraft} onSuggestReply={suggestReply}
                 agentLabel={selectedAgentLabel}
                 messages={goalMessages}
                 onClose={() => setGoalConversationReceiptVisible(false)}

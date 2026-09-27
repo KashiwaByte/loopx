@@ -9,6 +9,9 @@ export type WorkspaceActionDraft = {
   goalTitle: string;
   agentId: string;
   text?: string;
+  completionCriteria?: string;
+  executionBoundary?: string;
+  permission?: "read_only";
 };
 
 // Mirrors the backend preview normalizer: whitespace is collapsed, then code points are counted.
@@ -31,9 +34,9 @@ export function WorkspaceActionForm({ draft, onClose, onPreview }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [objective, setObjective] = useState(draft.text ?? "");
-  const [completion, setCompletion] = useState("");
-  const [boundary, setBoundary] = useState("");
-  const [permission, setPermission] = useState("workspace_write_on_confirmation");
+  const [completion, setCompletion] = useState(draft.completionCriteria ?? "");
+  const [boundary, setBoundary] = useState(draft.executionBoundary ?? "");
+  const [permission, setPermission] = useState<string>(draft.permission ?? "workspace_write_on_confirmation");
   const [interval, setInterval] = useState(draft.kind === "heartbeat" ? "1" : "2");
   const [unit, setUnit] = useState(draft.kind === "heartbeat" ? "d" : "h");
   const [stop, setStop] = useState("goal_complete");

@@ -203,3 +203,28 @@ Goal 权限在 form 中显式选择，保留既有“确认后允许修改工作
 显式 status-only profile 返回有标签的 snapshot，不返回以关键词构造的答案。
 把回复转为任务时打开完整可编辑文本，不猜测其中的下一步句子。
 保留结构化 ID、date 与 resume-condition 验证。Lark routing 不变。
+
+### 对话式目标准备：吸收团队工作台提案
+
+[KashiwaByte](https://github.com/KashiwaByte) 的 [PR #4376](https://github.com/loopx-project/loopx/pull/4376)
+带来了值得吸收的交互：每次提出一个关键问题，用贴合上下文的建议回复帮助用户理清目标。
+将它接入现有 App 对话和 Goal 操作路径；不采用独立工作台、JSON 存储、子进程执行器和调度器。
+未发布原型从本 PR 的最终产品差异中移除，贡献与原始实现保留在提交历史中。
+
+| 思想 | 现有归属与验收 |
+| --- | --- |
+| 对话式目标草稿与情境选项 | R1 / GQ01：共享类型化 `goal_draft`、可复用 App 卡片与可编辑创建表单。选项只填入输入框，用户发送后才继续；未知要求留空，不新增正则意图分类器或自动创建 |
+| 请人补材料、执行工作或判断结果 | 既有 operator inbox、user gate 与复核/采用契约。区分三类决定；回复不等于授予委派权限。完整验收仍开放 |
+| 记住纠偏与协作者所长 | 既有作用域 brief/context 与能力记忆 owner。纠偏可影响后续工作，但不产生权限、不证明能力，也不隐式改变执行绑定 |
+| 滚动计划与独立检查 | R2/R3 工作图、managed/attached Turn 与独立验收 owner。仍须证明真实依赖采用、纠偏、停止和结果回传；目标草稿不代表团队已验收 |
+| 可选远程执行器 | 既有扩展与执行 profile 契约。没有真实调用者、显式绑定与生命周期验收，不引入新 provider |
+
+本次实现是 provider 响应中的建议，不是第二个规划器或 Goal 真相源。
+现有 collaboration 中的 TypeScript owner 校验结构，Python 负责传输脱敏，草稿随完成消息持久化。
+App 历史与重连读取同一条消息；managed 和 attached 完成存储均保留该可选字段。
+普通回答与非法草稿保持原响应契约。Provider 必须实际返回结构化建议；存储/UI 验收不代表模型意图质量或真实 attached-host 工作链已验证。
+
+用户在既有 Goal 表单中编辑，再通过类型化 `goal.create` 预览、确认与执行。
+草稿入口默认只读且不启用 heartbeat；这是新入口明确披露的默认值变化，原显式创建入口保持现有默认值。
+文字边界、执行权限、工作区和注册负责人校验继续生效。创建 Goal 不代表 Agent 已启动或完成。
+Lark 保留文本回答，本阶段交互草稿卡仅在 App 提供；不引入新公开 capability 或 provider。

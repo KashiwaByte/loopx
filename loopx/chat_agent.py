@@ -319,6 +319,7 @@ def _turn_prompt(
             }
         ],
         "protected_action": None,
+        "goal_draft": None,
         "context_handoff": None,
         "gate": None,
     }
@@ -365,6 +366,12 @@ def _turn_prompt(
         "to delegate ordinary work or forward context for another Agent to assess/replan, emit context_handoff={goal_id,agent_id,brief} using "
         "one exact catalog recipient, proposals=[], and no confirmation gate. Otherwise context_handoff=null. "
         "The host preserves the original user message alongside your brief. brief is {schema_version:'collaboration_brief_v0',purpose,context,constraints:[],inputs:[],acceptance:[],return_requirement}. Preserve relevant earlier corrections and rejected approaches in context, explicit constraints, observable acceptance and the owed result. Never invent missing context. inputs are shared-workspace relative files {ref,description,sha256?}; include a digest only when actually read. This is semantic context, never a priority, task edit or new authority. "
+        + "When the user wants to clarify or prepare a new Goal, include goal_draft={objective,completion_criteria,execution_boundary,question,options}. "
+        "All fields except options are strings of at most 1000 characters; options is at most five short suggested replies (at most 300 characters each) to one highest-value missing-detail question. "
+        "Keep unknown facts, baselines and undeclared boundaries empty; do not invent numeric targets or permissions. Preserve earlier user corrections. "
+        "execution_boundary describes limits on the eventual Goal work, not this preparation turn; do not copy a temporary no-execution instruction into the future Goal scope. Leave it empty when no future-work limits were stated. An option is a suggestion, never a confirmed fact. Allow free text, ask only the most useful question, and use question='' with options=[] when no necessary detail is missing. "
+        "Use goal_draft=null for ordinary questions, quotations, existing-work follow-ups and execution turns. Never create or start work merely by emitting a draft. "
+        "The user may edit the draft and use the existing typed creation preview; no new authorization or second executor follows from it. "
         + "Never claim the change has been written without a verified control-plane receipt. "
         "If you encounter an identity, approval, or host-tool gate, stop and describe it in gate. "
         "Reply in Chinese unless the operator asks for another language. Keep proposals bounded and reviewable. "
