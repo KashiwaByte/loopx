@@ -22,6 +22,7 @@ from loopx.extensions.lark.inbox_reactions import (
 from loopx.extensions.lark.inbox_reply import (
     reply_lark_event_inbox,
     send_lark_inbox_message,
+    verify_lark_inbox_reply,
 )
 
 
@@ -328,6 +329,7 @@ class ReplyRunner:
         member_bucket: str = "users",
         member_read_denied: bool = False,
         auth_failures: int = 0,
+        send_message_id: str | None = "om_reply_fixture",
     ) -> None:
         self.calls: list[list[str]] = []
         self.matching_readback = matching_readback
@@ -338,6 +340,7 @@ class ReplyRunner:
         self.member_bucket = member_bucket
         self.member_read_denied = member_read_denied
         self.auth_failures = auth_failures
+        self.send_message_id = send_message_id
 
     def __call__(self, args: Sequence[str]) -> dict[str, Any]:
         call = list(args)
@@ -427,7 +430,11 @@ class ReplyRunner:
                 }
             return {
                 "returncode": 0,
-                "stdout": json.dumps({"message_id": "om_reply_fixture"}),
+                "stdout": json.dumps(
+                    {"message_id": self.send_message_id}
+                    if self.send_message_id is not None
+                    else {}
+                ),
                 "stderr": "",
             }
         if "+messages-mget" in call:
@@ -927,6 +934,150 @@ def test_multiline_readback_must_preserve_line_structure(tmp_path: Path) -> None
     assert result["reply_verified"] is False
 
 
+def test_unverified_reply_records_private_locator_and_read_only_recovery(
+    tmp_path: Path,
+) -> None:
+    config, _, project = _fixture(tmp_path, lifecycle=False)
+    attempts: list[dict[str, str]] = []
+    first_runner = ReplyRunner(matching_readback=False)
+
+    sent = reply_lark_event_inbox(
+        project=project,
+        config_path=config,
+        message_id="om_reaction_fixture",
+        text="处理完成",
+        execute=True,
+        runner=first_runner,
+        delivery_attempt_recorder=attempts.append,
+    )
+
+    assert sent["status"] == "sent_unverified"
+    assert attempts == [
+        {
+            "schema_version": "manager_return_delivery_attempt_v0",
+            "provider": "lark",
+            "message_ref": "om_reply_fixture",
+            "intent_digest": attempts[0]["intent_digest"],
+            "provider_receipt": sent["idempotency_key"],
+        }
+    ]
+    assert attempts[0]["intent_digest"].startswith("sha256:")
+    assert "message_ref" not in sent
+
+    recovery_runner = ReplyRunner()
+    recovered = verify_lark_inbox_reply(
+        project=project,
+        config_path=config,
+        message_id="om_reaction_fixture",
+        text="处理完成",
+        attempt=attempts[0],
+        runner=recovery_runner,
+    )
+
+    assert recovered["reply_verified"] is True
+    assert recovered["verification_performed"] is True
+    assert not any(
+        "+messages-send" in call or "+messages-reply" in call
+        for call in recovery_runner.calls
+    )
+
+
+def test_a_send_that_reports_no_message_id_records_its_intent(
+    tmp_path: Path,
+) -> None:
+    """A provider write without a message id must still leave a record.
+
+    Nothing can read back a send that reported no message id, so without the
+    record a retry has no evidence a write happened and posts the same text
+    again. The recorded intent is what stops that, and no readback is attempted
+    because there is no message id to key it on.
+    """
+
+    config, _, project = _fixture(tmp_path, lifecycle=False)
+    attempts: list[dict[str, str]] = []
+    runner = ReplyRunner(send_message_id=None)
+
+    sent = reply_lark_event_inbox(
+        project=project,
+        config_path=config,
+        message_id="om_reaction_fixture",
+        text="处理完成",
+        execute=True,
+        runner=runner,
+        delivery_attempt_recorder=attempts.append,
+    )
+
+    assert sent["status"] == "sent_unverified"
+    assert sent["external_write_performed"] is True
+    assert sent["reply_verified"] is False
+    assert sent["blocker"] == "lark_inbox_reply_not_verified"
+    assert attempts == [
+        {
+            "schema_version": "manager_return_delivery_attempt_v0",
+            "provider": "lark",
+            # The provider supplied no message id, so the locator is absent
+            # rather than an invalid empty string the canonical contract would
+            # reject: the attempt records the write, not a readback target.
+            "message_ref": None,
+            "intent_digest": attempts[0]["intent_digest"],
+            "provider_receipt": sent["idempotency_key"],
+        }
+    ]
+    assert attempts[0]["intent_digest"].startswith("sha256:")
+    assert not any("+messages-mget" in call for call in runner.calls)
+
+
+def test_read_only_recovery_rejects_changed_intent_without_provider_call(
+    tmp_path: Path,
+) -> None:
+    config, _, project = _fixture(tmp_path, lifecycle=False)
+    runner = ReplyRunner()
+    result = verify_lark_inbox_reply(
+        project=project,
+        config_path=config,
+        message_id="om_reaction_fixture",
+        text="different result",
+        attempt={
+            "schema_version": "manager_return_delivery_attempt_v0",
+            "provider": "lark",
+            "message_ref": "om_reply_fixture",
+            "intent_digest": "sha256:" + "a" * 64,
+            "provider_receipt": "sha256:" + "b" * 64,
+        },
+        runner=runner,
+    )
+
+    assert result["reply_verified"] is False
+    assert result["verification_performed"] is True
+    assert result["blocker"] == "provider_delivery_intent_conflict"
+    assert runner.calls == []
+
+
+def test_reply_fails_closed_after_send_when_locator_persistence_fails(
+    tmp_path: Path,
+) -> None:
+    config, _, project = _fixture(tmp_path, lifecycle=False)
+    runner = ReplyRunner()
+
+    result = reply_lark_event_inbox(
+        project=project,
+        config_path=config,
+        message_id="om_reaction_fixture",
+        text="处理完成",
+        execute=True,
+        runner=runner,
+        delivery_attempt_recorder=lambda _attempt: (_ for _ in ()).throw(
+            OSError("synthetic private persistence failure")
+        ),
+    )
+
+    assert result["external_write_performed"] is True
+    assert result["reply_verified"] is False
+    assert result["blocker"] == "lark_inbox_reply_delivery_attempt_not_persisted"
+    assert sum("+messages-reply" in call and "--dry-run" not in call for call in runner.calls) == 1
+    assert not any("+messages-mget" in call for call in runner.calls)
+
+
 def test_verified_reply_accepts_provider_token_or_rendered_mention_name(
     tmp_path: Path,
 ) -> None:
@@ -1337,6 +1488,42 @@ def test_top_level_send_rejects_overlong_text_instead_of_truncating_mention(
         )
 
     assert runner.calls == []
+
+
+def test_an_answer_delivery_is_bounded_by_the_provider_not_by_the_notice_length(
+    tmp_path: Path,
+) -> None:
+    """The compact notification length must not cut an answer delivery.
+
+    The same over-limit body the chat-root notification rejects is accepted on
+    the answer path, because the 1200 characters are a notification shape and
+    not a provider bound: the provider request limit is what actually bounds it.
+    """
+
+    config, _, project = _fixture(tmp_path, lifecycle=False)
+    runner = ReplyRunner()
+    text = "x" * 1160 + '<at open_id="ou_public_reviewer">Public Reviewer</at> please review'
+
+    with pytest.raises(ValueError, match="exceeds the 1200-character"):
+        send_lark_inbox_message(
+            project=project,
+            config_path=config,
+            text=text,
+            execute=True,
+            runner=runner,
+        )
+
+    accepted = reply_lark_event_inbox(
+        project=project,
+        config_path=config,
+        message_id=None,
+        text=text,
+        execute=False,
+        short_message_limit=None,
+    )
+
+    assert accepted["ok"] is True
+    assert accepted["status"] == "preview_ready"
 
 
 def test_unverified_reply_preserves_processing_reaction(tmp_path: Path) -> None:

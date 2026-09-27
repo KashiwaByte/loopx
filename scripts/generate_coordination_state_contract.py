@@ -34,15 +34,17 @@ EXPECTED_COMPATIBILITY = {
     "markdown_role": "human_workbench_and_compatibility_projection",
 }
 LOCAL_AUTHORITY_PROTOCOL_KEYS = (
-    "mutation_request_schema",
-    "mutation_result_schema",
     "todo_read_request_schema",
     "todo_read_result_schema",
     "todo_list_request_schema",
     "todo_list_result_schema",
+    "todo_snapshot_page_request_schema",
+    "todo_snapshot_page_result_schema",
     "promotion_request_schema",
     "promotion_result_schema",
     "promotion_receipt_schema",
+    "promotion_review_request_schema",
+    "promotion_review_result_schema",
 )
 RUNTIME_SHADOW_PROTOCOL_KEYS = (
     "commit_request_schema",
@@ -107,8 +109,11 @@ DELIVERY_WORKSPACE_SNAPSHOT_PROTOCOL_KEYS = (
 )
 TASK_LEASE_PROTOCOL_KEYS = (
     "acquire_request_schema",
+    "canonical_acquire_request_schema",
     "lifecycle_request_schema",
     "canonical_renew_request_schema",
+    "canonical_lifecycle_request_schema",
+    "canonical_claim_transfer_request_schema",
 )
 CAPABILITY_HOOK_PROTOCOL_KEYS = (
     "registration_schema",
@@ -151,6 +156,10 @@ LEGACY_WRITER_FENCE_CONSTANT_NAMES = {
 
 # One ordered binding map owns validation keys and both language exports.
 PROTOCOL_BINDINGS = {
+    "source_transfer_protocol": {
+        "request_schema": "COORDINATION_SOURCE_TRANSFER_REQUEST_SCHEMA",
+        "result_schema": "COORDINATION_SOURCE_TRANSFER_RESULT_SCHEMA",
+    },
     "local_authority_protocol": {key: f"LOCAL_COORDINATION_{key.upper()}" for key in LOCAL_AUTHORITY_PROTOCOL_KEYS},
     "runtime_shadow_protocol": {key: f"COORDINATION_RUNTIME_SHADOW_{key.upper()}" for key in RUNTIME_SHADOW_PROTOCOL_KEYS},
     "local_authority_shadow_protocol": {key: f"LOCAL_AUTHORITY_SHADOW_{key.upper()}" for key in LOCAL_AUTHORITY_SHADOW_PROTOCOL_KEYS},
@@ -171,7 +180,7 @@ PROTOCOL_BINDINGS = {
 }
 EXPECTED_TOP_LEVEL_KEYS = {
     "schema_version", "todo_read_record", "todo_domain_record",
-    "todo_projection_metadata", "compatibility", *PROTOCOL_BINDINGS,
+    "todo_projection_metadata", "todo_priority", "compatibility", "source_transfer_limits", *PROTOCOL_BINDINGS,
 }
 
 
@@ -193,6 +202,19 @@ def load_contract() -> dict[str, Any]:
         raise ValueError("coordination contract has unexpected top-level fields")
     if raw.get("schema_version") != "loopx_coordination_state_contract_v0":
         raise ValueError("coordination contract schema mismatch")
+    transfer = raw.get("source_transfer_limits")
+    if (not isinstance(transfer, dict) or set(transfer) != {"max_bytes"}
+        or type(transfer["max_bytes"]) is not int or not 0 < transfer["max_bytes"] <= 2**53 - 1):
+        raise ValueError("source transfer max_bytes must be a positive safe integer")
+    priority = raw.get("todo_priority")
+    if not isinstance(priority, dict) or set(priority) != {"values", "legacy_prefix_pattern", "legacy_label_pattern", "missing_rank"}:
+        raise ValueError("Todo priority contract has unexpected fields")
+    _string_list(priority["values"], label="todo_priority.values")
+    for pattern in ("legacy_prefix_pattern", "legacy_label_pattern"):
+        if not isinstance(priority[pattern], str) or not priority[pattern]:
+            raise ValueError("Todo priority pattern must be a non-empty string")
+    if not isinstance(priority["missing_rank"], int) or isinstance(priority["missing_rank"], bool):
+        raise ValueError("Todo missing priority rank must be an integer")
     todo = raw.get("todo_read_record")
     if not isinstance(todo, dict) or set(todo) != EXPECTED_TODO_KEYS:
         raise ValueError("Todo record contract has unexpected fields")

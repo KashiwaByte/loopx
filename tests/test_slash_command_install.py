@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
+from loopx.entrypoint import main as loopx_main
 from loopx import slash_command_install
+from loopx.pi_goal_mode.installation import inspect_pi_installations
 from loopx.slash_command_install import (
     install_slash_commands,
     materialize_loopx_entry_skill,
@@ -43,6 +45,7 @@ def test_host_materialization_installs_generated_loopx_entry_skill(
         "skill_id": "loopx",
         "path": str(skill),
         "status": "created",
+        "metadata_status": "created",
     }
     # A plain scalar, not `name: "loopx"`: hosts such as Kiro CLI keep the quote
     # characters verbatim and would expose the skill as `/"loopx"`.
@@ -132,6 +135,31 @@ def test_host_materialization_rejects_unknown_fixed_surface(tmp_path: Path) -> N
             execute=True,
             host_surface="guessed-host",
         )
+
+
+@pytest.mark.parametrize("host_surface", ["ark-managed-agent", "deepseek-harness-native"])
+def test_exact_host_materialization_does_not_add_codex_policy(tmp_path, host_surface):
+    result = materialize_loopx_entry_skill(
+        skills_dir=tmp_path, execute=True, host_surface=host_surface,
+    )
+    assert "metadata_status" not in result
+    assert not (tmp_path / "loopx/agents/openai.yaml").exists()
+
+
+@pytest.mark.parametrize("user_skill", [False, True])
+def test_entry_materialization_preserves_user_metadata(tmp_path, user_skill):
+    skill, metadata = _loopx_paths(tmp_path)
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text('interface:\n  display_name: "My workflow"\n')
+    if user_skill:
+        skill.write_text("User-owned skill\n")
+    result = materialize_loopx_entry_skill(skills_dir=tmp_path / "skills", execute=True)
+    assert metadata.read_text() == 'interface:\n  display_name: "My workflow"\n'
+    if user_skill:
+        assert result["status"] == "skipped_user_file"
+        assert skill.read_text() == "User-owned skill\n"
+    else:
+        assert result["metadata_status"] == "skipped_user_file"
 
 
 def test_codex_install_upgrades_managed_loopx_facade(tmp_path: Path) -> None:
@@ -570,6 +598,202 @@ def test_pi_install_writes_self_contained_extension_into_project(
     assert "terminal_no_followup" in runtime_text
     # The extension is self-contained: no package.json or node_modules needed.
     assert not (tmp_path / ".pi" / "extensions" / "package.json").exists()
+
+
+def test_pi_user_scope_installs_atomic_extension_unit(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    payload = install_slash_commands(
+        execute=True,
+        surfaces=["pi"],
+        pi_scope="user",
+        pi_user_home=str(home),
+    )
+
+    root = home / ".pi" / "agent" / "extensions" / "loopx"
+    assert payload["summary"]["pi_scope"] == "user"
+    assert payload["summary"]["pi_extension_path"] == str(root / "index.ts")
+    assert payload["summary"]["pi_runtime_path"] == str(root / "pi-goal-loop-runtime.mjs")
+    assert any("scope=user" in note for note in payload["notes"])
+    assert (root / "index.ts").is_file()
+    assert (root / "pi-goal-loop-runtime.mjs").is_file()
+    assert inspect_pi_installations(pi_project=str(tmp_path), pi_user_home=str(home))["location"] == "user-global"
+
+
+def test_pi_user_scope_preflight_blocks_both_files(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = home / ".pi" / "agent" / "extensions" / "loopx"
+    root.mkdir(parents=True)
+    runtime = root / "pi-goal-loop-runtime.mjs"
+    runtime.write_text("user owned\n", encoding="utf-8")
+
+    payload = install_slash_commands(
+        execute=True,
+        surfaces=["pi"],
+        pi_scope="user",
+        pi_user_home=str(home),
+    )
+
+    assert payload["ok"] is False
+    assert not (root / "index.ts").exists()
+    assert runtime.read_text(encoding="utf-8") == "user owned\n"
+
+
+def test_pi_user_scope_preserves_user_entry_and_upgrades_managed_files(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = home / ".pi/agent/extensions/loopx"
+    root.mkdir(parents=True)
+    entry = root / "index.ts"
+    runtime = root / "pi-goal-loop-runtime.mjs"
+    entry.write_text("// user entry\n", encoding="utf-8")
+
+    blocked = install_slash_commands(
+        execute=True, surfaces=["pi"], pi_scope="user", pi_user_home=str(home)
+    )
+    assert blocked["ok"] is False
+    assert entry.read_text(encoding="utf-8") == "// user entry\n"
+    assert not runtime.exists()
+
+    entry.write_text(slash_command_install.pi_extension_source() + "\n// old\n", encoding="utf-8")
+    stale = inspect_pi_installations(pi_project=str(tmp_path), pi_user_home=str(home))
+    assert stale["scopes"]["user"]["status"] == "partial"
+    updated = install_slash_commands(
+        execute=True, surfaces=["pi"], pi_scope="user", pi_user_home=str(home)
+    )
+    assert updated["ok"] is True
+    assert _row(updated, "pi_goal_extension")["status"] == "updated"
+    assert _row(updated, "pi_goal_extension_runtime")["status"] == "created"
+    assert inspect_pi_installations(pi_project=str(tmp_path), pi_user_home=str(home))["scopes"]["user"]["status"] == "current"
+
+
+def test_pi_user_scope_follows_pi_agent_dir_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_dir = tmp_path / "custom-agent-dir"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    payload = install_slash_commands(execute=True, surfaces=["pi"], pi_scope="user")
+
+    assert payload["summary"]["pi_extension_path"] == str(agent_dir / "extensions/loopx/index.ts")
+    assert (agent_dir / "extensions/loopx/index.ts").is_file()
+    assert inspect_pi_installations(pi_project=str(tmp_path))["scopes"]["user"]["status"] == "current"
+
+
+def test_pi_inspect_cli_reads_selected_project_and_user_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    agent_dir = tmp_path / "agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    install_slash_commands(
+        execute=True, surfaces=["pi"], pi_scope="user", pi_project=str(tmp_path)
+    )
+
+    exit_code = loopx_main(
+        ["--format", "json", "slash-commands", "--inspect", "--surface", "pi", "--pi-project", str(tmp_path)]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["location"] == "user-global"
+    assert payload["scopes"]["project"]["status"] == "absent"
+    assert payload["scopes"]["user"]["extension_path"] == str(agent_dir / "extensions/loopx/index.ts")
+
+
+def test_pi_readback_distinguishes_absent_stale_partial_and_dual_scope(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+
+    def readback() -> dict[str, object]:
+        return inspect_pi_installations(pi_project=str(tmp_path), pi_user_home=str(home))
+
+    assert readback()["location"] == "absent"
+
+    install_slash_commands(execute=True, surfaces=["pi"], pi_project=str(tmp_path))
+    assert readback()["location"] == "project-local"
+    assert readback()["scopes"]["project"]["status"] == "current"
+
+    project_runtime = tmp_path / ".pi/extensions/pi-goal-loop-runtime.mjs"
+    project_runtime.write_text(project_runtime.read_text(encoding="utf-8") + "\n// old\n")
+    assert readback()["scopes"]["project"]["status"] == "stale"
+    project_runtime.unlink()
+    assert readback()["scopes"]["project"]["status"] == "partial"
+
+    install_slash_commands(execute=True, surfaces=["pi"], pi_project=str(tmp_path))
+    install_slash_commands(
+        execute=True, surfaces=["pi"], pi_scope="user", pi_user_home=str(home)
+    )
+    dual = readback()
+    assert dual["location"] == "dual-scope"
+    assert dual["ok"] is False
+    assert "duplicate" in dual["duplicate_load_warning"]
+
+    install_slash_commands(
+        execute=True, uninstall=True, surfaces=["pi"], pi_scope="user", pi_user_home=str(home)
+    )
+    assert readback()["location"] == "project-local"
+
+
+def test_pi_user_uninstall_retires_managed_entry_and_keeps_user_runtime(
+    tmp_path: Path,
+) -> None:
+    """A user-owned runtime must not make the managed adapter unremovable."""
+    home = tmp_path / "home"
+    install_slash_commands(
+        execute=True, surfaces=["pi"], pi_scope="user", pi_user_home=str(home)
+    )
+    root = home / ".pi/agent/extensions/loopx"
+    extension = root / "index.ts"
+    runtime = root / "pi-goal-loop-runtime.mjs"
+    runtime.write_text("// user replacement\n", encoding="utf-8")
+
+    payload = install_slash_commands(
+        execute=True, uninstall=True, surfaces=["pi"], pi_scope="user", pi_user_home=str(home)
+    )
+    assert payload["ok"] is True
+    assert _row(payload, "pi_goal_extension")["status"] == "retired_managed_file"
+    assert _row(payload, "pi_goal_extension_runtime")["status"] == "skipped_user_file"
+    assert not extension.exists()
+    assert runtime.read_text(encoding="utf-8") == "// user replacement\n"
+
+
+def test_pi_project_uninstall_survives_edited_runtime(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression: the default project scope must keep its per-file uninstall."""
+    installed = loopx_main(
+        [
+            "--format",
+            "json",
+            "slash-commands",
+            "--install",
+            "--surface",
+            "pi",
+            "--pi-project",
+            str(tmp_path),
+        ]
+    )
+    capsys.readouterr()
+    assert installed == 0
+    extension = tmp_path / ".pi/extensions/loopx-goal.ts"
+    runtime = tmp_path / ".pi/extensions/pi-goal-loop-runtime.mjs"
+    assert extension.is_file() and runtime.is_file()
+    runtime.write_text("// user replacement\n", encoding="utf-8")
+
+    exit_code = loopx_main(
+        [
+            "--format",
+            "json",
+            "slash-commands",
+            "--uninstall",
+            "--surface",
+            "pi",
+            "--pi-project",
+            str(tmp_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert _row(payload, "pi_goal_extension")["status"] == "retired_managed_file"
+    assert _row(payload, "pi_goal_extension_runtime")["status"] == "skipped_user_file"
+    assert not extension.exists()
+    assert runtime.read_text(encoding="utf-8") == "// user replacement\n"
 
 
 def test_pi_install_does_not_touch_default_all_surfaces(tmp_path: Path) -> None:

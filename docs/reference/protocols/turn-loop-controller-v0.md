@@ -12,11 +12,14 @@ host-specific wake adapters, and operator presentation are later slices in the
 Turn Loop Controller plan.
 
 The controller is an exported transition API, not a loop implicitly started by
-`loopx turn run-once`. The CLI does not currently call `decide_loop_disposition`
-or persist a `BoundedTurnBudget`. Both `max_turns` and `completed_turns` must be
-supplied by an integrating caller; there is no CLI or product default of three
-Turns. The budget applies to continued `validated_progress` on the same Todo,
-not a chain of completed Todos and not fine-grained planning mode.
+`loopx turn run-once`. `loopx turn managed-step` calls `decide_loop_disposition`
+for one already-journaled failed Turn and returns the typed answer without
+executing anything, which is the first production consumer of the transition.
+The CLI still does not persist a `BoundedTurnBudget`; both `max_turns` and
+`completed_turns` must be supplied by an integrating caller, and there is no CLI
+or product default of three Turns. The budget applies to continued
+`validated_progress` on the same Todo, not a chain of completed Todos and not
+fine-grained planning mode.
 
 ## Inputs
 
@@ -171,6 +174,40 @@ This mirrors the autonomous-replan and two-stall contracts: no runnable todo
 with an open acceptance gap, a terminal/obsolete/incompatible selected todo,
 validated negative evidence, or two eligible turns without material progress
 all require replan rather than another delivery attempt.
+
+## Managed Step Surface
+
+`loopx turn managed-step` is the CLI surface that consumes this transition for
+one already-journaled Turn:
+
+```bash
+loopx turn managed-step \
+  --goal-id <goal-id> \
+  --agent-id <agent-id> \
+  --turn-key <sha256:64-hex-digest> \
+  --format json
+```
+
+It rebuilds the `ValidatedTurnReceipt` from the canonical Journal, projects the
+current control-plane decision as a fresh `loopx_turn_envelope_v0`, and returns
+`loopx_turn_managed_step_v0`: the disposition, its reason, the goal/agent/Todo
+lineage, and, on `wait`, the typed `retry_continuation` block.
+
+The command is read-only and grants no authority of its own. It never launches
+a host, writes state, spends quota, sleeps, or mints a Turn. On `wait` the
+answer only describes the bounded backoff after which the outer scheduler may
+wake the *same* Turn; carrying the existing `--retry-failed-turn` /
+`--resume-turn-key` flags on the next `run-once` stays the caller's decision.
+
+The Turn Journal remains the sole authority for the attempt count and retry
+ceiling. `--observed-attempt` and `--observed-max-attempts` are reconciled
+against it and refused on disagreement, so a caller's bookkeeping can be
+checked but never substituted. A Journal that is not a finished failed Turn,
+whose typed host failure is not retryable, or whose current snapshot fails the
+canonical TypeScript journal consistency checks is refused before the transition
+is reached. A stored recovery audit describes an earlier attempt, not current
+eligibility. The eventual `run-once` still revalidates host-session binding and
+execution authority before retrying.
 
 ## Boundary
 

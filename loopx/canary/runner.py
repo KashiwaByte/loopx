@@ -170,7 +170,7 @@ def _tracked_change_paths() -> tuple[bool, list[str], str]:
         completed = subprocess.run(
             ["git", "-C", str(REPO_ROOT), *args],
             check=False,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -186,7 +186,7 @@ def _git_worktree_probe(root: Path) -> tuple[bool, str]:
     worktree_probe = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
         check=False,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -232,7 +232,7 @@ def _restore_tracked_paths(paths: list[str]) -> dict[str, Any]:
     completed = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "restore", "--staged", "--worktree", "--", *paths],
         check=False,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -268,7 +268,7 @@ def _run_check(
         completed = subprocess.run(
             normalized["argv"],
             cwd=REPO_ROOT,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,

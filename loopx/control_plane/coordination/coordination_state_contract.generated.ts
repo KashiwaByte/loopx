@@ -8,15 +8,20 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-export const LOCAL_COORDINATION_MUTATION_REQUEST_SCHEMA = "loopx_local_coordination_mutation_request_v0";
-export const LOCAL_COORDINATION_MUTATION_RESULT_SCHEMA = "loopx_local_coordination_mutation_result_v0";
+export const COORDINATION_SOURCE_TRANSFER_REQUEST_SCHEMA = "loopx_coordination_source_transfer_v0";
+export const COORDINATION_SOURCE_TRANSFER_RESULT_SCHEMA = "loopx_coordination_source_transfer_result_v0";
+
 export const LOCAL_COORDINATION_TODO_READ_REQUEST_SCHEMA = "loopx_local_coordination_todo_read_request_v0";
 export const LOCAL_COORDINATION_TODO_READ_RESULT_SCHEMA = "loopx_local_coordination_todo_read_result_v0";
 export const LOCAL_COORDINATION_TODO_LIST_REQUEST_SCHEMA = "loopx_local_coordination_todo_list_request_v0";
 export const LOCAL_COORDINATION_TODO_LIST_RESULT_SCHEMA = "loopx_local_coordination_todo_list_result_v0";
+export const LOCAL_COORDINATION_TODO_SNAPSHOT_PAGE_REQUEST_SCHEMA = "loopx_canonical_snapshot_page_request_v0";
+export const LOCAL_COORDINATION_TODO_SNAPSHOT_PAGE_RESULT_SCHEMA = "loopx_canonical_snapshot_page_result_v0";
 export const LOCAL_COORDINATION_PROMOTION_REQUEST_SCHEMA = "loopx_local_coordination_promotion_request_v0";
 export const LOCAL_COORDINATION_PROMOTION_RESULT_SCHEMA = "loopx_local_coordination_promotion_result_v0";
 export const LOCAL_COORDINATION_PROMOTION_RECEIPT_SCHEMA = "loopx_local_coordination_promotion_receipt_v0";
+export const LOCAL_COORDINATION_PROMOTION_REVIEW_REQUEST_SCHEMA = "loopx_local_coordination_promotion_review_request_v0";
+export const LOCAL_COORDINATION_PROMOTION_REVIEW_RESULT_SCHEMA = "loopx_local_coordination_promotion_review_result_v0";
 
 export const COORDINATION_RUNTIME_SHADOW_COMMIT_REQUEST_SCHEMA = "loopx_coordination_runtime_shadow_commit_v0";
 export const COORDINATION_RUNTIME_SHADOW_COMMIT_RESULT_SCHEMA = "loopx_coordination_runtime_shadow_result_v0";
@@ -42,7 +47,7 @@ export const LOCAL_AUTHORITY_SHADOW_OUTBOX_ENTRY_SCHEMA = "loopx_local_authority
 export const LOCAL_AUTHORITY_SHADOW_OUTBOX_COMMIT_SCHEMA = "loopx_local_authority_shadow_outbox_commit_v1";
 export const LOCAL_AUTHORITY_SHADOW_DRAIN_CURSOR_SCHEMA = "loopx_local_authority_shadow_drain_cursor_v0";
 export const LOCAL_AUTHORITY_SHADOW_TRANSACTION_PROJECTION_SCHEMA = "loopx_coordination_runtime_shadow_projection_v0";
-export const LOCAL_AUTHORITY_SHADOW_COMMIT_ENTRY_REQUEST_SCHEMA = "loopx_coordination_runtime_shadow_commit_entry_request_v1";
+export const LOCAL_AUTHORITY_SHADOW_COMMIT_ENTRY_REQUEST_SCHEMA = "loopx_shadow_entry_delivery_request_v0";
 export const LOCAL_AUTHORITY_SHADOW_COMMIT_ENTRY_RESULT_SCHEMA = "loopx_coordination_runtime_shadow_commit_entry_result_v0";
 export const LOCAL_AUTHORITY_SHADOW_READ_REQUEST_SCHEMA = "loopx_coordination_runtime_shadow_outbox_read_v0";
 export const LOCAL_AUTHORITY_SHADOW_READ_RESULT_SCHEMA = "loopx_coordination_runtime_shadow_outbox_read_result_v0";
@@ -78,8 +83,11 @@ export const DELIVERY_WORKSPACE_SNAPSHOT_REQUEST_SCHEMA = "loopx_delivery_worksp
 export const DELIVERY_WORKSPACE_SNAPSHOT_RESULT_SCHEMA = "loopx_delivery_workspace_result_v0";
 
 export const TASK_LEASE_ACQUIRE_REQUEST_SCHEMA = "loopx_task_lease_acquire_native_v0";
+export const TASK_LEASE_CANONICAL_ACQUIRE_REQUEST_SCHEMA = "loopx_canonical_task_lease_acquire_request_v0";
 export const TASK_LEASE_LIFECYCLE_REQUEST_SCHEMA = "loopx_task_lease_lifecycle_native_v0";
 export const TASK_LEASE_CANONICAL_RENEW_REQUEST_SCHEMA = "loopx_canonical_task_lease_renew_request_v0";
+export const TASK_LEASE_CANONICAL_LIFECYCLE_REQUEST_SCHEMA = "loopx_canonical_task_lease_lifecycle_request_v0";
+export const TASK_LEASE_CANONICAL_CLAIM_TRANSFER_REQUEST_SCHEMA = "loopx_canonical_task_lease_claim_transfer_request_v0";
 
 export const CAPABILITY_HOOK_REGISTRATION_SCHEMA = "loopx_capability_hook_registration_v0";
 export const CAPABILITY_HOOK_INTERACTION_RESULT_SCHEMA = "loopx_interaction_projection_hook_result_v0";
@@ -174,10 +182,13 @@ export const COORDINATION_STATE_CONTRACT = deepFreeze({
       "reason",
       "completed_at",
       "completion_turn_key",
+      "completion_result",
       "updated_at",
       "superseded_by",
       "completion_validation_required",
       "completion_validation_sha256",
+      "completion_validation_revision",
+      "completion_validation_revision_history",
       "handoff_note"
     ],
     "required_fields": [
@@ -206,6 +217,18 @@ export const COORDINATION_STATE_CONTRACT = deepFreeze({
       "archive_state"
     ]
   },
+  "todo_priority": {
+    "values": [
+      "P0",
+      "P1",
+      "P2",
+      "P3",
+      "P4"
+    ],
+    "legacy_prefix_pattern": "^\\s*\\[(P[0-4](?:[-\\s][^\\]]*)?)\\]\\s*(.+)$",
+    "legacy_label_pattern": "^(P[0-4])(?:$|[-\\s])",
+    "missing_rank": 50
+  },
   "todo_projection_metadata": {
     "fields": [
       "source_section",
@@ -216,15 +239,17 @@ export const COORDINATION_STATE_CONTRACT = deepFreeze({
     ]
   },
   "local_authority_protocol": {
-    "mutation_request_schema": LOCAL_COORDINATION_MUTATION_REQUEST_SCHEMA,
-    "mutation_result_schema": LOCAL_COORDINATION_MUTATION_RESULT_SCHEMA,
     "todo_read_request_schema": LOCAL_COORDINATION_TODO_READ_REQUEST_SCHEMA,
     "todo_read_result_schema": LOCAL_COORDINATION_TODO_READ_RESULT_SCHEMA,
     "todo_list_request_schema": LOCAL_COORDINATION_TODO_LIST_REQUEST_SCHEMA,
     "todo_list_result_schema": LOCAL_COORDINATION_TODO_LIST_RESULT_SCHEMA,
+    "todo_snapshot_page_request_schema": LOCAL_COORDINATION_TODO_SNAPSHOT_PAGE_REQUEST_SCHEMA,
+    "todo_snapshot_page_result_schema": LOCAL_COORDINATION_TODO_SNAPSHOT_PAGE_RESULT_SCHEMA,
     "promotion_request_schema": LOCAL_COORDINATION_PROMOTION_REQUEST_SCHEMA,
     "promotion_result_schema": LOCAL_COORDINATION_PROMOTION_RESULT_SCHEMA,
-    "promotion_receipt_schema": LOCAL_COORDINATION_PROMOTION_RECEIPT_SCHEMA
+    "promotion_receipt_schema": LOCAL_COORDINATION_PROMOTION_RECEIPT_SCHEMA,
+    "promotion_review_request_schema": LOCAL_COORDINATION_PROMOTION_REVIEW_REQUEST_SCHEMA,
+    "promotion_review_result_schema": LOCAL_COORDINATION_PROMOTION_REVIEW_RESULT_SCHEMA
   },
   "runtime_shadow_protocol": {
     "commit_request_schema": COORDINATION_RUNTIME_SHADOW_COMMIT_REQUEST_SCHEMA,
@@ -294,8 +319,11 @@ export const COORDINATION_STATE_CONTRACT = deepFreeze({
   },
   "task_lease_protocol": {
     "acquire_request_schema": TASK_LEASE_ACQUIRE_REQUEST_SCHEMA,
+    "canonical_acquire_request_schema": TASK_LEASE_CANONICAL_ACQUIRE_REQUEST_SCHEMA,
     "lifecycle_request_schema": TASK_LEASE_LIFECYCLE_REQUEST_SCHEMA,
-    "canonical_renew_request_schema": TASK_LEASE_CANONICAL_RENEW_REQUEST_SCHEMA
+    "canonical_renew_request_schema": TASK_LEASE_CANONICAL_RENEW_REQUEST_SCHEMA,
+    "canonical_lifecycle_request_schema": TASK_LEASE_CANONICAL_LIFECYCLE_REQUEST_SCHEMA,
+    "canonical_claim_transfer_request_schema": TASK_LEASE_CANONICAL_CLAIM_TRANSFER_REQUEST_SCHEMA
   },
   "capability_hook_protocol": {
     "registration_schema": CAPABILITY_HOOK_REGISTRATION_SCHEMA,
@@ -331,5 +359,12 @@ export const COORDINATION_STATE_CONTRACT = deepFreeze({
     "unknown_field_policy": "reject",
     "field_removal_policy": "maintainer_approval_required",
     "markdown_role": "human_workbench_and_compatibility_projection"
+  },
+  "source_transfer_protocol": {
+    "request_schema": COORDINATION_SOURCE_TRANSFER_REQUEST_SCHEMA,
+    "result_schema": COORDINATION_SOURCE_TRANSFER_RESULT_SCHEMA
+  },
+  "source_transfer_limits": {
+    "max_bytes": 16777216
   }
 } as const);

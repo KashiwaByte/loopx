@@ -43,6 +43,7 @@ AGENT_LANE_STATUS_TODO_REFERENCE_SCHEMA_VERSION = (
     "agent_lane_status_todo_reference_v0"
 )
 QUOTA_PAYLOAD_ITEM_FIELDS = (
+    "goal_acceptance_guard",
     "schema_version",
     "index",
     "text",
@@ -99,6 +100,8 @@ QUOTA_PAYLOAD_ITEM_FIELDS = (
 )
 QUOTA_PAYLOAD_LANE_LIMITS = {
     "monitor_due_items": MONITOR_DUE_ITEM_LIMIT,
+    "watch_only_monitor_due_items": MONITOR_DUE_ITEM_LIMIT,
+    "non_watch_only_monitor_due_items": MONITOR_DUE_ITEM_LIMIT,
     "monitor_capability_blocked_due_items": QUOTA_PAYLOAD_DIAGNOSTIC_LANE_LIMIT,
     "monitor_schedule_gap_items": MONITOR_DUE_ITEM_LIMIT,
     "first_open_items": 3,
@@ -180,6 +183,9 @@ class _QuotaTodoLanes:
     executable_items: list[dict[str, Any]]
     monitor_items: list[dict[str, Any]]
     monitor_due_items: list[dict[str, Any]]
+    watch_only_monitor_items: list[dict[str, Any]]
+    watch_only_monitor_due_items: list[dict[str, Any]]
+    non_watch_only_monitor_due_items: list[dict[str, Any]]
     monitor_capability_blocked_due_items: list[dict[str, Any]]
     claimed_open_items: list[dict[str, Any]]
     display_open_items: list[dict[str, Any]]
@@ -390,6 +396,7 @@ def summarize_user_todos_for_quota(
         "source_section": value.get("source_section"),
         "total_count": value.get("total_count"),
         "open_count": lanes.open_count,
+        "work_counts": planning["work_counts"],
         "done_count": value.get("done_count"),
         "deferred_count": value.get("deferred_count"),
         "source_completeness": source_completeness,
@@ -399,6 +406,14 @@ def summarize_user_todos_for_quota(
         "monitor_open_items": lanes.monitor_items,
         "monitor_due_count": len(lanes.monitor_due_items),
         "monitor_due_items": lanes.monitor_due_items[:MONITOR_DUE_ITEM_LIMIT],
+        "watch_only_monitor_count": len(lanes.watch_only_monitor_items),
+        "watch_only_monitor_due_count": len(lanes.watch_only_monitor_due_items),
+        "watch_only_monitor_due_items": lanes.watch_only_monitor_due_items[
+            :MONITOR_DUE_ITEM_LIMIT
+        ],
+        "non_watch_only_monitor_due_items": lanes.non_watch_only_monitor_due_items[
+            :MONITOR_DUE_ITEM_LIMIT
+        ],
         "monitor_capability_blocked_due_count": len(
             lanes.monitor_capability_blocked_due_items
         ),
@@ -412,15 +427,13 @@ def summarize_user_todos_for_quota(
         "backlog_items": lanes.display_open_items[:TODO_BACKLOG_ITEM_LIMIT],
         "executable_backlog_items": lanes.executable_items[:TODO_BACKLOG_ITEM_LIMIT],
     }
+    if isinstance(value.get("goal_acceptance_contract"), dict):
+        summary["goal_acceptance_contract"] = value["goal_acceptance_contract"]
     if isinstance(value.get("advancement_frontier_revision_index"), dict):
         summary["advancement_frontier_revision_index"] = value[
             "advancement_frontier_revision_index"
         ]
-    if value.get("watch_only_monitor_count"):
-        summary["watch_only_monitor_count"] = value["watch_only_monitor_count"]
-        summary["watch_only_monitor_due_count"] = value.get(
-            "watch_only_monitor_due_count", 0
-        )
+    if lanes.watch_only_monitor_items:
         summary["convergence_open_count"] = value.get("convergence_open_count")
     if recent_completed_advancement_items:
         summary["recent_completed_advancement_items"] = recent_completed_advancement_items
@@ -665,7 +678,7 @@ def _compact_agent_lane_status_todo_summary(
                 }
             continue
         if isinstance(value, dict):
-            if key == "monitor_writeback":
+            if key in {"monitor_writeback", "work_counts"}:
                 compact[key] = _compact_quota_payload_nested_warning(value)
             continue
         compact[key] = value
@@ -810,12 +823,21 @@ def summarize_project_asset_todos_for_quota(
         "source_section": value.get("source_section") or "project_asset",
         "total_count": value.get("total", value.get("total_count")),
         "open_count": lanes.open_count,
+        "work_counts": planning["work_counts"],
         "done_count": value.get("done", value.get("done_count")),
         "first_open_items": lanes.display_open_items[:3],
         "first_executable_items": lanes.executable_items[:3],
         "monitor_open_items": lanes.monitor_items,
         "monitor_due_count": len(lanes.monitor_due_items),
         "monitor_due_items": lanes.monitor_due_items[:MONITOR_DUE_ITEM_LIMIT],
+        "watch_only_monitor_count": len(lanes.watch_only_monitor_items),
+        "watch_only_monitor_due_count": len(lanes.watch_only_monitor_due_items),
+        "watch_only_monitor_due_items": lanes.watch_only_monitor_due_items[
+            :MONITOR_DUE_ITEM_LIMIT
+        ],
+        "non_watch_only_monitor_due_items": lanes.non_watch_only_monitor_due_items[
+            :MONITOR_DUE_ITEM_LIMIT
+        ],
         "monitor_capability_blocked_due_count": len(
             lanes.monitor_capability_blocked_due_items
         ),

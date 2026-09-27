@@ -22,7 +22,6 @@ from loopx.control_plane.coordination.runtime_shadow import (
     build_runtime_shadow_source_snapshot,
 )
 from loopx.control_plane.coordination.shadow_management import require_shadow_primary_write_allowed
-from loopx.file_lock import exclusive_file_lock
 from loopx.history import load_registry
 from loopx.registry import find_registry_goal
 
@@ -226,6 +225,32 @@ def test_capture_records_prepared_then_committed_and_skips_prose_only_writes(tmp
     assert [entry.seq for entry in outbox.list_entries(_todo_dir(runtime_root))] == [1, 2]
 
 
+def test_capture_and_drain_use_the_active_binding_digest_through_a_root_alias(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    registry, state, runtime_root = _fixture(alias)
+
+    capture = _record_change(
+        registry, state, runtime_root, "Capture through the runtime alias."
+    )
+    binding = require_shadow_primary_write_allowed(runtime_root, GOAL_ID)
+    assert binding is not None
+    [entry] = outbox.list_entries(_todo_dir(runtime_root))
+    assert entry.prepared["source_root_digest"] == binding["source_root_digest"]
+
+    drained = _drain(registry, runtime_root)
+    assert drained.outcome == "drained"
+    assert drained.delivered == 1
+    assert capture.outcome.entry_id == drained.entries[0]["entry_id"]
+
+
 def test_disabled_capture_creates_nothing(tmp_path: Path) -> None:
     registry, state, runtime_root = _fixture(tmp_path, bootstrap=False)
     capture = _capture(registry, state, runtime_root, original_text="", enabled=False)
@@ -236,87 +261,6 @@ def test_disabled_capture_creates_nothing(tmp_path: Path) -> None:
     assert not (runtime_root / "authority-shadow").exists()
 
 
-def test_event_only_capture_holds_without_inventing_projection_or_retiring_entries(tmp_path: Path) -> None:
-    registry, state, runtime_root = _fixture(tmp_path)
-    _record_change(registry, state, runtime_root, "Baseline coordination fact.")
-    original = state.read_text()
-    before = _files(_todo_dir(runtime_root))
-    for event_id, proposed in (("evt-noop", original), ("evt-change", original + "\n## Operator Notes\nEvent evidence.\n")):
-        capture = _capture(registry, state, runtime_root, original_text=original,
-                           write_class="todo_complete_event_projection")
-        capture.prepare(proposed, event_id=event_id)
-        capture.committed()
-        assert capture.outcome.entry_id is None
-        assert capture.outcome.skipped_reason == "event_log_writer_not_bound"
-        assert _files(_todo_dir(runtime_root)) == before
-    assert [entry.seq for entry in outbox.list_entries(_todo_dir(runtime_root))] == [1]
-
-
-def test_prepared_only_entries_resolve_from_source_probes(tmp_path: Path) -> None:
-    registry, state, runtime_root = _fixture(tmp_path)
-    original = state.read_text(encoding="utf-8")
-    _, new_text = _planned_todo(original, "Crash between write and marker.")
-    capture = _capture(registry, state, runtime_root, original_text=original)
-    capture.prepare(new_text)
-    [entry] = outbox.list_entries(_todo_dir(runtime_root))
-    assert not entry.is_committed
-
-    def resolve(text: str) -> str:
-        return outbox.resolve_prepared_only_entry(
-            entry,
-            markdown_text_reader=lambda: text,
-            lease_bytes_reader=None,
-            event_presence_reader=None,
-        )
-
-    assert resolve(new_text) == "committed"
-    assert resolve(original) == "abandoned"
-    assert resolve(new_text + "\n- [ ] (agent) foreign edit\n") == "unproved"
-
-    event_entry = outbox.OutboxEntry(
-        partition="todos",
-        seq=2,
-        entry_id="local-shadow-tx-" + "0" * 64,
-        prepared_path=tmp_path / "unused.prepared.json",
-        committed_path=None,
-        prepared={"source": {"kind": "state_event_log", "event_id": "evt-9"}},
-        committed=None,
-    )
-    assert outbox.resolve_prepared_only_entry(
-        event_entry, markdown_text_reader=None, lease_bytes_reader=None,
-        event_presence_reader=lambda event_id: event_id == "evt-9",
-    ) == "unproved"
-    assert outbox.resolve_prepared_only_entry(
-        event_entry, markdown_text_reader=None, lease_bytes_reader=None,
-        event_presence_reader=lambda _event_id: False,
-    ) == "abandoned"
-
-    planned = {"todo_id": "todo-a", "version": 2, "lease_epoch": 1, "status": "active", "updated_at": "t2", "owner": "agent-a"}
-    previous = {**planned, "version": 1, "updated_at": "t1"}
-    planned_bytes = canonical_bytes(planned)
-    previous_bytes = canonical_bytes(previous)
-    lease_entry = outbox.OutboxEntry(
-        partition="leases", seq=1, entry_id="local-shadow-tx-" + "1" * 64,
-        prepared_path=tmp_path / "unused.prepared.json", committed_path=None,
-        prepared={"source": {"kind": "task_lease_record", "lease": planned,
-                              "bytes_digest": outbox.raw_bytes_digest(planned_bytes),
-                              "previous_bytes_digest": outbox.raw_bytes_digest(previous_bytes)}},
-        committed=None,
-    )
-
-    def lease_resolve(current: bytes | None) -> str:
-        return outbox.resolve_prepared_only_entry(
-            lease_entry, markdown_text_reader=None, lease_bytes_reader=lambda _todo_id: current,
-            event_presence_reader=None,
-        )
-
-    assert lease_resolve(planned_bytes) == "committed"
-    assert lease_resolve(previous_bytes) == "abandoned"
-    # Equal versions/epochs/statuses never prove different owner or payload bytes.
-    assert lease_resolve(canonical_bytes({**planned, "owner": "agent-b"})) == "unproved"
-    assert lease_resolve(canonical_bytes({**planned, "extra": "unrecorded"})) == "unproved"
-    assert lease_resolve(canonical_bytes({**planned, "version": 9})) == "unproved"
-    assert lease_resolve(None) == "unproved"
 
 
 def test_cursor_allocation_hint_does_not_authorize_a_gap_or_candidate_write(tmp_path: Path) -> None:
@@ -377,15 +321,6 @@ def test_capture_failure_is_typed_and_preserves_the_primary_result(tmp_path: Pat
     assert capture.outcome.failure is not None
     assert capture.outcome.failure["reason_code"] == "outbox_prepare_failed"
     assert state.read_text() == new_text
-
-
-def test_primary_lock_probe_reports_held_locks(tmp_path: Path) -> None:
-    target = tmp_path / "ACTIVE_GOAL_STATE.md"
-    target.write_text("", encoding="utf-8")
-    assert adapter.primary_lock_is_free(target) is True
-    with exclusive_file_lock(target, timeout_seconds=1.0, operation="test_hold"):
-        assert adapter.primary_lock_is_free(target) is False
-    assert adapter.primary_lock_is_free(target) is True
 
 
 def test_prepared_records_must_bind_their_directory_identity_and_source(tmp_path: Path) -> None:

@@ -1,5 +1,11 @@
 # State Interaction Model
 
+> Update (2026-09-25): the Todo `events.jsonl` API, replay, backfill and completion
+> examples below describe a retired experiment. Current Todos use legacy Markdown
+> or the selected File/SQLite authority. See the
+> [retirement contract](reference/protocols/event-sourced-state-contract-v0.md).
+
+
 LoopX should not grow by adding commands one at a time. New capabilities
 must fit a clear state model between the goal, the Codex App executor, the
 human operator, and the dashboard.
@@ -166,8 +172,17 @@ loopx --format json quota should-run --goal-id <goal-id>
 
 The guard's `interaction_contract` is the first-class protocol. Older fields
 such as `execution_obligation`, `heartbeat_recommendation`,
-`work_lane_contract`, `external_evidence_observation`, `goal_boundary`, and
-`protocol_action_packet` remain compatibility and drill-down fields.
+`work_lane_contract`, `external_evidence_observation`, and `goal_boundary`
+remain compatibility and drill-down fields. Historical `protocol_action_packet`
+summaries are read-only observations. The
+[PR-05 migration](reference/protocols/protocol-action-packet-decision-v0.md)
+omits the packet from new quota/live/paused/recovery outputs while
+retaining historical packet, opaque/residue, and signature reads without
+rewriting records. Current consumers use typed contracts; a missing packet
+neither relaxes an obligation nor grants authority. The first official release containing #4794 changes new writes; historical v0
+formats remain supported for the v0 reader lifetime. The bundled reader set and
+v1.1.0 rollback scope are explicit in that migration contract; external clients
+requiring the old summary must migrate before upgrading.
 Executors should treat `interaction_contract.agent_channel.primary_action` as
 the single action entrypoint for the current turn. If it carries a
 `resolution_trace`, that trace is only a compact explanation of which projected
@@ -762,8 +777,18 @@ For an accountable, Turn-bound refresh, a successful writeback and a satisfied
 vision checkpoint are separate facts. `ok=true` does not imply that an omitted
 vision decision was supplied. Inspect `vision_checkpoint.satisfied`.
 
-If the checkpoint is `missing_required`, submit a checkpoint-only refresh with
-the **same** Goal, Agent, Todo/obligation, Turn, and delivery fields. Preserve
+If the checkpoint is `missing_required`, first run `checkpoint-context` for the
+**same** Goal, Agent, Todo/obligation and Turn. Read its returned decision basis
+and judge again. Echo its `read_context_id` as `--checkpoint-read-context` in a
+checkpoint-only refresh with the original identity and delivery fields. Include
+additional used upstream Todos with repeatable `--dependency-todo-id` on the read.
+The control plane now rejects supplements with missing, replaced, or stale read
+receipts. Reread and rejudge on conflict; do not repeat completed work or attach a
+fresh token to an old judgment. A new read replaces the old receipt for that Turn,
+so checkpoint confirmations within one Turn must be serial. An exact committed
+retry remains idempotent, including when state changed after its commit. See the
+[read-basis contract](reference/protocols/goal-vision-replan-contract-v0.md#read-basis-for-checkpoint-only-recovery)
+for covered versions and concurrency boundaries. Preserve
 the original working directory and explicit target (`--registry`, `--runtime-root`,
 `--project`, `--state-file`), scope (`--progress-scope`, `--agent-lane`), and
 isolation (`--no-global-sync`, `--suppress-external-sinks`) options, with their
@@ -813,7 +838,7 @@ without them. Repeating mutations is rejected as
 `checkpoint_supplement_must_not_repeat_mutations`; do not simply append vision
 arguments to an original command that contains these options.
 
-Add only one vision decision:
+Add the read receipt and only one vision decision:
 
 - `--vision-unchanged-reason 'Existing scope and acceptance still apply.'` when
   a persisted vision genuinely remains applicable;
@@ -827,12 +852,13 @@ or reattributing its delivery workspace. An identical retry returns `replay`
 with the saved checkpoint; it does not append again. A changed satisfied
 decision, changed delivery payload, or a missing checkpoint superseded by a
 later same-Agent vision is rejected with no write. Dry-run previews do not
-repair receipts or append history. A receipt-bound material monitor poll with
-no prior refresh/checkpoint may complete its missing workspace writeback with
-next-action and vision together, through the normal vision/replan validation.
-This first-closeout compatibility path preserves the poll outcome and rejects
-unrelated mutations; subsequent retries use the same strict replay/conflict
-rules. Other missing-workspace repairs precede checkpoint supplementation.
+repair receipts or append history. Current receipt-bound monitor Turns close on
+the exact committed poll, including material polls that release an independent
+successor; they do not require an accountable refresh, workspace supplement or
+quota spend. The retained material-monitor refresh recovery branch is
+compatibility-only for older phase producers and preserves the original poll
+outcome while rejecting unrelated mutations. Other missing-workspace repairs
+precede checkpoint supplementation.
 
 Do not repeat implementation, manufacture a successor, or open another Turn
 just to repair this checkpoint. Keep the ordinary one-spend settlement order.

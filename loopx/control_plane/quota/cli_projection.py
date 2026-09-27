@@ -26,6 +26,9 @@ QUOTA_CLI_VISION_COMPACTION_SCHEMA_VERSION = (
     "quota_cli_vision_continuation_compaction_v0"
 )
 QUOTA_CLI_VISION_DETAIL_COMMAND = "quota should-run --include-detail vision"
+QUOTA_CLI_REPLAN_ACTION_COMPACTION_SCHEMA_VERSION = (
+    "quota_cli_replan_action_compaction_v0"
+)
 QUOTA_CLI_CAPABILITY_GATE_COMPACTION_SCHEMA_VERSION = (
     "quota_cli_capability_gate_compaction_v0"
 )
@@ -131,6 +134,7 @@ _RETAINED_MONITOR_POLL_INTERACTION_FIELDS = {
         "spend_after_validation",
         "spend_policy",
         "delivery_workspace_causality",
+        "settlement_resume_ref",
     ),
 }
 _RETAINED_MONITOR_POLL_RESPONSE_PLAN_FIELDS = (
@@ -429,6 +433,7 @@ def _compact_vision_continuation_audit(
         "trigger_kinds",
         "required_before_closeout",
         "recommended_action",
+        "outcome_checkpoint_diagnostics",
     )
     compact = {key: audit[key] for key in retained_fields if key in audit}
     judge = audit.get("vision_gap_judge")
@@ -448,6 +453,28 @@ def _compact_vision_continuation_audit(
         "schema_version": QUOTA_CLI_VISION_COMPACTION_SCHEMA_VERSION,
         "mode": "compact_hot_path",
         "omitted_fields": omitted_fields,
+        "full_detail_cold_path": QUOTA_CLI_VISION_DETAIL_COMMAND,
+    }
+    return compact
+
+
+def _compact_replan_action_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    """Keep the executable writeback summary hot and move its schema cold."""
+
+    writeback = packet.get("writeback_contract")
+    if not isinstance(writeback, dict) or not isinstance(
+        writeback.get("vision_authoring"), dict
+    ):
+        return packet
+    compact_writeback = dict(writeback)
+    compact_writeback.pop("vision_authoring")
+    compact_writeback["vision_authoring_detail_ref"] = QUOTA_CLI_VISION_DETAIL_COMMAND
+    compact = dict(packet)
+    compact["writeback_contract"] = compact_writeback
+    compact["payload_compaction"] = {
+        "schema_version": QUOTA_CLI_REPLAN_ACTION_COMPACTION_SCHEMA_VERSION,
+        "mode": "compact_hot_path",
+        "compacted_fields": ["writeback_contract.vision_authoring"],
         "full_detail_cold_path": QUOTA_CLI_VISION_DETAIL_COMMAND,
     }
     return compact
@@ -726,6 +753,12 @@ def compact_quota_should_run_cli_payload(
             source_audit=vision_audit,
             audit_ref=_vision_continuation_ref(compact_vision_audit),
         )
+    replan_action = payload.get("replan_action_packet")
+    if not include_vision_detail and isinstance(replan_action, dict):
+        compact_replan_action = _compact_replan_action_packet(replan_action)
+        if compact_replan_action is not replan_action:
+            compact = dict(compact)
+            compact["replan_action_packet"] = compact_replan_action
     if not include_todo_summary_detail:
         action_portfolio = payload.get("action_portfolio")
         if isinstance(action_portfolio, dict):

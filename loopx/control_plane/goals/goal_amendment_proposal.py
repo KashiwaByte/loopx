@@ -63,11 +63,12 @@ from pathlib import Path
 from typing import Any
 
 from ...agent_registry import registered_agent_ids_for_goal
-from ...event_sourced_state import now_utc_iso
+from ..runtime.time import now_utc_iso
 from ...file_lock import exclusive_file_lock
-from ...history import load_index
+from ...history import load_index, load_registry
 from ...runtime import validate_goal_id_path_segment
 from ..effect_runtime import EffectRuntimeRejected, effect_runtime_result
+from ..runtime.time import chronology_key
 from ..status.autonomous_replan_projection import (
     autonomous_replan_obligation_from_runs,
 )
@@ -195,15 +196,11 @@ def admit_goal_amendment_proposal(
         else project / DEFAULT_REGISTRY_RELATIVE_PATH
     )
     try:
-        registry_payload = json.loads(
-            effective_registry_path.read_text(encoding="utf-8")
-        )
+        registry_payload = load_registry(effective_registry_path)
     except (OSError, ValueError):
         raise ValueError(
             f"goal registry is unreadable: {effective_registry_path}"
         ) from None
-    if not isinstance(registry_payload, dict):
-        raise TypeError("goal registry must contain a JSON object")
 
     effective_runtime_root = (
         runtime_root
@@ -319,7 +316,7 @@ def _derive_open_replan_obligation_inventory(
         for _, run in sorted(
             enumerate(runs),
             key=lambda item: (
-                str(item[1].get("generated_at") or ""),
+                *chronology_key(item[1].get("generated_at")),
                 item[0],
             ),
             reverse=True,

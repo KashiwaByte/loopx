@@ -59,6 +59,22 @@ def _quoted_turn_ref(turn_instance_id_ref: str) -> str:
     return shlex.quote(turn_instance_id_ref)
 
 
+def _settlement_actor_args(arguments: str, agent_id: str) -> str:
+    """Identity owns the actor; optional host arguments cannot omit or retarget it."""
+    tokens = shlex.split(arguments)
+    actors = []
+    for index, token in enumerate(tokens):
+        if token == "--agent-id":
+            actors.append(tokens[index + 1] if index + 1 < len(tokens) else None)
+        elif token.startswith("--agent-id="):
+            actors.append(token.partition("=")[2])
+    if actors and actors != [agent_id]:
+        raise ValueError("settlement command actor must match its exact identity")
+    if actors:
+        return arguments if arguments[:1].isspace() else f" {arguments}"
+    return f"{arguments} --agent-id {shlex.quote(agent_id)}"
+
+
 def build_codex_app_settlement_plan(
     *,
     goal_id: str,
@@ -116,6 +132,8 @@ def build_turn_scoped_cli_settlement_plan(
         turn_instance_id=turn_instance_id,
         replan_obligation_id=replan_obligation_id,
     )
+    scoped_cli_args = _settlement_actor_args(scoped_cli_args, identity.agent_id)
+    lifecycle_actor_args = _settlement_actor_args(lifecycle_actor_args, identity.agent_id)
     quoted_turn = _quoted_turn_ref(turn_instance_id)
     binding_arg = (
         f" --todo-id {shlex.quote(todo_id)}"

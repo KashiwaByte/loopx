@@ -7,7 +7,10 @@ from loopx.extensions.lark.outbound import (
     lark_markdown_readback_matches, normalize_lark_outbound_text,
     safe_lark_plain_text_fallback,
 )
-from loopx.extensions.lark.inbox_reply import reply_lark_event_inbox
+from loopx.extensions.lark.inbox_reply import (
+    reply_lark_event_inbox,
+    verify_lark_inbox_reply,
+)
 from test_lark_inbox_reactions import ReplyRunner, _fixture
 
 TEXT = "进展\n\n- **结果**\n  - 证据\n\n```python\nif ok:\n    done()\n```"
@@ -106,6 +109,60 @@ def test_large_post_falls_back_before_send_without_truncating(tmp_path):
     sent = [args for args in calls if "--text" in args and "--dry-run" not in args]
     assert len(sent) == 1
     assert sent[0][sent[0].index("--text") + 1] == text.strip()
+
+
+def test_large_post_fallback_can_be_verified_without_resending(tmp_path):
+    config, _, project = _fixture(tmp_path, lifecycle=False)
+    text = "- 完整内容\n" * 2000
+    fallback = ReplyRunner(readback_text="different text")
+    attempts = []
+
+    def runner(args):
+        if "--content" in args:
+            return {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "api": [
+                            {
+                                "body": {
+                                    "msg_type": "post",
+                                    "content": args[args.index("--content") + 1],
+                                }
+                            }
+                        ]
+                    }
+                ),
+            }
+        return fallback(args)
+
+    first = reply_lark_event_inbox(
+        project=project,
+        config_path=config,
+        message_id="om_reaction_fixture",
+        text=text,
+        content_format="markdown",
+        execute=True,
+        runner=runner,
+        delivery_attempt_recorder=attempts.append,
+    )
+    assert first["status"] == "sent_unverified"
+    assert first["content_format"] == "text"
+
+    recovery = ReplyRunner(readback_text=text.strip())
+    verified = verify_lark_inbox_reply(
+        project=project,
+        config_path=config,
+        message_id="om_reaction_fixture",
+        text=text,
+        attempt=attempts[0],
+        runner=recovery,
+    )
+    assert verified["reply_verified"] is True
+    assert not any(
+        "+messages-send" in call or "+messages-reply" in call
+        for call in recovery.calls
+    )
 
 
 def test_markdown_request_with_mentions_keeps_verified_text_transport(tmp_path):

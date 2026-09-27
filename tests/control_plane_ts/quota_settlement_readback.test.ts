@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +16,7 @@ import {
   projectSemanticReplanGuard,
   QUOTA_SETTLEMENT_READBACK_REQUEST_SCHEMA,
   readQuotaSettlement,
+  readQuotaSettlementSnapshot,
 } from "../../loopx/control_plane/quota/settlement_readback.ts";
 
 const goalId = "settlement-goal";
@@ -50,6 +58,18 @@ test("semantic replan guard distinguishes legacy, none, and exact selection", ()
 
 async function fixture(options: {
   guard?: boolean;
+  /**
+   * Commit the same-turn guard receipt the way the documented wake order does:
+   * the guard runs before a work item is chosen, so the receipt exists for this
+   * turn but carries no settlement binding.
+   */
+  guardUnbound?: boolean;
+  /**
+   * Commit the guard's own deferred explicit selection for this Turn: the
+   * receipt retains the chosen Todo but still carries no settlement binding,
+   * because the guard bound the preemption only on argument-less reentry.
+   */
+  guardDeferred?: boolean;
   writeback?: boolean;
   spend?: boolean;
   completion?: boolean;
@@ -58,6 +78,8 @@ async function fixture(options: {
   monitor?: boolean;
   writebackOutcome?: string;
   progressObservation?: Record<string, unknown>;
+  blockedRetry?: boolean;
+  visionCheckpoint?: Record<string, unknown>;
 } = {}) {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "loopx-settlement-readback-"));
   const goalRoot = join(runtimeRoot, "goals", goalId);
@@ -73,8 +95,12 @@ async function fixture(options: {
       agent_id: agentId,
       run_id: turnId,
       details: {
-        todo_id: todoId,
-        settlement_effect_id: identity.effect_id,
+        ...(options.guardUnbound
+          ? {}
+          : {
+            todo_id: todoId,
+            settlement_effect_id: identity.effect_id,
+          }),
         ...(options.workspace
           ? {
             delivery_workspace_causality_schema_version:
@@ -89,6 +115,25 @@ async function fixture(options: {
       },
     }];
   const runs: Record<string, unknown>[] = [];
+  if (options.guardDeferred) {
+    events.push({
+      schema_version: "loopx_rollout_event_v0",
+      event_id: "event-guard-deferred",
+      event_kind: "quota_should_run",
+      goal_id: goalId,
+      agent_id: agentId,
+      run_id: turnId,
+      status: "action_selection_deferred",
+      details: {
+        pending_action_selection_todo_id: todoId,
+        pending_action_selection_state: "deferred",
+        pending_action_selection_reason: "autonomous_replan",
+        settlement_effect_id: "",
+        todo_id: "",
+        replan_obligation_id: "",
+      },
+    });
+  }
   if (options.writeback) {
     events.push({
       schema_version: "loopx_rollout_event_v0",
@@ -107,6 +152,15 @@ async function fixture(options: {
       todo_id: todoId,
       turn_instance_id: turnId,
       settlement_identity: identity,
+      ...(options.visionCheckpoint ? {vision_checkpoint: options.visionCheckpoint} : {}),
+      ...(options.blockedRetry ? {blocked_retry: {
+        schema_version: "quota_blocked_retry_v0",
+        source: "todo",
+        todo_id: todoId,
+        resume_when: "resume_at:2026-09-24T10:05:00Z",
+        observed_at: "2026-09-24T10:00:00Z",
+        due_at: "2026-09-24T10:05:00Z",
+      }} : {}),
       ...(options.progressObservation
         ? { progress_observation: options.progressObservation }
         : {}),
@@ -153,6 +207,11 @@ async function fixture(options: {
       todo_id: todoId,
       turn_instance_id: turnId,
       material_change: true,
+      quota_monitor_poll_commit: {
+        schema_version: "quota_monitor_poll_commit_receipt_v0",
+        effect_id: `quota-monitor-poll:${goalId}:${agentId}:${turnId}:todo:${todoId}`,
+        request_digest: "fixture",
+      },
     });
   }
   await writeFile(
@@ -180,6 +239,144 @@ function request(runtimeRoot: string, overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+test("settlement progress requires both effects and exact receipts", async t => {
+  const cases = [
+    { guard: false, state: "identity_required", next: "validation" },
+    { state: "writeback_required", next: "durable_writeback" },
+    { writeback: true, remove: "refresh_state", state: "writeback_receipt_required", next: "durable_writeback" },
+    { writeback: true, state: "spend_required", next: "quota_spend" },
+    { writeback: true, spend: true, remove: "quota_spend", state: "spend_receipt_required", next: "quota_spend" },
+    { writeback: true, spend: true, state: "settled", next: null },
+  ];
+  for (const entry of cases) await t.test(entry.state, async () => {
+    const root = await fixture(entry);
+    try {
+      if (entry.remove) {
+        const path = join(root, "goals", goalId, "rollout-event-log.jsonl");
+        const events = (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+        await writeFile(path, events.filter(event => event.event_kind !== entry.remove).map(event => JSON.stringify(event)).join("\n") + "\n");
+      }
+      const result = await readQuotaSettlement(request(root));
+      assert.deepEqual(result.progress, {
+        schema_version: "quota_settlement_progress_v0", state: entry.state,
+        next_step: entry.next, quota_spend_source: "heartbeat",
+      });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+test("settlement progress preserves typed source and rejects malformed sources", async () => {
+  const root = await fixture({writeback: true});
+  try {
+    const path = join(root, "goals", goalId, "rollout-event-log.jsonl");
+    const events = (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    for (const source of ["visible-goal", "unknown", 42]) {
+      events[0].details.quota_spend_source = source;
+      await writeFile(path, events.map(event => JSON.stringify(event)).join("\n") + "\n");
+      if (source === "visible-goal") {
+        const result = await readQuotaSettlement(request(root));
+        assert.equal((result.progress as Record<string, unknown>).quota_spend_source, source);
+      } else {
+        await assert.rejects(readQuotaSettlement(request(root)), /settlement spend source is invalid/);
+      }
+    }
+  } finally { await rm(root, {recursive: true, force: true}); }
+});
+
+test("accepted in-flight writeback closes only the exact Turn, not its Todo", async t => {
+  const checkpoint = {
+    schema_version: "vision_checkpoint_v0", agent_id: agentId, satisfied: true,
+    delivery_boundary: "in_flight_continuation",
+    triggers: [{kind: "in_flight_continuation", todo_id: todoId}],
+  };
+  const cases = [
+    {name: "both effects", spend: true, expected: "settled"},
+    {name: "spend still required", spend: false, expected: "settlement_pending"},
+    {name: "writeback receipt missing", spend: true, remove: "refresh_state", expected: "open"},
+    {name: "spend receipt missing", spend: true, remove: "quota_spend", expected: "settlement_pending"},
+  ];
+  for (const entry of cases) await t.test(entry.name, async () => {
+    const root = await fixture({writeback: true, spend: entry.spend, visionCheckpoint: checkpoint});
+    try {
+      if (entry.remove) {
+        const path = join(root, "goals", goalId, "rollout-event-log.jsonl");
+        const events = (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+        await writeFile(path, events.filter(event => event.event_kind !== entry.remove).map(event => JSON.stringify(event)).join("\n") + "\n");
+      }
+      const result = await readQuotaSettlement(request(root));
+      assert.equal(result.replay_phase, entry.expected);
+      assert.equal(result.completion_event, null);
+      assert.equal((result.terminal_closeout as any).payload.ok, false);
+    } finally { await rm(root, {recursive: true, force: true}); }
+  });
+});
+
+test("in-flight replay rejects unaccepted checkpoints and unrelated identities", async t => {
+  const checkpoint = {
+    schema_version: "vision_checkpoint_v0", agent_id: agentId, satisfied: true,
+    delivery_boundary: "in_flight_continuation",
+    triggers: [{kind: "in_flight_continuation", todo_id: todoId}],
+  };
+  const patches: [string, Record<string, unknown>][] = [
+    ["checkpoint absent", {vision_checkpoint: null}],
+    ["checkpoint malformed", {vision_checkpoint: []}],
+    ["not accepted", {vision_checkpoint: {...checkpoint, satisfied: false}}],
+    ["truthy is not acceptance", {vision_checkpoint: {...checkpoint, satisfied: "true"}}],
+    ["wrong schema", {vision_checkpoint: {...checkpoint, schema_version: "other"}}],
+    ["semantic closeout", {vision_checkpoint: {...checkpoint, delivery_boundary: "semantic_closeout"}}],
+    ["checkpoint other agent", {vision_checkpoint: {...checkpoint, agent_id: "peer"}}],
+    ["no trigger", {vision_checkpoint: {...checkpoint, triggers: []}}],
+    ["trigger other Todo", {vision_checkpoint: {...checkpoint, triggers: [{kind: "in_flight_continuation", todo_id: "todo_other"}]}}],
+    ["trigger wrong kind", {vision_checkpoint: {...checkpoint, triggers: [{kind: "vision_unchanged", todo_id: todoId}]}}],
+    ...["surface_only", "outcome_gap", "primary_goal_outcome"].map(outcome => [outcome, {delivery_outcome: outcome}] as [string, Record<string, unknown>]),
+    ...["goal_id", "agent_id", "todo_id", "turn_instance_id"].map(field => [field, {[field]: "other"}] as [string, Record<string, unknown>]),
+    ["effect mismatch", {settlement_identity: {...identity, effect_id: "other"}}],
+  ];
+  for (const [name, patch] of patches) await t.test(name, async () => {
+    const root = await fixture({writeback: true, spend: true, visionCheckpoint: checkpoint});
+    try {
+      const path = join(root, "goals", goalId, "runs", "index.jsonl");
+      const runs = (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      runs[0] = {...runs[0], ...patch};
+      await writeFile(path, runs.map(run => JSON.stringify(run)).join("\n") + "\n");
+      const result = await readQuotaSettlement(request(root));
+      assert.equal(result.replay_phase, "open");
+      assert.equal(result.completion_event, null);
+    } finally { await rm(root, {recursive: true, force: true}); }
+  });
+});
+
+test("monitor closeout requires the exact committed effect, not a matching observation row", async t => {
+  const effect = `quota-monitor-poll:${goalId}:${agentId}:${turnId}`;
+  const cases: [string, Record<string, unknown>, string][] = [
+    ["committed", {}, "settled"],
+    ["legacy turn-only commit", {quota_monitor_poll_commit: {effect_id: effect}}, "settled"],
+    ["preview without commit", {quota_monitor_poll_commit: null}, "poll_due"],
+    ["malformed commit", {quota_monitor_poll_commit: []}, "poll_due"],
+    ["missing effect", {quota_monitor_poll_commit: {}}, "poll_due"],
+    ["wrong commit", {quota_monitor_poll_commit: {effect_id: `${effect}:todo:other`}}, "poll_due"],
+    ["wrong agent", {agent_id: "another-agent"}, "poll_due"],
+    ["wrong goal", {goal_id: "another-goal"}, "poll_due"],
+    ["wrong Todo", {todo_id: "todo_other"}, "poll_due"],
+    ["wrong Turn", {turn_instance_id: "other-turn"}, "poll_due"],
+    ["ordinary writeback", {classification: "state_refreshed"}, "poll_due"],
+  ];
+  for (const [name, patch, expected] of cases) {
+    await t.test(name, async () => {
+      const root = await fixture({monitor: true});
+      try {
+        const path = join(root, "goals", goalId, "runs", "index.jsonl");
+        const row = JSON.parse((await readFile(path, "utf8")).trim());
+        await writeFile(path, `${JSON.stringify({...row, ...patch})}\n`);
+        const result = await readQuotaSettlement(request(root));
+        assert.equal(result.monitor_phase, expected);
+        assert.equal(result.replay_phase, "open");
+        assert.equal((result.spend as any).payload.ok, false);
+      } finally { await rm(root, {recursive: true, force: true}); }
+    });
+  }
+});
 
 test("refresh recovery admission never survives a failed Turn identity", async () => {
   const root = await fixture({ guard: false, writeback: true });
@@ -249,7 +446,7 @@ test("reads the complete receipt chain and workspace causality once", async () =
   });
 });
 
-test("keeps partial settlement fail-closed without losing durable facts", async () => {
+test("keeps ordinary partial settlement fail-closed while the monitor poll is closed", async () => {
   const runtimeRoot = await fixture({ writeback: true, monitor: true });
 
   const result = await readQuotaSettlement(request(runtimeRoot));
@@ -257,9 +454,107 @@ test("keeps partial settlement fail-closed without losing durable facts", async 
   assert.equal((result.writeback as any).payload.ok, true);
   assert.equal((result.spend as any).payload.ok, false);
   assert.equal((result.settlement as any).result.failure.kind, "receipt_missing");
-  assert.equal(result.monitor_phase, "settlement_pending");
+  assert.equal(result.monitor_phase, "settled");
   assert.equal(result.replay_phase, "open");
   assert.equal((result.writeback_run as any).delivery_outcome, "outcome_progress");
+});
+
+test("names the unbound same-turn receipt and the repair instead of a mismatch", async () => {
+  // The documented wake order runs the guard before any work item is chosen, so
+  // the turn's receipt exists with no settlement binding. This read model never
+  // binds one (the guard's same-turn reconciliation owns that, so there is one
+  // binder), which means the caller has to be told the state and the exact
+  // repair rather than the binding mismatch a "receipt todo=missing" message
+  // reports.
+  const runtimeRoot = await fixture({ guardUnbound: true });
+
+  const result = await readQuotaSettlement(request(runtimeRoot));
+
+  const failure = (result.settlement as any).result.failure;
+  // The receipt exists and is well-formed, so the missing binding has its own
+  // kind instead of reading as a mismatch against a second record.
+  assert.equal(failure.kind, "receipt_unbound");
+  assert.match(failure.reason, /carries no settlement binding yet/);
+  assert.match(
+    failure.reason,
+    new RegExp(
+      `quota should-run --turn-instance-id ${turnId} --todo-id ${todoId}`,
+    ),
+  );
+  assert.deepEqual(failure.details, {
+    binding_kind: "unbound",
+    requested_binding_kind: "todo",
+    turn_instance_id: turnId,
+  });
+});
+
+test("names the argument-less guard reentry for a deferred explicit selection", async () => {
+  // A deferred explicit selection is also identity-less, but its repair is not
+  // "rebind with --todo-id": that re-enters the same preemption and defers
+  // again, which is how a caller ends up looping instead of settling. The
+  // retained selection tells the two unbound states apart, so the refusal can
+  // name the reentry that actually binds the preemption.
+  const runtimeRoot = await fixture({ guardUnbound: true, guardDeferred: true });
+
+  const result = await readQuotaSettlement(request(runtimeRoot));
+
+  const failure = (result.settlement as any).result.failure;
+  // Both unbound states share the receipt's own failure kind; the deferred
+  // selection is told apart by the repair text and the retained selection.
+  assert.equal(failure.kind, "receipt_unbound");
+  assert.match(failure.reason, /carries no settlement binding yet/);
+  assert.match(
+    failure.reason,
+    new RegExp(
+      `quota should-run --turn-instance-id ${turnId}(?! --todo-id)`,
+    ),
+  );
+  assert.match(failure.reason, /without --todo-id/);
+  assert.doesNotMatch(
+    failure.reason,
+    new RegExp(`--todo-id ${todoId}`),
+  );
+  assert.deepEqual(failure.details, {
+    binding_kind: "unbound",
+    requested_binding_kind: "todo",
+    turn_instance_id: turnId,
+    deferred_selection_todo_id: todoId,
+  });
+});
+
+test("still reports a receipt bound to another work item as a mismatch", async () => {
+  // The unbound state must not swallow the case where the receipt was bound and
+  // the caller asked for something else: that is a real conflict, and its repair
+  // is not "bind it".
+  const runtimeRoot = await fixture({});
+  const eventsPath = join(
+    runtimeRoot,
+    "goals",
+    goalId,
+    "rollout-event-log.jsonl",
+  );
+  const events = (await readFile(eventsPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  events[0].details.todo_id = "todo_other_work_item";
+  events[0].details.settlement_effect_id = settlementIdentity({
+    goal_id: goalId,
+    agent_id: agentId,
+    todo_id: "todo_other_work_item",
+    turn_instance_id: turnId,
+  }).effect_id;
+  await writeFile(
+    eventsPath,
+    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+  );
+
+  const result = await readQuotaSettlement(request(runtimeRoot));
+
+  const failure = (result.settlement as any).result.failure;
+  assert.equal(failure.kind, "identity_mismatch");
+  assert.match(failure.reason, /receipt todo=todo_other_work_item/);
+  assert.equal(failure.details, undefined);
 });
 
 test("rejects non-ENOENT settlement readback I/O failures", async (t) => {
@@ -463,6 +758,7 @@ test("accepts only an attributable typed blocker as an outcome-gap writeback", a
   const qualifiedRuntime = await fixture({
     writeback: true,
     writebackOutcome: "outcome_gap",
+    blockedRetry: true,
     progressObservation: {
       schema_version: "typed_progress_observation_v0",
       result_class: "blocked",
@@ -474,6 +770,76 @@ test("accepts only an attributable typed blocker as an outcome-gap writeback", a
   const qualified = await readQuotaSettlement(request(qualifiedRuntime));
   assert.equal((qualified.writeback as any).payload.ok, true);
   assert.equal((qualified.writeback_run as any).delivery_outcome, "outcome_gap");
+  assert.equal((qualified.settlement as any).payload.ok, true);
+  assert.equal((qualified.spend as any).payload.ok, false);
+  assert.deepEqual((qualified.settlement as any).result.receipts.map(
+    (receipt: any) => receipt.step_kind), ["validation", "durable_writeback"]);
+  assert.equal((qualified.progress as any).state, "settled");
+  assert.equal((qualified.progress as any).next_step, null);
+  assert.equal((qualified.progress as any).closeout_kind,
+    "typed_blocked_writeback_no_spend");
+  assert.equal(qualified.replay_phase, "settled");
+
+  const spentRuntime = await fixture({
+    writeback: true,
+    spend: true,
+    writebackOutcome: "outcome_gap",
+    blockedRetry: true,
+    progressObservation: {
+      schema_version: "typed_progress_observation_v0",
+      result_class: "blocked",
+      work_item_id: todoId,
+      blocker_id: "blocker-runtime-boundary",
+      evidence_ids: ["evidence-runtime-boundary"],
+    },
+  });
+  const spent = await readQuotaSettlement(request(spentRuntime));
+  assert.equal((spent.spend as any).payload.ok, true);
+  assert.equal((spent.progress as any).closeout_kind, undefined);
+  assert.deepEqual((spent.settlement as any).result.receipts.map(
+    (receipt: any) => receipt.step_kind),
+    ["validation", "durable_writeback", "quota_spend"]);
+
+  const incompleteSpendRuntime = await fixture({
+    writeback: true,
+    writebackOutcome: "outcome_gap",
+    blockedRetry: true,
+    progressObservation: {
+      schema_version: "typed_progress_observation_v0",
+      result_class: "blocked",
+      work_item_id: todoId,
+      blocker_id: "blocker-runtime-boundary",
+      evidence_ids: ["evidence-runtime-boundary"],
+    },
+  });
+  await appendFile(join(incompleteSpendRuntime, "goals", goalId,
+    "rollout-event-log.jsonl"), `${JSON.stringify({
+      schema_version: "loopx_rollout_event_v0",
+      event_id: "event-incomplete-spend",
+      event_kind: "quota_spend",
+      goal_id: goalId,
+      agent_id: agentId,
+      run_id: turnId,
+      details: {settlement_effect_id: identity.effect_id},
+    })}\n`);
+  const incompleteSpend = await readQuotaSettlement(request(incompleteSpendRuntime));
+  assert.equal((incompleteSpend.settlement as any).payload.ok, false);
+  assert.equal((incompleteSpend.progress as any).closeout_kind, undefined);
+
+  const unscheduledRuntime = await fixture({
+    writeback: true,
+    writebackOutcome: "outcome_gap",
+    progressObservation: {
+      schema_version: "typed_progress_observation_v0",
+      result_class: "blocked",
+      work_item_id: todoId,
+      blocker_id: "blocker-runtime-boundary",
+      evidence_ids: ["evidence-runtime-boundary"],
+    },
+  });
+  const unscheduled = await readQuotaSettlement(request(unscheduledRuntime));
+  assert.equal((unscheduled.progress as any).state, "spend_required");
+  assert.equal((unscheduled.progress as any).closeout_kind, undefined);
 
   const bareRuntime = await fixture({
     writeback: true,
@@ -482,6 +848,7 @@ test("accepts only an attributable typed blocker as an outcome-gap writeback", a
   const bare = await readQuotaSettlement(request(bareRuntime));
   assert.equal((bare.writeback as any).payload.ok, false);
   assert.equal((bare.writeback as any).result.failure.kind, "writeback_missing");
+  assert.equal((bare.settlement as any).payload.ok, false);
 
   const mismatchedRuntime = await fixture({
     writeback: true,
@@ -496,6 +863,7 @@ test("accepts only an attributable typed blocker as an outcome-gap writeback", a
   });
   const mismatched = await readQuotaSettlement(request(mismatchedRuntime));
   assert.equal((mismatched.writeback as any).payload.ok, false);
+  assert.equal((mismatched.settlement as any).payload.ok, false);
 
   for (const evidenceIds of [
     "evidence-runtime-boundary",
@@ -679,6 +1047,14 @@ test("rejects malformed request authority at the runtime boundary", async () => 
   await assert.rejects(
     readQuotaSettlement(request(runtimeRoot, { runtime_root: "relative" })),
     /runtime_root must be absolute/,
+  );
+  await assert.rejects(
+    readQuotaSettlementSnapshot("relative", goalId),
+    /runtime_root must be absolute/,
+  );
+  await assert.rejects(
+    readQuotaSettlementSnapshot(runtimeRoot, "../other-goal"),
+    /goal_id must be a single path segment/,
   );
   await assert.rejects(
     readQuotaSettlement(request(runtimeRoot, { schema_version: "future" })),

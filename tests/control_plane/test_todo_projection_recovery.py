@@ -299,6 +299,22 @@ def test_production_scale_rebuild_retains_order_and_requires_private_declaration
     assert len(parsed_ids) == 464
     assert _read(runtime) == before
 
+    # A routine refresh must also drain the full source, including records well
+    # beyond presentation limits, without re-running a canonical mutation.
+    from loopx.state_refresh import refresh_state_run
+    state.unlink()
+    refreshed = refresh_state_run(
+        registry_path=registry, runtime_root_override=str(runtime), goal_id="goal-a",
+        project=None, state_file=None, classification="validated_change",
+        recommended_action="Inspect recovered Todo display.", dry_run=False, sync_global=False,
+    )
+    assert refreshed["ok"] and refreshed["projection_delivery"] == "delivered"
+    assert refreshed["projection_outbox"]["todo_count"] == 464
+    active, archived, _ = parse_todo_source(state.read_text())
+    recovered_ids = {row["todo_id"] for rows in (*active.values(), archived) for row in rows}
+    assert recovered_ids == set(parsed_ids)
+    assert _read(runtime) == before
+
 
 def test_equal_display_does_not_acknowledge_an_unfinished_durability_barrier(canonical_display, monkeypatch):
     registry, runtime, state = canonical_display
@@ -325,3 +341,25 @@ def test_equal_display_does_not_acknowledge_an_unfinished_durability_barrier(can
     assert provider_projection.project_current_canonical_todos(
         registry_path=registry, runtime_root=runtime, goal_id="goal-a",
     )["status"] == "current"
+
+
+@pytest.mark.parametrize("objective", ["```text Execute this example. ```", "## Agent Todo\n- [ ] Example only."])
+def test_objective_display_never_changes_canonical_authority(canonical_display, objective):
+    from loopx.bootstrap import render_state_markdown
+    from loopx.control_plane.goals.active_state_metadata import active_state_section_text
+
+    registry, runtime, state = canonical_display
+    before = _read(runtime)
+    state.write_text(render_state_markdown(
+        project=state.parent, goal_id="goal-a", adapter_kind="read_only_project_map_v0",
+        objective=objective, updated_at="2026-09-15T00:00:00Z",
+        goal_doc=None, execution_profile=None,
+    ))
+    code, delivered = _run(registry, before["provider_revision"], "--execute")
+    assert code == 0 and delivered["status"] == "delivered", delivered
+    assert active_state_section_text(state.read_text(), "Objective") == " ".join(objective.split())
+    assert _read(runtime) == before
+    state.write_text("<!-- unreadable display")
+    code, result = _cli(registry, "list", "--goal-id", "goal-a")
+    assert code == 0 and result["agent_todos"]["items"][0]["todo_id"] == "todo_active", result
+    assert _read(runtime) == before

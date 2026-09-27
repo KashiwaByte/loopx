@@ -730,7 +730,7 @@ def assert_exact_todo_gate_only_blocks_target_todo() -> None:
     assert lane_action["source"] == "scoped_user_gate_fallback.selected_executable", lane_action
     assert lane_action["selected_by"] == "scoped_user_gate_fallback", lane_action
     assert lane_action["replaces_gated_goal_next_action"] is True, lane_action
-    assert "todo_benchmark_ledger_cleanup" in payload["protocol_action_packet"]["summary"], payload
+    assert "protocol_action_packet" not in payload, payload
     monitor_ids = {
         item["todo_id"]
         for item in payload["agent_todo_summary"]["first_open_items"]
@@ -1032,7 +1032,8 @@ def assert_agent_without_advancement_candidate_and_only_monitor_work_stays_quiet
     assert "profile_signature" not in reset, reset
     assert "reset_condition_summary" not in reset, reset
     assert "no_spend_for_reset" not in reset, reset
-    assert "scheduler=backoff_until_material_transition" in payload["protocol_action_packet"]["summary"], payload
+    assert payload["scheduler_hint"]["action"] == "backoff_until_material_transition", payload
+    assert "protocol_action_packet" not in payload, payload
 
 
 def main() -> int:

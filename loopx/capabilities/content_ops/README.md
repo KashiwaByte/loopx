@@ -145,7 +145,10 @@ user's provider, and another Agent's private corpus is not a shared seed store.
    credentials and scope references in its owner-local configuration.
 3. Prepare one `scoped_feedback_reward_memory_event_v0` using the seed's
    `content_summary`, `target_class=procedural_experience`, and source kind
-   `reviewed_learning_card`. Use the seed id/version/digest as a stable source
+   `reviewed_learning_card`. Map the seed's applicability, observations,
+   procedure and limits into the required `procedural_experience_contract_v0`;
+   bind its evidence refs to the reviewed seed revision. Use the seed
+   id/version/digest as a stable source
    reference; fill workspace/project/user/peer and surface from the configured
    corpus. Set `requested_action_scopes=[]` and `raw_content_captured=false`.
    The configured standing policy still reviews the event. Set

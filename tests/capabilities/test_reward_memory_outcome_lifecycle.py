@@ -61,13 +61,14 @@ def _reflection(*, status: str = "eligible") -> str:
     if status == "no_evidence":
         return json.dumps(
             {
-                "schema_version": "turn_reward_memory_reflection_v0",
+                "schema_version": "turn_reward_memory_reflection_v1",
                 "status": "no_evidence",
             }
         )
+    evidence_refs = ["artifact:flow-probe", "receipt:validation"]
     return json.dumps(
         {
-            "schema_version": "turn_reward_memory_reflection_v0",
+            "schema_version": "turn_reward_memory_reflection_v1",
             "status": "eligible",
             "surface_id": "agent_workflow.turn_admission",
             "outcome_kind": "research",
@@ -78,7 +79,53 @@ def _reflection(*, status: str = "eligible") -> str:
                 "Independent validation showed stale snapshots reverse the conclusion."
             ),
             "confidence": "high",
-            "evidence_refs": ["artifact:flow-probe", "receipt:validation"],
+            "evidence_refs": evidence_refs,
+            "experience": {
+                "schema_version": "procedural_experience_contract_v0",
+                "applicability": [
+                    "Comparing provider flow snapshots across observation times"
+                ],
+                "observed_outcome": (
+                    "A stale snapshot reversed the comparison relative to the exact "
+                    "timestamped provider read."
+                ),
+                "attribution": (
+                    "Independent validation isolated snapshot freshness as the cause "
+                    "of the reversed conclusion."
+                ),
+                "future_behavior": {
+                    "trigger": "A decision compares provider flows across snapshots.",
+                    "action": (
+                        "Obtain an exact timestamped provider read before comparison."
+                    ),
+                    "validation": (
+                        "Bind the comparison to the provider read receipt and timestamp."
+                    ),
+                    "stop_condition": (
+                        "Do not use the comparison when read time or provider receipt is "
+                        "missing."
+                    ),
+                },
+                "limitations": [
+                    "The lesson does not establish that every older snapshot is wrong."
+                ],
+                "evidence_refs": evidence_refs,
+            },
+        }
+    )
+
+
+def _legacy_reflection() -> str:
+    return json.dumps(
+        {
+            "schema_version": "turn_reward_memory_reflection_v0",
+            "status": "eligible",
+            "surface_id": "agent_workflow.turn_admission",
+            "outcome_kind": "research",
+            "content_summary": "A fact-only summary from the legacy contract.",
+            "reasoning_summary": "The legacy contract has no transferable rule.",
+            "confidence": "high",
+            "evidence_refs": ["artifact:legacy-reflection"],
         }
     )
 
@@ -177,6 +224,9 @@ def test_validated_turn_reflection_writes_reads_back_and_replays(
     assert guidance[0]["content_summary"] == (
         "Require an exact timestamped provider read before comparing flows."
     )
+    assert guidance[0]["experience"]["future_behavior"]["action"].startswith(
+        "Obtain an exact timestamped provider read"
+    )
     assert str(guidance[0]["candidate_ref"]).startswith("candidate:")
     assert next_turn["outcome_ingest_reconciliation"]["status"] == "empty"
 
@@ -198,7 +248,9 @@ def test_no_evidence_and_explicit_disable_make_zero_provider_calls(
         goal_id="goal",
         agent_id="pilot",
         turn_key="sha256:no-evidence",
-        host_result={"reward_memory_reflection_json": _reflection(status="no_evidence")},
+        host_result={
+            "reward_memory_reflection_json": _reflection(status="no_evidence")
+        },
         provider=provider,
     )
 
@@ -220,6 +272,115 @@ def test_no_evidence_and_explicit_disable_make_zero_provider_calls(
 
     assert no_evidence["status"] == "no_eligible_evidence"
     assert explicitly_disabled["status"] == "explicitly_disabled"
+    assert provider.sync_calls == 0
+    assert provider.retrieve_calls == 0
+
+
+def test_legacy_fact_only_reflection_is_audit_only_and_never_calls_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OutcomeProvider()
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        outcome_lifecycle,
+        "resolve_reward_memory_experiment",
+        lambda **_kwargs: (_status(), config),
+    )
+
+    receipt = run_configured_turn_outcome_ingest(
+        registry_path=tmp_path / "registry.json",
+        goal_id="goal",
+        agent_id="pilot",
+        turn_key="sha256:legacy-reflection",
+        host_result={"reward_memory_reflection_json": _legacy_reflection()},
+        provider=provider,
+    )
+
+    assert receipt["status"] == "no_eligible_evidence"
+    assert receipt["reason_code"] == (
+        "legacy_reflection_requires_transferable_experience"
+    )
+    assert receipt["automatic_ingest"] is True
+    assert provider.sync_calls == 0
+    assert provider.retrieve_calls == 0
+
+
+def test_reconciliation_terminalizes_preupgrade_pending_legacy_reflection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OutcomeProvider()
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        outcome_lifecycle,
+        "resolve_reward_memory_experiment",
+        lambda **_kwargs: (_status(), config),
+    )
+    monkeypatch.setattr(outcome_lifecycle, "_goal_repo", lambda *_args: tmp_path)
+    sidecar_path = turn_outcome_ingest_sidecar_path(
+        tmp_path,
+        goal_id="goal",
+        agent_id="pilot",
+        source_event_id="legacy-pending",
+    )
+    outcome_lifecycle._write_sidecar(
+        sidecar_path,
+        {
+            "schema_version": "turn_reward_memory_sidecar_v0",
+            "status": "pending",
+            "goal_id": "goal",
+            "agent_id": "pilot",
+            "turn_key": "sha256:legacy-pending-turn",
+            "source_event_id": "legacy-pending",
+            "surface_id": "agent_workflow.turn_admission",
+            "reflection": json.loads(_legacy_reflection()),
+            "reflection_validation": {},
+            "settlement_validation": {},
+            "observed_at": "2026-08-02T10:00:00+00:00",
+            "attempt_count": 1,
+            "raw_content_captured": False,
+            "public_receipt": {
+                "status": "committed_pending",
+                "reconciliation_state": "pending",
+            },
+        },
+    )
+
+    first = reconcile_pending_turn_outcome_ingests(
+        registry_path=tmp_path / "registry.json",
+        goal_id="goal",
+        agent_id="pilot",
+        observed_at="2026-08-03T10:00:00+00:00",
+        provider=provider,
+    )
+    second = reconcile_pending_turn_outcome_ingests(
+        registry_path=tmp_path / "registry.json",
+        goal_id="goal",
+        agent_id="pilot",
+        observed_at="2026-08-03T11:00:00+00:00",
+        provider=provider,
+    )
+
+    assert first["pending_count"] == 1
+    assert first["attempted_count"] == 1
+    assert first["completed_count"] == 0
+    assert first["receipts"][0]["reconciliation_state"] == "rejected"
+    assert first["receipts"][0]["legacy_pending_migration"] == {
+        "schema_version": "turn_reward_memory_legacy_pending_migration_v0",
+        "status": "terminal_rejected",
+        "reason_code": "legacy_reflection_requires_transferable_experience",
+        "provider_write_state": "unknown_may_have_committed",
+        "provider_cleanup_performed": False,
+        "migrated_at": "2026-08-03T10:00:00+00:00",
+    }
+    migrated = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert migrated["status"] == "rejected"
+    assert migrated["legacy_pending_migration"]["provider_write_state"] == (
+        "unknown_may_have_committed"
+    )
+    assert second["pending_count"] == 0
+    assert second["attempted_count"] == 0
     assert provider.sync_calls == 0
     assert provider.retrieve_calls == 0
 
@@ -414,3 +575,65 @@ def test_reflection_validation_without_durable_settlement_is_not_written(
     assert receipt["candidate_state"] == "awaiting_evidence_validation"
     assert provider.sync_calls == 0
     assert provider.retrieve_calls == 0
+
+
+def test_reflection_rejects_experience_bound_to_different_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    provider = OutcomeProvider()
+    monkeypatch.setattr(
+        outcome_lifecycle,
+        "resolve_reward_memory_experiment",
+        lambda **_kwargs: (_status(), config),
+    )
+    payload = json.loads(_reflection())
+    payload["experience"]["evidence_refs"] = ["artifact:different"]
+
+    with pytest.raises(ValueError, match="must match the validated reflection"):
+        run_configured_turn_outcome_ingest(
+            registry_path=tmp_path / "registry.json",
+            goal_id="goal",
+            agent_id="pilot",
+            turn_key="sha256:mismatched-evidence",
+            host_result={"reward_memory_reflection_json": json.dumps(payload)},
+            provider=provider,
+        )
+
+    assert provider.sync_calls == 0
+    assert provider.retrieve_calls == 0
+
+
+def test_automatic_ingest_uses_the_routed_procedural_class(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    entry = config["corpora"]["agent_turn_preferences"]
+    entry["corpus"]["class_id"] = "procedural_experience"
+    entry["standing_policy"]["allowed_target_classes"] = ["procedural_experience"]
+    provider = OutcomeProvider()
+    monkeypatch.setattr(
+        outcome_lifecycle,
+        "resolve_reward_memory_experiment",
+        lambda **_kwargs: (_status(), config),
+    )
+    monkeypatch.setattr(outcome_lifecycle, "_goal_repo", lambda *_args: tmp_path)
+
+    receipt = run_configured_turn_outcome_ingest(
+        registry_path=tmp_path / "registry.json",
+        goal_id="goal",
+        agent_id="pilot",
+        turn_key="sha256:procedural-route",
+        host_result={"reward_memory_reflection_json": _reflection()},
+        settlement_evidence=_settlement_evidence(),
+        observed_at="2026-08-02T10:00:00+00:00",
+        provider=provider,
+    )
+
+    stored = json.loads(next(iter(provider.resources.values())))
+    assert receipt["status"] == "activated"
+    assert receipt["experience_quality"]["passed"] is True
+    assert stored["target_class"] == "procedural_experience"
+    assert stored["experience"]["future_behavior"]["stop_condition"]

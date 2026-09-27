@@ -27,7 +27,16 @@ from .executor import (
     run_loopx_turn_once,
     validate_loopx_turn_host_result,
 )
-from .journal_store import load_loopx_turn_plan_from_journal
+from .journal_store import (
+    load_loopx_turn_plan_from_journal,
+    load_turn_journal,
+    turn_journal_path,
+)
+from .managed_step import (
+    LOOPX_TURN_MANAGED_STEP_SCHEMA_VERSION,
+    decide_managed_step,
+)
+from .turn_contract_generated import project_turn_route
 from .recovery import TurnRecoveryBlockedError
 from .loop_controller import (
     BOUNDED_TURN_BUDGET_SCHEMA_VERSION,
@@ -56,6 +65,7 @@ __all__ = [
     "LOOPX_ITERATION_CONTEXT_POLICY_SCHEMA_VERSION",
     "LOOPX_TURN_HOST_REQUEST_SCHEMA_VERSION",
     "LOOPX_TURN_JOURNAL_INSPECTION_SCHEMA_VERSION",
+    "LOOPX_TURN_MANAGED_STEP_SCHEMA_VERSION",
     "LOOPX_TURN_RESULT_SCHEMA_VERSION",
     "LOOPX_TURN_SESSION_BINDING_SCHEMA_VERSION",
     "LOOPX_TURN_TASK_VALIDATION_SCHEMA_VERSION",
@@ -75,9 +85,13 @@ __all__ = [
     "codex_cli_session_binding",
     "codex_cli_session_id_from_jsonl",
     "decide_loop_disposition",
+    "project_turn_route",
+    "decide_managed_step",
     "load_codex_cli_session",
     "inspect_loopx_turn_journal",
     "load_loopx_turn_plan_from_journal",
+    "load_turn_journal",
+    "turn_journal_path",
     "loopx_turn_execution_committed",
     "loopx_turn_execution_has_durable_effects",
     "loopx_turn_execution_recovery_required",

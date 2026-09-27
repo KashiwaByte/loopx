@@ -503,7 +503,7 @@ def _git(repo_root: Path, *args: str) -> str:
         ["git", "-C", str(repo_root), *args],
         check=False,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     if completed.returncode != 0:
         raise ValueError("release source identity is unavailable from Git")

@@ -4,12 +4,14 @@ from collections.abc import Collection
 from typing import Any
 
 from ...control_plane import control_plane_policy_summary
+from ...control_plane.projection_envelope_facts import render_projection_envelope_markdown
 from ...control_plane.runtime.event_ledger import EVENT_LEDGER_CLASSES
 from ...execution_profile import execution_profile_summary
 from ...long_task_cadence import long_task_cadence_hint_summary
 from ...orchestration import orchestration_policy_summary
 from ..markdown import as_dict, as_list, markdown_scalar
 from .goal_acceptance_observation_markdown import append_goal_acceptance_observation_markdown
+from .goal_artifact_lifecycle_markdown import append_goal_artifact_lifecycle_markdown
 from .reward_memory_markdown import append_agent_reward_memory_markdown
 
 
@@ -60,6 +62,7 @@ def append_status_overview_markdown(
             f"- runtime_root: `{payload.get('runtime_root')}`",
             f"- goals: `{payload.get('goal_count')}`",
             f"- runs: `{payload.get('run_count')}`",
+            *render_projection_envelope_markdown(payload.get("projection_envelope")),
         ]
     )
 
@@ -73,6 +76,10 @@ def append_status_overview_markdown(
         )
     if payload.get("goal_filter"):
         lines.append(f"- goal_filter: `{payload.get('goal_filter')}`")
+
+    projection_scope = as_dict(payload.get("goal_projection")).get("scope")
+    if projection_scope:
+        lines.append(f"- activation_filter: `{projection_scope}`")
 
     contract = as_dict(payload.get("contract"))
     summary = as_dict(contract.get("summary"))
@@ -137,8 +144,10 @@ def append_runtime_projection_routes_markdown(
     healthy = diagnostics.get("healthy")
     if healthy is None:
         return
-    suffix = "" if healthy else ", details=loopx doctor"
-    lines.append(f"- runtime_projection_routes: healthy={healthy}{suffix}")
+    count = diagnostics.get("goal_count")
+    scope = f" (goals={count})" if isinstance(count, int) else ""
+    suffix = "" if healthy else ", global details=loopx doctor"
+    lines.append(f"- runtime_projection_routes: healthy={healthy}{scope}{suffix}")
 
 
 def append_global_registry_findings_markdown(
@@ -165,7 +174,7 @@ def append_global_registry_findings_markdown(
 
 def append_human_reward_markdown(lines: list[str], goal_id: Any, reward: dict[str, Any]) -> None:
     headline_parts = []
-    for field in ("recorded_at", "decision", "reward"):
+    for field in ("recorded_at", "actor_kind", "decision", "reward"):
         value = reward.get(field)
         if value:
             headline_parts.append(f"{field}={markdown_scalar(value)}")
@@ -246,6 +255,7 @@ def append_run_history_markdown(lines: list[str], run_history: dict[str, Any]) -
             f"unique_runs={goal.get('unique_runs')}"
         )
         append_goal_acceptance_observation_markdown(lines, goal)
+        append_goal_artifact_lifecycle_markdown(lines, goal)
         quota = goal.get("quota") if isinstance(goal.get("quota"), dict) else {}
         if quota:
             lines.append(
@@ -1258,6 +1268,24 @@ def _append_project_asset_runtime_policy_markdown(
         lines.append(
             "    - orchestration: "
             f"{markdown_scalar(orchestration_policy_summary(asset_orchestration))}"
+        )
+
+    native_child_activity = (
+        project_asset.get("native_child_activity")
+        if isinstance(project_asset.get("native_child_activity"), dict)
+        else {}
+    )
+    if native_child_activity.get("observation") == "coordinator_reported":
+        lines.append(
+            "    - native_child_activity: "
+            f"turn={markdown_scalar(native_child_activity.get('turn_instance_id'))} "
+            "source=coordinator_reported host_attested=false "
+            f"configured_max={native_child_activity.get('configured_limit')} "
+            f"starts={native_child_activity.get('launched_count')} "
+            f"skips={native_child_activity.get('skipped_count')} "
+            f"capacity_rejections={native_child_activity.get('capacity_rejected_count')} "
+            f"host_failures={native_child_activity.get('host_failed_count')} "
+            f"parent_accepted={native_child_activity.get('parent_accepted_count')}"
         )
 
     subagent_activity = (

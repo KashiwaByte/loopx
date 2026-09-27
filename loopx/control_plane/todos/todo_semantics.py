@@ -14,12 +14,15 @@ from ..scheduler.monitor_todo import (
     monitor_todo_next_due_at,
     monitor_todo_task_class,
 )
+from ..runtime.public_safety import public_safe_compact_text
 from ..coordination.coordination_state_contract_generated import (
     COORDINATION_STATE_CONTRACT,
 )
 from .contract import (
+    TODO_STATUS_BLOCKED,
     TODO_STATUS_DEFERRED,
     TODO_TASK_CLASS_ADVANCEMENT,
+    TODO_TASK_CLASS_BLOCKER,
     TODO_TASK_CLASS_MONITOR,
     normalize_todo_claimed_by,
     normalize_todo_excluded_agents,
@@ -30,13 +33,11 @@ from .contract import (
 )
 
 
-TODO_MISSING_PRIORITY_RANK = 50
+_PRIORITY_CONTRACT = COORDINATION_STATE_CONTRACT["todo_priority"]
+TODO_MISSING_PRIORITY_RANK = int(_PRIORITY_CONTRACT["missing_rank"])
 TODO_MISSING_INDEX = 999999
-TODO_PRIORITY_PREFIX_PATTERN = re.compile(
-    r"^\s*\[(P[0-4][^\]]*)\]\s*(.+)$",
-    re.IGNORECASE,
-)
-TODO_PRIORITY_LABEL_PATTERN = re.compile(r"\bP([0-4])\b", re.IGNORECASE)
+TODO_PRIORITY_PREFIX_PATTERN = re.compile(_PRIORITY_CONTRACT["legacy_prefix_pattern"], re.IGNORECASE)
+TODO_PRIORITY_LABEL_PATTERN = re.compile(_PRIORITY_CONTRACT["legacy_label_pattern"], re.IGNORECASE)
 TODO_PRESENTATION_METADATA_SCHEMA = "loopx_todo_presentation_metadata_v0"
 TODO_LEGACY_ITEM_SCHEMA = str(
     COORDINATION_STATE_CONTRACT["todo_read_record"]["item_schema_version"]
@@ -44,6 +45,17 @@ TODO_LEGACY_ITEM_SCHEMA = str(
 TODO_NATIVE_ITEM_SCHEMA = str(
     COORDINATION_STATE_CONTRACT["todo_domain_record"]["item_schema_version"]
 )
+
+
+def todo_blocker_reason(item: dict[str, Any]) -> str | None:
+    """Project a bounded, public-safe cause for blocked work of any task class."""
+
+    if (
+        todo_item_task_class(item) != TODO_TASK_CLASS_BLOCKER
+        and normalize_todo_status(item.get("status")) != TODO_STATUS_BLOCKED
+    ):
+        return None
+    return public_safe_compact_text(item.get("reason"), limit=220)
 
 
 def todo_item_is_watch_only_monitor(item: dict[str, Any]) -> bool:
@@ -65,36 +77,20 @@ def todo_priority_label(
     *,
     text_mode: str = "label",
 ) -> str | None:
-    priority = item.get("priority")
-    if isinstance(priority, str) and priority.strip():
-        return priority.strip().upper()
-    text = " ".join(
-        str(value or "")
-        for value in (item.get("title"), item.get("text"))
-        if str(value or "").strip()
-    )
-    if text_mode == "prefix":
-        priority, _ = todo_priority_parts(text)
-        return priority
-    match = TODO_PRIORITY_LABEL_PATTERN.search(text.upper())
-    if not match:
-        return None
-    return f"P{match.group(1)}"
+    # Read compatibility codec only. Vocabulary/grammar/rank are generated
+    # from the shared contract; mutations are planned by todos/priority.ts.
+    # text_mode remains an import/API compatibility argument, not another rule.
+    if "priority" in item:
+        value = item["priority"]
+    else:
+        value, _ = todo_priority_parts(str(item.get("text") or item.get("title") or ""))
+    match = TODO_PRIORITY_LABEL_PATTERN.match(value.strip()) if isinstance(value, str) else None
+    return match.group(1).upper() if match else None
 
 
 def todo_priority_rank(value: Any, *, text_mode: str = "label") -> int:
-    if isinstance(value, dict):
-        priority = todo_priority_label(value, text_mode=text_mode)
-    elif isinstance(value, str):
-        priority = value.strip().upper()
-    else:
-        priority = None
-    if not priority:
-        return TODO_MISSING_PRIORITY_RANK
-    match = re.match(r"P([0-4])", priority)
-    if not match:
-        return TODO_MISSING_PRIORITY_RANK
-    return int(match.group(1))
+    priority = todo_priority_label(value if isinstance(value, dict) else {"priority": value}, text_mode=text_mode)
+    return int(_PRIORITY_CONTRACT["values"].index(priority)) if priority else TODO_MISSING_PRIORITY_RANK
 
 
 def todo_index_rank(item: dict[str, Any]) -> int:
@@ -196,56 +192,6 @@ def todo_projection_sort_key(
     return (todo_priority_rank(item, text_mode=text_mode), todo_index_rank(item))
 
 
-def todo_claimed_visibility_items(
-    items: list[dict[str, Any]],
-    *,
-    limit: int,
-) -> list[dict[str, Any]]:
-    if limit <= 0 or len(items) <= limit:
-        return items[:limit]
-    claim_order: list[str] = []
-    buckets: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        claimed_by = normalize_todo_claimed_by(item.get("claimed_by"))
-        if not claimed_by:
-            continue
-        if claimed_by not in buckets:
-            buckets[claimed_by] = []
-            claim_order.append(claimed_by)
-        buckets[claimed_by].append(item)
-    if not buckets:
-        return items[:limit]
-
-    original_index = {id(item): index for index, item in enumerate(items)}
-    per_claimant_cap = max(1, limit // len(buckets))
-    selected: list[dict[str, Any]] = []
-    selected_ids: set[int] = set()
-    for claimed_by in claim_order:
-        taken = 0
-        for item in buckets[claimed_by]:
-            if taken >= per_claimant_cap:
-                break
-            if len(selected) >= limit:
-                break
-            selected.append(item)
-            selected_ids.add(id(item))
-            taken += 1
-        if len(selected) >= limit:
-            break
-
-    if len(selected) < limit:
-        for item in items:
-            if id(item) in selected_ids:
-                continue
-            selected.append(item)
-            selected_ids.add(id(item))
-            if len(selected) >= limit:
-                break
-
-    return sorted(
-        selected, key=lambda item: original_index.get(id(item), TODO_MISSING_INDEX)
-    )[:limit]
-
 
 def todo_item_task_text(
     item: dict[str, Any],
@@ -269,6 +215,9 @@ def todo_item_task_class(
 
 
 def todo_item_is_actionable_open(item: dict[str, Any]) -> bool:
+    guard = item.get("goal_acceptance_guard")
+    if isinstance(guard, dict) and guard.get("allowed") is False:
+        return False
     return monitor_todo_is_actionable_open(item)
 
 
@@ -641,6 +590,64 @@ def todo_summary_monitor_due_items(
     )
 
 
+def todo_summary_watch_only_monitor_due_items(
+    summary: dict[str, Any] | None,
+    *,
+    task_text_keys: tuple[str, ...] = ("title", "text"),
+    text_mode: str = "label",
+) -> list[dict[str, Any]]:
+    """Consume the typed watch-only partition; legacy summaries fall back safely."""
+
+    if isinstance(summary, dict) and isinstance(
+        summary.get("watch_only_monitor_due_items"), list
+    ):
+        return _summary_monitor_items(
+            summary,
+            projected_key="watch_only_monitor_due_items",
+            predicate=lambda _item: True,
+            task_text_keys=task_text_keys,
+            text_mode=text_mode,
+        )
+    return [
+        item
+        for item in todo_summary_monitor_due_items(
+            summary,
+            task_text_keys=task_text_keys,
+            text_mode=text_mode,
+        )
+        if todo_item_is_watch_only_monitor(item)
+    ]
+
+
+def todo_summary_non_watch_only_monitor_due_items(
+    summary: dict[str, Any] | None,
+    *,
+    task_text_keys: tuple[str, ...] = ("title", "text"),
+    text_mode: str = "label",
+) -> list[dict[str, Any]]:
+    """Consume the typed ordinary-due partition; classify only legacy summaries."""
+
+    if isinstance(summary, dict) and isinstance(
+        summary.get("non_watch_only_monitor_due_items"), list
+    ):
+        return _summary_monitor_items(
+            summary,
+            projected_key="non_watch_only_monitor_due_items",
+            predicate=lambda _item: True,
+            task_text_keys=task_text_keys,
+            text_mode=text_mode,
+        )
+    return [
+        item
+        for item in todo_summary_monitor_due_items(
+            summary,
+            task_text_keys=task_text_keys,
+            text_mode=text_mode,
+        )
+        if not todo_item_is_watch_only_monitor(item)
+    ]
+
+
 def todo_summary_monitor_due_count(
     summary: dict[str, Any] | None,
     *,
@@ -765,80 +772,41 @@ def todo_summary_open_count(summary: dict[str, Any] | None) -> int:
         return 0
 
 
-def todo_summary_open_task_counts(summary: dict[str, Any] | None) -> dict[str, int]:
-    open_count = todo_summary_open_count(summary)
-    classified_items: list[dict[str, Any]] = []
-    seen: set[tuple[Any, str]] = set()
-    executable_backlog_items: list[dict[str, Any]] | None = None
-    monitor_open_items: list[dict[str, Any]] | None = None
-    if isinstance(summary, dict):
-        raw_executable_backlog = summary.get("executable_backlog_items")
-        if isinstance(raw_executable_backlog, list):
-            executable_backlog_items = [
-                item
-                for item in raw_executable_backlog
-                if isinstance(item, dict)
-                if todo_item_is_actionable_open(item)
-                if todo_item_task_class(item) == TODO_TASK_CLASS_ADVANCEMENT
-            ]
-        raw_monitor_open = summary.get("monitor_open_items")
-        if isinstance(raw_monitor_open, list):
-            monitor_open_items = [
-                item
-                for item in raw_monitor_open
-                if isinstance(item, dict)
-                if todo_item_is_actionable_open(item)
-                if todo_item_task_class(item) == TODO_TASK_CLASS_MONITOR
-            ]
-        for key in (
-            "first_executable_items",
-            "first_open_items",
-            "monitor_open_items",
-        ):
-            source_items = summary.get(key)
-            if not isinstance(source_items, list):
-                continue
-            for item in source_items:
-                if not isinstance(item, dict):
+def todo_summary_open_task_counts(summary: dict[str, Any] | None) -> dict[str, Any]:
+    """Consume pre-limit counts; old display-only summaries provide lower bounds."""
+    from ..effect_runtime import effect_runtime_result
+
+    summary = summary if isinstance(summary, dict) else {}
+    counts = summary.get("work_counts")
+    if counts is None:
+        rows = []
+        for key in ("items", "executable_backlog_items", "first_executable_items", "first_open_items", "monitor_open_items"):
+            for item in summary.get(key) or []:
+                if not isinstance(item, dict) or item.get("done") is True:
                     continue
                 text = str(item.get("text") or "").strip()
                 if not text:
                     continue
-                identity = (item.get("index"), text)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                classified_items.append(item)
-    if executable_backlog_items is not None:
-        advancement_count = len(executable_backlog_items)
-    else:
-        visible_open = min(open_count, len(classified_items))
-        advancement_visible_count = sum(
-            1
-            for item in classified_items[:visible_open]
-            if todo_item_is_actionable_open(item)
-            and todo_item_task_class(item) == TODO_TASK_CLASS_ADVANCEMENT
-        )
-        hidden_count = max(0, open_count - visible_open)
-        advancement_count = advancement_visible_count + hidden_count
-    if monitor_open_items is not None:
-        monitor_visible_count = len(monitor_open_items)
-    else:
-        visible_open = min(open_count, len(classified_items))
-        monitor_visible_count = sum(
-            1
-            for item in classified_items[:visible_open]
-            if todo_item_is_actionable_open(item)
-            and todo_item_task_class(item) == TODO_TASK_CLASS_MONITOR
-        )
-    hidden_count = max(0, open_count - len(classified_items))
-    return {
-        "open": open_count,
-        "advancement": advancement_count,
-        "monitor": monitor_visible_count,
+                rows.append({"identity": str(item.get("todo_id") or (str(item.get("index")) + ":" + text)),
+                    "actionable": todo_item_is_actionable_open(item), "task_class": todo_item_task_class(item)})
+        counts = effect_runtime_result("todo.work_counts.project", {
+            "schema_version": "todo_work_counts_request_v0", "rows": rows,
+            "source_open_count": summary.get("open_count"),
+            "agent_id": todo_summary_claim_scope_agent_id(summary),
+        })
+    if (not isinstance(counts, dict) or counts.get("schema_version") != "todo_work_counts_v0"
+        or not isinstance(counts.get("complete"), bool)
+        or any(type(counts.get(key)) is not int or counts[key] < 0
+               for key in ("open", "advancement", "monitor", "hidden"))
+        or counts.get("agent_id") != todo_summary_claim_scope_agent_id(summary)):
+        raise ValueError("invalid or differently scoped Todo work counts")
+    if (counts["hidden"] > counts["open"]
+        or counts["advancement"] + counts["monitor"] > counts["open"] - counts["hidden"]
+        or (counts["complete"] and counts["hidden"] != 0)):
+        raise ValueError("inconsistent Todo work count envelope")
+    return {key: counts[key] for key in ("open", "advancement", "monitor", "hidden", "complete")} | {
         "monitor_due": todo_summary_monitor_due_count(summary),
         "monitor_schedule_gap": todo_summary_monitor_schedule_gap_count(summary),
-        "hidden": hidden_count,
     }
 
 
@@ -851,6 +819,9 @@ def todo_summary_has_only_future_scoped_monitor_work(
     if not agent_id or not isinstance(summary, dict):
         return False
     if not todo_summary_monitor_items(summary):
+        return False
+    counts = todo_summary_open_task_counts(summary)
+    if counts["complete"] is not True or counts["advancement"] > 0:
         return False
     if todo_summary_monitor_due_count(summary) > 0:
         return False

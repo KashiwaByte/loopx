@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ...control_plane.work_items.operator_inbox import (
+    CAPTURE_SCOPES,
     OperatorInboxSourceContract,
     operator_inbox_attention_kind,
     project_operator_inbox_urgency,
@@ -33,7 +34,6 @@ EVENT_SCHEMA_VERSION = "lark_event_inbox_event_v0"
 CONFIG_SCHEMA_VERSION = "lark_event_inbox_config_v0"
 PROCESSED_SCHEMA_VERSION = "lark_event_inbox_processed_v0"
 MATERIAL_REVIEW_LEDGER_SCHEMA_VERSION = "lark_material_review_ledger_v0"
-CAPTURE_SCOPES = {"addressed_only", "configured_chat_all"}
 MESSAGE_ID_PATTERN = re.compile(r"om_[A-Za-z0-9_-]+")
 EVENT_ID_PATTERN = re.compile(r"[A-Za-z0-9:_-]{1,200}")
 SAFE_PROFILE_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,100}")

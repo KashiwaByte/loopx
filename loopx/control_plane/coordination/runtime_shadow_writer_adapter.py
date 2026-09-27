@@ -36,6 +36,7 @@ def require_prose_state_write_allowed(
     from ...rollout_event_log import load_rollout_events, rollout_event_log_path
     from ..todos.todo_index import MAX_TODO_INDEX_ROLLOUT_EVENTS_PER_GOAL
     from .local_authority_shadow_adapter import todo_partition_projector
+    from .local_authority_shadow_projection import partition_comparison_view
 
     try:
         goal = find_registry_goal(load_registry(registry_path), goal_id)
@@ -46,7 +47,13 @@ def require_prose_state_write_allowed(
         projector = todo_partition_projector(
             goal, state_path=state_path, rollout_events=events,
         )
-        if projector(original_text) != projector(planned_text):
+        # Todo projections include the read-time resume-condition evaluation
+        # clock. Compare the same semantic view used by shadow continuity
+        # digests so an owned prose update is not rejected merely because the
+        # two projections were evaluated milliseconds apart.
+        original_projection = partition_comparison_view(projector(original_text))
+        planned_projection = partition_comparison_view(projector(planned_text))
+        if original_projection != planned_projection:
             raise ActiveStateAuthorityMutationError(
                 "prose update would change canonical Todo or handoff state"
             )
@@ -134,14 +141,11 @@ def settle_todo_runtime_shadow_capture(
     registry_path: Path,
     runtime_root: Path,
     goal_id: str,
-    write_class: str,
     capture: outbox.TodoPartitionCapture,
-    observe_legacy: bool = True,
     emit_disabled: bool = True,
 ) -> dict[str, Any]:
     """Boundedly drain one transaction capture after releasing the Todo lock."""
 
-    from .local_authority_shadow_observation import observe_todo_local_authority_commit
     from .local_authority_shadow_adapter import capture_evidence, drain_local_authority_shadow_outbox
 
     drain = (
@@ -157,15 +161,7 @@ def settle_todo_runtime_shadow_capture(
         payload["coordination_runtime_shadow"] = capture_evidence(
             goal_id=goal_id, capture=capture.outcome, drain=drain,
         )
-    if not observe_legacy:
-        return payload
-    return observe_todo_local_authority_commit(
-        payload,
-        registry_path,
-        goal_id,
-        write_class,
-        runtime_root=runtime_root,
-    )
+    return payload
 
 
 def settle_lease_runtime_shadow_capture(

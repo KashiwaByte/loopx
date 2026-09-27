@@ -138,7 +138,7 @@ def _source_clean_preflight(source_root: Path) -> bool | None:
             ["git", "-C", str(source_root), "rev-parse", "--show-toplevel"],
             check=False,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
     except OSError:
         top_level = None
@@ -153,7 +153,7 @@ def _source_clean_preflight(source_root: Path) -> bool | None:
             ["git", "-C", str(source_root), "status", "--porcelain"],
             check=False,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         if status.returncode != 0:
             return None
@@ -347,7 +347,7 @@ def render_native_codex_goal_prompt(
             env=native_codex_profile_environment(profile, base_env=base_env),
             check=False,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout_sec,
         )
     except subprocess.TimeoutExpired as exc:
@@ -416,7 +416,7 @@ def _doctor_payload(
         env=doctor_env,
         check=False,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     if completed.returncode:
         raise NativeCodexProfileError(
@@ -475,7 +475,7 @@ def inspect_native_codex_profile(
         version_readback = subprocess.run(
             [str(cli_bin), "--version"],
             cwd=paths["root"], env=env, check=False, capture_output=True,
-            text=True, timeout=30,
+            text=True, encoding="utf-8", errors="replace", timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise NativeCodexProfileError("profile_cli_version_unavailable") from exc
@@ -587,7 +587,7 @@ def install_native_codex_profile(
         env=env,
         check=False,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     if completed.returncode:
         raise NativeCodexProfileError(

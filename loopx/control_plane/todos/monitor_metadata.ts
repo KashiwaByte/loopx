@@ -2,16 +2,67 @@
  * the caller must hold the Todo writer lock and retain its authority fence. */
 import type { JsonObject } from "../effect_program.ts";
 import { EffectRuntimeRequestError } from "../effect_runtime_errors.ts";
-import { requireBoolean, requireJsonObject } from "../runtime_decode.ts";
+import { requireBoolean, requireJsonObject, requireNonEmptyString } from "../runtime_decode.ts";
 import { stripPythonWhitespace } from "../coordination/todo_agents.ts";
 import { evaluateSchedulerStateTransition, SCHEDULER_STATE_TRANSITION_REQUEST_SCHEMA } from "../scheduler/state_transition_rules.ts";
 import { parseTodoTimestampMicros } from "../runtime_timestamp.ts";
 
 export const TODO_MONITOR_METADATA_REQUEST_SCHEMA = "loopx_todo_monitor_metadata_request_v0";
 export const TODO_MONITOR_METADATA_RESULT_SCHEMA = "loopx_todo_monitor_metadata_result_v0";
+export const MONITOR_CONFIGURATION_FIELDS = ["target_key", "cadence", "next_due_at", "expires_at", "watch_only"] as const;
 export const MONITOR_METADATA_FIELDS = ["target_key", "monitor_effect_id", "cadence", "next_due_at",
   "expires_at", "last_checked_at", "result_hash", "consecutive_no_change", "material_change",
   "material_change_generation", "max_no_change_before_replan", "watch_only"] as const;
+
+/** An observation is input evidence, never a patch to persisted counters. */
+export interface MonitorPollObservation extends JsonObject {
+  generated_at: string;
+  result_hash: string;
+  material_change: boolean;
+}
+
+export function decodeMonitorPollObservation(value: unknown): MonitorPollObservation {
+  const raw = requireJsonObject(value, "Monitor observation");
+  const strings = ["monitor_effect_id", "target_key", "cadence", "next_due_at"];
+  for (const key of Object.keys(raw)) {
+    if (!["generated_at", "result_hash", "material_change", ...strings].includes(key)) {
+      throw new EffectRuntimeRequestError(`Monitor observation does not own ${key}`);
+    }
+  }
+  for (const key of strings) if (raw[key] != null && typeof raw[key] !== "string") {
+    throw new EffectRuntimeRequestError(`Monitor observation ${key} must be a string or null`);
+  }
+  return {...raw, generated_at: requireNonEmptyString(raw.generated_at, "generated_at"),
+    result_hash: requireNonEmptyString(raw.result_hash, "result_hash"),
+    material_change: requireBoolean(raw.material_change, "material_change")};
+}
+
+/** Public configuration is not an observation/import codec. Keep historical
+ * fields available to their existing lower-level owners, never to this intent. */
+export function normalizeMonitorConfiguration(value: unknown): JsonObject {
+  const raw = requireJsonObject(value, "Monitor configuration");
+  const input: JsonObject = {};
+  for (const [field, value] of Object.entries(raw)) {
+    if (!(MONITOR_CONFIGURATION_FIELDS as readonly string[]).includes(field)) {
+      throw new EffectRuntimeRequestError(`Monitor configuration does not own ${field}; use the observation lifecycle`);
+    }
+    if (value !== null && typeof value !== "string" && !(field === "watch_only" && typeof value === "boolean")) {
+      throw new EffectRuntimeRequestError(`Monitor configuration ${field} must be a string or null`);
+    }
+    input[field] = field === "watch_only" && value !== null ? String(value).toLowerCase() : value;
+  }
+  return normalizeMetadata(input);
+}
+
+export function validateMonitorConfigurationTarget(existing: JsonObject, metadata: JsonObject): void {
+  if (!Object.hasOwn(metadata, "target_key") || text(metadata.target_key) === text(existing.target_key)) return;
+  // Observations and dependent generation fences name this target's history.
+  // Changing its identity cannot reuse those receipts as evidence for a new target.
+  if (["monitor_effect_id", "result_hash", "last_checked_at"].some(field => text(existing[field])) ||
+      counter(existing.material_change_generation) > 0) {
+    throw new EffectRuntimeRequestError("an observed Monitor cannot change target_key; create an independent Monitor for the new target");
+  }
+}
 
 function text(value: unknown): string {
   if (value === null || value === undefined || value === false || value === 0) return "";
@@ -77,7 +128,7 @@ function normalizeMetadata(value: unknown): JsonObject {
   return normalized;
 }
 
-function poll(existing: JsonObject, observation: JsonObject): {metadata: JsonObject; transition: JsonObject} {
+function poll(existing: JsonObject, observation: JsonObject, reactivate: boolean): {metadata: JsonObject; transition: JsonObject} {
   if (existing.task_class !== "continuous_monitor") {
     throw new EffectRuntimeRequestError("monitor poll observation requires task_class=continuous_monitor");
   }
@@ -86,6 +137,14 @@ function poll(existing: JsonObject, observation: JsonObject): {metadata: JsonObj
   if (!resultHash) throw new EffectRuntimeRequestError("monitor todo writeback requires --result-hash");
   const generatedAt = text(observation.generated_at);
   const observedAt = timestamp(generatedAt, "generated_at");
+  if (reactivate) {
+    if (existing.status !== "done" || existing.role !== "agent" || existing.archive_state === "archive" || existing.superseded_by) {
+      throw new EffectRuntimeRequestError("Monitor reactivation requires an unarchived completed Agent Monitor");
+    }
+    if (!material || observedAt <= timestamp(existing.completed_at, "Monitor completed_at")) {
+      throw new EffectRuntimeRequestError("Monitor reactivation requires a material observation newer than completion");
+    }
+  }
   const existingTarget = text(existing.target_key);
   const requestedTarget = text(observation.target_key);
   if (requestedTarget && existingTarget && requestedTarget !== existingTarget) {
@@ -117,7 +176,8 @@ function poll(existing: JsonObject, observation: JsonObject): {metadata: JsonObj
     }
   }
   const previousHash = text(existing.result_hash);
-  const advances = !replay && material && resultHash !== previousHash;
+  if (reactivate && replay) throw new EffectRuntimeRequestError("a historical Monitor observation cannot reactivate completed work");
+  const advances = !replay && material && (reactivate || resultHash !== previousHash);
   const generation = previousGeneration + Number(advances);
   const noChange = replay ? previousNoChange : material || (previousHash && previousHash !== resultHash)
     ? 0 : previousNoChange + 1;
@@ -153,7 +213,8 @@ export function planMonitorMetadata(value: unknown): MonitorMetadataPlan {
     throw new EffectRuntimeRequestError("monitor metadata request schema mismatch");
   }
   const existing = requireJsonObject(request.existing ?? {}, "monitor source");
-  const planned = request.observation == null ? null : poll(existing, requireJsonObject(request.observation, "monitor observation"));
+  const planned = request.observation == null ? null : poll(existing,
+    requireJsonObject(request.observation, "monitor observation"), request.reactivate === true);
   if (planned && request.metadata != null) throw new EffectRuntimeRequestError("monitor observation cannot be combined with raw metadata");
   let metadata = normalizeMetadata(planned?.metadata ?? request.metadata);
   const nonTarget = Object.entries(metadata).some(([key, v]) => key !== "target_key" && v !== null);

@@ -11,6 +11,7 @@ export interface TaskLeaseOperationIdentityInput {
   ttl_seconds: number | null;
   new_owner: string | null;
   new_idempotency_key: string | null;
+  transfer_claim?: boolean;
 }
 
 /** Preserve the legacy v0 digest encoding; changing it changes replay identity. */
@@ -40,5 +41,8 @@ export function taskLeaseOperationRequestDigest(request: TaskLeaseOperationIdent
     operation: request.operation, goal_id: request.goal_id, todo_id: request.todo_id,
     owner: request.owner, idempotency_key: request.idempotency_key,
     expected_version: request.expected_version, ttl_seconds: request.ttl_seconds,
-    new_owner: request.new_owner, new_idempotency_key: request.new_idempotency_key});
+    new_owner: request.new_owner, new_idempotency_key: request.new_idempotency_key,
+    // Preserve all v0 identities; an explicit coupled transfer cannot replay
+    // a lease-only operation (or be downgraded to one on retry).
+    ...(request.transfer_claim ? {transfer_claim: true} : {})});
 }

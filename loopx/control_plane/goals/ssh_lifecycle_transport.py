@@ -67,6 +67,8 @@ def apply_ssh_goal_lifecycle(
             shlex.quote(normalized_goal_id),
             "--operation",
             normalized_operation,
+            "--actor-kind",
+            "owner",
             "--reason",
             shlex.quote(normalized_reason),
             "--execute",
@@ -76,7 +78,7 @@ def apply_ssh_goal_lifecycle(
         completed = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=5", alias, command],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout_seconds,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

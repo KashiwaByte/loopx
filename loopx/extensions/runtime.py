@@ -18,6 +18,7 @@ from .runtime_location import located_runtime, probe_runtime_location, record_ru
 from .readiness import (
     EXTENSION_DOCTOR_SCHEMA_VERSION,
     ResolvedRuntimeEntrypoint,
+    declared_view_validators,
     extension_runtime,
     resolve_runtime_entrypoint,
     runtime_process_environment,
@@ -561,7 +562,10 @@ def _verified_entrypoint(
     if not isinstance(manifest, Mapping):
         return None
     runtime = located_runtime(manifest, snapshot.get("entrypoint_path"))
-    identity = resolve_runtime_entrypoint(runtime)
+    identity = resolve_runtime_entrypoint(
+        runtime,
+        view_validators=declared_view_validators(manifest),
+    )
     if identity is None or identity.identity != entry.get(
         "doctor_verified_entrypoint_identity"
     ):

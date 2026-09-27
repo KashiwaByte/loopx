@@ -11,6 +11,8 @@ def _goal() -> dict[str, object]:
     return {
         "id": "goal-a",
         "coordination": {
+            "agent_model": "peer_v1",
+            "registered_agents": ["agent-a", "agent-b"],
             "runtime_shadow": {
                 "enabled": True,
                 "schema_version": "loopx_coordination_runtime_shadow_config_v0",
@@ -43,6 +45,7 @@ def _run(
     minimum_operations: int = 3,
     require_event_kind: list[str] | None = None,
     todo_id: str | None = None,
+    handoff_mode_migration: str | None = None,
 ) -> tuple[int, dict[str, object]]:
     monkeypatch.setattr(command, "load_registry", lambda _path: {"goals": [_goal()]})
     monkeypatch.setattr(
@@ -71,6 +74,7 @@ def _run(
         minimum_operations=minimum_operations,
         require_event_kind=require_event_kind or [],
         todo_id=todo_id,
+        handoff_mode_migration=handoff_mode_migration,
         format="json",
     )
     result = command.handle_coordination_shadow_command(
@@ -223,6 +227,26 @@ def test_coordination_shadow_parser_exposes_explicit_execute_gate() -> None:
     )
     assert read_candidate.todo_id == "todo_b"
 
+    promote = parser.parse_args(
+        [
+            "coordination-shadow",
+            "promote",
+            "--goal-id",
+            "goal-a",
+            "--minimum-operations",
+            "5",
+            "--require-event-kind",
+            "todo_claim",
+            "--handoff-mode-migration",
+            "hard_lease",
+            "--execute",
+        ]
+    )
+    assert promote.minimum_operations == 5
+    assert promote.require_event_kind == ["todo_claim"]
+    assert promote.handoff_mode_migration == "hard_lease"
+    assert promote.execute is True
+
 
 def test_coordination_shadow_reads_parity_matched_todo_candidate(
     monkeypatch,
@@ -313,6 +337,77 @@ def test_coordination_shadow_qualify_applies_coverage_policy(
         "todo_claim",
         "task_lease_acquire",
     ]
+
+
+def test_coordination_shadow_promote_previews_and_applies_only_through_review_owner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        command,
+        "inspect_coordination_runtime_shadow",
+        lambda **_kwargs: {
+            "status": "matched",
+            "parity_matches": True,
+            "decision_read_from_shadow": False,
+        },
+    )
+    requests: list[dict[str, object]] = []
+
+    def promote(**kwargs) -> dict[str, object]:
+        requests.append(kwargs)
+        return {
+            "status": "applied" if kwargs["execute"] else "preview_ready",
+            "promotion_ready": True,
+            "executed": kwargs["execute"],
+            "legacy_writer_fenced": kwargs["execute"],
+            "legacy_fallback_used": False,
+        }
+
+    monkeypatch.setattr(
+        command,
+        "review_local_coordination_authority_promotion",
+        promote,
+    )
+    preview_result, preview = _run(
+        monkeypatch,
+        tmp_path,
+        action="promote",
+        minimum_operations=5,
+        require_event_kind=["todo_claim"],
+    )
+    apply_result, applied = _run(
+        monkeypatch,
+        tmp_path,
+        action="promote",
+        execute=True,
+        minimum_operations=5,
+        require_event_kind=["todo_claim"],
+    )
+    migrated_result, migrated = _run(
+        monkeypatch,
+        tmp_path,
+        action="promote",
+        minimum_operations=5,
+        require_event_kind=["todo_claim"],
+        handoff_mode_migration="hard_lease",
+    )
+
+    assert preview_result == 0
+    assert preview["executed"] is False
+    assert preview["promotion"]["status"] == "preview_ready"
+    assert apply_result == 0
+    assert applied["executed"] is True
+    assert applied["promotion"]["status"] == "applied"
+    assert migrated_result == 0
+    assert migrated["promotion"]["status"] == "preview_ready"
+    assert requests[0]["execute"] is False
+    assert requests[1]["execute"] is True
+    assert requests[0]["minimum_operations"] == 5
+    assert requests[0]["required_event_kinds"] == ["todo_claim"]
+    assert requests[2]["handoff_mode_migration"] == "hard_lease"
+    assert requests[2]["registered_agents"] == ["agent-a", "agent-b"]
+    assert str(requests[0]["operation_id"]).startswith("promote:goal-a:")
 
 
 def test_coordination_shadow_rollback_passes_exact_selector_to_management_owner(

@@ -260,6 +260,41 @@ def build_decision_outcome_feedback(
                     f"Decision: {accepted['summary']} "
                     f"Verified outcome: {verified_outcome['summary']}"
                 ),
+                "experience": {
+                    "schema_version": "procedural_experience_contract_v0",
+                    "applicability": [
+                        f"A future decision matches: {accepted['summary']}"
+                    ],
+                    "observed_outcome": verified_outcome["summary"],
+                    "attribution": (
+                        "The accepted decision and verified outcome are linked to "
+                        "the same exact-read evidence packet; rejected or stale "
+                        "claims were excluded from the attribution."
+                    ),
+                    "future_behavior": {
+                        "trigger": (
+                            "The same decision pattern recurs with a current source "
+                            "revision and no unresolved authority conflict."
+                        ),
+                        "action": (
+                            f"Re-evaluate the evidence before applying this decision: "
+                            f"{accepted['summary']}"
+                        ),
+                        "validation": (
+                            "Require an exact-read promoted claim and a verified outcome "
+                            "linked to the same evidence packet."
+                        ),
+                        "stop_condition": (
+                            "Do not reuse the experience when the source revision is "
+                            "stale, the outcome is unverified, or a conflict is unresolved."
+                        ),
+                    },
+                    "limitations": [
+                        "One verified outcome does not establish universal causality.",
+                        "Reuse requires current evidence and the original scope boundaries.",
+                    ],
+                    "evidence_refs": [evidence["packet_ref"], outcome["packet_ref"]],
+                },
                 "source": {
                     "source_kind": "verified_decision_outcome",
                     "source_ref": outcome["packet_ref"],

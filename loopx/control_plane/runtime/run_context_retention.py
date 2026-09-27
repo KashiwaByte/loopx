@@ -3,12 +3,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from ..quota.blocked_retry import active_turn_retry_for_run
 from ..work_items.delivery_outcome import (
     MATERIAL_DELIVERY_OUTCOMES,
     PROGRESS_DELIVERY_OUTCOMES,
 )
 from ..work_items.progress_result import PROGRESS_OBSERVATION_SCHEMA_VERSION, ProgressResultClass
-from ..work_items.autonomous_replan_ack import autonomous_replan_ack_recorded
+from ..work_items.autonomous_replan_ack import (
+    AUTONOMOUS_REPLAN_PERIODIC_LOOKBACK,
+    autonomous_replan_ack_recorded,
+)
+from ..work_items.autonomous_replan_obligation import run_history_agent_id
+from .time import now_utc_iso
 
 GOAL_SEMANTIC_HISTORY_SCHEMA_VERSION = "goal_semantic_history_v0"
 SEMANTIC_CONTEXT_RUN_FIELDS = (
@@ -121,13 +127,17 @@ def goal_semantic_history_from_runs(
 ) -> dict[str, Any]:
     """Select time-bounded control semantics from newest-first run history.
 
-    The result grows with participating agents, not heartbeat count. Recent
-    drill-down rows remain a separate strictly bounded list.
+    The result grows with participating agents and currently waiting Todos,
+    not heartbeat count. Recent drill-down rows remain a separate strictly
+    bounded list.
     """
 
     contexts: dict[str, dict[str, Any]] = {}
     resolved_agent_vision: set[str] = set()
     latest_owner_correction_run: dict[str, Any] | None = None
+    active_blocked_retry_runs: list[dict[str, Any]] = []
+    seen_retry_todos: set[tuple[str, str]] = set()
+    observed_at = now_utc_iso()
 
     for run in runs:
         if latest_owner_correction_run is None and isinstance(
@@ -138,6 +148,17 @@ def goal_semantic_history_from_runs(
         agent_id = _agent_id_for_run(run)
         if not agent_id:
             continue
+        todo_id = str(run.get("todo_id") or "").strip()
+        classification = str(run.get("classification") or "")
+        if todo_id and not classification.startswith(("quota_slot_", "quota_scheduler_")):
+            key = (agent_id, todo_id)
+            if key not in seen_retry_todos:
+                seen_retry_todos.add(key)
+                if (
+                    active_turn_retry_for_run(run, observed_at=observed_at)
+                    is not None
+                ):
+                    active_blocked_retry_runs.append(run)
         context = contexts.setdefault(agent_id, {"agent_id": agent_id})
 
         checkpoint = run.get("vision_checkpoint")
@@ -198,6 +219,7 @@ def goal_semantic_history_from_runs(
 
     semantic_history: dict[str, Any] = {
         "schema_version": GOAL_SEMANTIC_HISTORY_SCHEMA_VERSION,
+        "active_blocked_retry_runs": active_blocked_retry_runs,
         "agents": [
             context
             for context in contexts.values()
@@ -246,6 +268,11 @@ def compact_goal_semantic_history(
         "schema_version": GOAL_SEMANTIC_HISTORY_SCHEMA_VERSION,
         "agents": agents,
     }
+    compact["active_blocked_retry_runs"] = [
+        compact_run(run)
+        for run in value.get("active_blocked_retry_runs") or []
+        if isinstance(run, dict)
+    ]
     owner_correction_run = value.get("latest_owner_correction_run")
     if isinstance(owner_correction_run, dict):
         compacted_run = compact_run(owner_correction_run)
@@ -261,12 +288,43 @@ def latest_runs_with_agent_context(
     runs: list[dict[str, Any]],
     *,
     limit: int,
+    agent_lane_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return a strict recent-run drill-down window.
 
     Durable control semantics live in ``goal_semantic_history_v0`` instead of
     expanding this display list beyond its advertised limit.
+
+    ``agent_lane_id`` adds one lane-scoped decision window next to the
+    goal-wide display window. Agent-lane replan triggers count only that lane's
+    material runs since its own last replan ACK, so a Goal with several active
+    lanes can interleave more than ``limit`` peer records between two rows of a
+    single lane and hide that lane's own threshold. The requesting lane keeps
+    the same ``AUTONOMOUS_REPLAN_PERIODIC_LOOKBACK`` budget a single-lane Goal
+    would have, and the goal-wide rows stay in place.
     """
 
     bounded = max(0, limit)
-    return list(runs[:bounded])
+    goal_window = list(runs[:bounded])
+    if not agent_lane_id:
+        return goal_window
+    lane_present = False
+    lane_positions: list[int] = []
+    for position, run in enumerate(runs):
+        attributed = run_history_agent_id(run)
+        if attributed == agent_lane_id:
+            lane_present = True
+        elif attributed is not None:
+            continue
+        lane_positions.append(position)
+    if not lane_present:
+        return goal_window
+    return [
+        runs[position]
+        for position in sorted(
+            {
+                *range(min(bounded, len(runs))),
+                *lane_positions[:AUTONOMOUS_REPLAN_PERIODIC_LOOKBACK],
+            }
+        )
+    ]

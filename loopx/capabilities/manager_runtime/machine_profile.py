@@ -54,7 +54,7 @@ def manager_runtime_machine_configuration_namespace() -> MachineConfigurationNam
         documentation={
             "path": "docs/architecture/rfcs/manager-runtime-profile-v0.md",
             "url": (
-                "https://github.com/huangruiteng/loopx/blob/main/"
+                "https://github.com/loopx-project/loopx/blob/main/"
                 "docs/architecture/rfcs/manager-runtime-profile-v0.md"
             ),
         },
@@ -201,8 +201,16 @@ def manager_runtime_session_fields(profile: Mapping[str, Any]) -> dict[str, Any]
 def manager_runtime_capability_projection(
     runtime_controller: object,
     model_configuration: Mapping[str, Any],
+    *,
+    channel_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the manager section of the shared chat capabilities projection."""
+    """Build the manager section of the shared chat capabilities projection.
+
+    ``channel_binding`` is the resolved steward-channel executor and model
+    binding. The caller owns it, including its credential facts; this projection
+    only carries it into readback so a frontend can show which executor and model
+    the manager channel resolved and why, without re-deriving the rule.
+    """
 
     resolver = getattr(runtime_controller, "manager_runtime_profile", None)
     runtime = (
@@ -210,4 +218,11 @@ def manager_runtime_capability_projection(
         if callable(resolver)
         else {**effective_manager_runtime_profile(None), "status": "ready"}
     )
-    return {"scope": "owner_global", **dict(model_configuration), "runtime": runtime}
+    projection: dict[str, Any] = {
+        "scope": "owner_global",
+        **dict(model_configuration),
+        "runtime": runtime,
+    }
+    if channel_binding is not None:
+        projection["channel_binding"] = dict(channel_binding)
+    return projection

@@ -42,8 +42,8 @@ def _registry(tmp_path: Path) -> tuple[Path, Path, Path]:
     return registry, runtime_root, state_file
 
 
-def _authority_read() -> dict[str, object]:
-    return {
+def _authority_read(**kwargs) -> dict[str, object]:
+    result = {
         "status": "loaded",
         "source_authority": "file_v0",
         "provider_revision": "file:7:abc",
@@ -71,6 +71,16 @@ def _authority_read() -> dict[str, object]:
         ],
     }
 
+    if "projection_readback" in kwargs:
+        witness = kwargs["projection_readback"]
+        result["projection_readback"] = {
+            "provider_revision": witness["provider_revision"],
+            "observed_provider_revision": result["provider_revision"],
+            "status": "delivered" if witness["changed"] else "current",
+        "next_action": "finish",
+        }
+    return result
+
 
 def test_project_current_canonical_todos_is_durable_and_idempotent(
     monkeypatch: pytest.MonkeyPatch,
@@ -80,7 +90,7 @@ def test_project_current_canonical_todos_is_durable_and_idempotent(
     monkeypatch.setattr(
         provider_projection,
         "read_canonical_todos_if_promoted",
-        lambda **_kwargs: _authority_read(),
+        _authority_read,
     )
 
     delivered = provider_projection.project_current_canonical_todos(
@@ -116,7 +126,7 @@ def test_settlement_preserves_commit_and_replays_after_projection_failure(
     monkeypatch.setattr(
         provider_projection,
         "read_canonical_todos_if_promoted",
-        lambda **_kwargs: _authority_read(),
+        _authority_read,
     )
     real_write = provider_projection.atomic_write_state_text
     monkeypatch.setattr(
@@ -169,7 +179,7 @@ def test_explicit_projection_fences_requested_revision(
     monkeypatch.setattr(
         provider_projection,
         "read_canonical_todos_if_promoted",
-        lambda **_kwargs: _authority_read(),
+        _authority_read,
     )
 
     with pytest.raises(ValueError, match="does not match"):

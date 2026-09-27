@@ -1,59 +1,49 @@
+import {AUTHORITY_SOURCE_CHANGED, uncheckedAuthoritySource, type AuthoritySourceCheck} from "./authority_source.ts";
 import type { JsonObject } from "../effect_program.ts";
-import { TODO_WORK_REQUIREMENT_FIELDS } from "../todos/work_requirements.ts";
-import { TODO_OWNERSHIP_INTENT_FIELDS } from "../todos/authoring_scope.ts";
+import {acceptanceWorkGuard} from "../goals/acceptance_contract.ts";
 import type { AuthorityStore, AuthorityStoreCommit } from "./authority_store.ts";
 import {
   AuthorityStoreProtocolError,
-  canonicalAuthorityBytes,
   canonicalAuthorityObject,
   canonicalAuthoritySha256,
   requireAuthorityStoreId,
 } from "./authority_store_codec.ts";
-import {canonicalTodoRecord} from "./todo_presentation.ts";
 import {
   indexCoordinationProjection,
   prepareCoordinationProjectionCommit,
   validateCoordinationTodoReadModel,
 } from "./coordination_projection.ts";
-import { normalizeRegisteredTodoAgents, normalizeTodoAgent } from "./todo_agents.ts";
 
-import { evaluateCoordinationTerminalFence, COORDINATION_TERMINAL_FENCE_REQUEST_SCHEMA,
-  evaluateCoordinationTodoMutationDecision,
-  COORDINATION_TODO_MUTATION_DECISION_REQUEST_SCHEMA }
-  from "./todo_lifecycle_decision.ts";
-import { leaseEpoch } from "../work_items/task_lease_acquire.ts";
-import { parseIsoTimestamp } from "../runtime_timestamp.ts";
-import { normalizeNativePlanningIntent, planNativeTodoUpdate } from "../todos/native_update_plan.ts";
+import {planMonitorCycleTransition} from "./todo_monitor_cycle.ts";
+import {isDeferredReopen, planDeferredReopen} from "./todo_deferred_reopen.ts";
+import {isBlockedLifecycleTransition, planBlockedLifecycleTransition} from "./todo_blocked_lifecycle.ts";
+import {todoUpdateAdmissionRejection} from "./todo_update_admission.ts";
 import { CoordinationCommandReceipt } from "./command_receipt.ts";
+import {canonicalTodoRecord} from "./todo_presentation.ts";
 
 export const COORDINATION_TODO_UPDATE_REQUEST_SCHEMA =
   "loopx_local_coordination_todo_update_request_v0";
 // Older runtimes must reject planning requests rather than commit only their copy patch.
 export const COORDINATION_TODO_PLANNING_UPDATE_REQUEST_SCHEMA =
   "loopx_local_coordination_todo_update_request_v1";
+// Admission witnesses and reviewed CAS must never be silently ignored by v0/v1.
+export const COORDINATION_TODO_REVIEWED_UPDATE_REQUEST_SCHEMA =
+  "loopx_local_coordination_todo_update_request_v2";
 export const COORDINATION_TODO_UPDATE_RESULT_SCHEMA =
   "loopx_coordination_todo_update_result_v0";
 export const COORDINATION_TODO_UPDATE_RECEIPT_SCHEMA =
   "loopx_coordination_todo_update_receipt_v0";
 
-const UPDATE_FIELDS = new Set(["text", "note"]);
-
-export interface CoordinationTodoUpdateInput {
-  readonly goal_id: string;
-  readonly todo_id: string;
-  readonly expected_role: string | null;
-  readonly actor_agent_id: string | null;
-  readonly registered_agents: readonly string[];
-  readonly operation_id: string;
-  readonly expected_provider_revision?: string;
-  readonly patch: JsonObject;
-  readonly clear_fields: readonly string[];
-  readonly dry_run: boolean;
-  readonly now: Date;
-  readonly lease_idempotency_key?: string | null;
-  readonly lease_expected_version?: number | null;
-  readonly planning_intent?: JsonObject;
-}
+export const COORDINATION_TODO_COMPLETION_UPDATE_REQUEST_SCHEMA =
+  "loopx_local_coordination_todo_update_request_v3";
+export const COORDINATION_TODO_OBSERVATION_UPDATE_REQUEST_SCHEMA =
+  "loopx_local_coordination_todo_update_request_v4";
+export const COORDINATION_TODO_VALIDATION_REVISION_REQUEST_SCHEMA =
+  "loopx_local_coordination_todo_update_request_v5";
+export type {CoordinationTodoUpdateInput} from "./todo_update_intent.ts";
+import {normalizeTodoUpdateInput, prepareUpdatedTodo, type CoordinationTodoUpdateInput} from "./todo_update_intent.ts";
+import {executeCoordinationTodoTerminalLifecycle} from "./todo_terminal_lifecycle.ts";
+import {planCompletionValidationRevision} from "../todos/completion_validation_revision.ts";
 
 export type CoordinationTodoUpdateResult = JsonObject & {
   readonly schema_version: typeof COORDINATION_TODO_UPDATE_RESULT_SCHEMA;
@@ -69,52 +59,6 @@ function isFailure(value: JsonObject): value is CoordinationTodoUpdateResult {
     value.status === "failed";
 }
 
-function normalizeInput(raw: CoordinationTodoUpdateInput): CoordinationTodoUpdateInput {
-  const planningIntent = normalizeNativePlanningIntent(raw.planning_intent);
-  const key = raw.lease_idempotency_key ?? null;
-  const version = raw.lease_expected_version ?? null;
-  if (key !== null && (typeof key !== "string" || !key.trim() || key !== key.trim())) {
-    throw new AuthorityStoreProtocolError("lease_idempotency_key must be a non-empty unpadded string");
-  }
-  if (version !== null && (!Number.isSafeInteger(version) || version < 0)) {
-    throw new AuthorityStoreProtocolError("lease_expected_version must be a non-negative safe integer");
-  }
-  const patch = canonicalAuthorityObject(raw.patch, "Todo update patch");
-  const clearFields = raw.clear_fields.map((field, index) =>
-    requireAuthorityStoreId(field, `clear_fields[${index}]`));
-  if (Object.keys(patch).length + clearFields.length + Object.keys(planningIntent).length === 0) {
-    throw new AuthorityStoreProtocolError("Todo update requires a non-empty patch");
-  }
-  if (new Set(clearFields).size !== clearFields.length) {
-    throw new AuthorityStoreProtocolError("clear_fields must be unique");
-  }
-  const unsupported = [...Object.keys(patch), ...clearFields]
-    .find((field) => !UPDATE_FIELDS.has(field));
-  if (unsupported !== undefined) {
-    throw new AuthorityStoreProtocolError(`Todo update does not own field ${unsupported}`);
-  }
-  if (Object.keys(patch).some((field) => clearFields.includes(field))) {
-    throw new AuthorityStoreProtocolError("Todo update cannot patch and clear the same field");
-  }
-  if (raw.expected_role !== null && !["agent", "user"].includes(raw.expected_role)) {
-    throw new AuthorityStoreProtocolError("expected_role must be agent or user");
-  }
-  if (typeof raw.dry_run !== "boolean") {
-    throw new AuthorityStoreProtocolError("dry_run must be a boolean");
-  }
-  if (!(raw.now instanceof Date) || Number.isNaN(raw.now.valueOf())) {
-    throw new AuthorityStoreProtocolError("now must be a valid Date");
-  }
-  return {...raw, planning_intent: planningIntent, lease_idempotency_key: key, lease_expected_version: version,
-    goal_id: requireAuthorityStoreId(raw.goal_id, "goal id"),
-    todo_id: requireAuthorityStoreId(raw.todo_id, "todo id"),
-    operation_id: requireAuthorityStoreId(raw.operation_id, "operation id"),
-    actor_agent_id: raw.actor_agent_id === null ? null :
-      normalizeTodoAgent(raw.actor_agent_id, "actor_agent_id"),
-    registered_agents: normalizeRegisteredTodoAgents(raw.registered_agents),
-    patch, clear_fields: clearFields};
-}
-
 function updateReceipt(input: CoordinationTodoUpdateInput, requestSha: string) {
   return new CoordinationCommandReceipt({result_schema: COORDINATION_TODO_UPDATE_RESULT_SCHEMA,
     identity: {schema_version: COORDINATION_TODO_UPDATE_RECEIPT_SCHEMA,
@@ -122,7 +66,15 @@ function updateReceipt(input: CoordinationTodoUpdateInput, requestSha: string) {
       request_sha256: requestSha}, failure,
     decode(original) {
       if (typeof original.changed !== "boolean") throw new AuthorityStoreProtocolError("update receipt changed must be boolean");
-      return {fields: {todo_id: input.todo_id, original_receipt: original}, changed: original.changed};
+      return {fields: {todo_id: input.todo_id, original_receipt: original,
+        ...(input.monitor_observation === undefined ? {} : {
+          monitor_poll_transition: canonicalAuthorityObject(original.monitor_poll_transition, "Monitor update receipt transition")}),
+        ...(original.monitor_lifecycle_transition === undefined ? {} : {monitor_lifecycle_transition:
+          canonicalAuthorityObject(original.monitor_lifecycle_transition, "Monitor lifecycle receipt transition")}),
+        ...(original.deferred_resume_transition === undefined ? {} : {deferred_resume_transition:
+          canonicalAuthorityObject(original.deferred_resume_transition, "Deferred resume receipt transition")}),
+        ...(original.blocked_lifecycle_transition === undefined ? {} : {blocked_lifecycle_transition:
+          canonicalAuthorityObject(original.blocked_lifecycle_transition, "Blocked lifecycle receipt transition")})}, changed: original.changed};
     }});
 }
 
@@ -132,7 +84,13 @@ function updateRequestSha(input: CoordinationTodoUpdateInput): string {
     actor_agent_id: input.actor_agent_id, patch: input.patch,
     ...(input.expected_provider_revision === undefined ? {} :
       {expected_provider_revision: input.expected_provider_revision}),
+    ...(input.expected_registry_sha256 === undefined ? {} :
+      {expected_registry_sha256: input.expected_registry_sha256}),
+    ...(input.authority_reason == null ? {} : {authority_reason: input.authority_reason}),
     clear_fields: input.clear_fields, dry_run: input.dry_run,
+    ...(input.monitor_observation === undefined ? {} : {monitor_observation: input.monitor_observation}),
+    ...(input.completion_validation_revision === undefined ? {} :
+      {completion_validation_revision: input.completion_validation_revision}),
     ...(Object.keys(input.planning_intent ?? {}).length ? {planning_intent: input.planning_intent} : {}),
     // Preserve receipt identity for pre-proof requests already persisted in v0.
     ...(input.lease_idempotency_key != null || input.lease_expected_version != null ? {
@@ -158,178 +116,51 @@ function loadUpdateTarget(
   }
 }
 
-function targetRejection(
-  head: JsonObject, todo: JsonObject, leases: ReadonlyMap<string, JsonObject>,
-  input: CoordinationTodoUpdateInput,
-): CoordinationTodoUpdateResult | null {
-  if (input.expected_role !== null && todo.role !== input.expected_role) {
-    return failure("todo_role_mismatch", "Todo does not have the requested role");
-  }
-  if (todo.archive_state !== "active") {
-    return failure("todo_archived", "Todo update requires an active Todo");
-  }
-  if (todo.status === "done") {
-    return failure("unsupported_todo_update_target",
-      "native metadata update cannot complete a Todo; use the terminal lifecycle command");
-  }
-  const lease = leases.get(input.todo_id);
-  const mode = head.handoff_mode === undefined ? "legacy" : head.handoff_mode;
-  if (typeof mode !== "string" || !["legacy", "soft_claim", "hard_lease"].includes(mode)) {
-    return failure("invalid_handoff_mode", "canonical handoff mode is invalid");
-  }
-  const intent = input.planning_intent ?? {};
-  const ownershipMutation = ["claimed_by", "clear_claim", "excluded_agents", "bound_agent",
-    "goal_bound", "blocks_agent", "clear_blocks_agent", "global_gate", "clear_global_gate"]
-    .some(field => Object.hasOwn(intent, field));
-  const authorityDecision = evaluateCoordinationTodoMutationDecision({
-    schema_version: COORDINATION_TODO_MUTATION_DECISION_REQUEST_SCHEMA,
-    command: "update", handoff_mode: mode, registered_agents: input.registered_agents,
-    lifecycle_grants: [], authority_action: "update",
-    actor_agent_id: input.actor_agent_id,
-    requested_claimed_by: intent.claimed_by ?? null,
-    clear_claim: intent.clear_claim === true,
-    ownership_mutation: ownershipMutation,
-    todo: {
-      ...todo, role: todo.role, status: todo.status,
-      excluded_agents: todo.excluded_agents ?? [],
-      required_decision_scopes: todo.required_decision_scopes ?? [],
-    },
-  });
-  if (authorityDecision.outcome !== "apply") {
-    const decisionCode = String(authorityDecision.code ?? "mutation_rejected");
-    const code = decisionCode === "claim_owner_mismatch"
-      ? "update_owner_mismatch" : decisionCode;
-    // Keep the public owner-mismatch diagnostic stable while other shared
-    // admission failures use a provider-neutral explanation.
-    const reason = code === "update_owner_mismatch"
-      ? "Todo update cannot edit another claim owner's work"
-      : "Todo update is outside the actor's registered owner/binding scope";
-    return failure(code, reason);
-  }
-  // Preserve the single-agent compatibility path only for genuinely
-  // unowned work. An empty registry is not evidence that an arbitrary actor
-  // may rewrite an already-owned Todo.
-  if (input.registered_agents.length === 0 && input.actor_agent_id !== null) {
-    return failure("actor_not_registered", "Todo update requires a registered actor");
-  }
-  if (input.actor_agent_id === null && (todo.claimed_by !== undefined ||
-      todo.bound_agent !== undefined || todo.blocks_agent !== undefined)) {
-    return failure("actor_required", "owned or bound Todo updates require an actor");
-  }
-  // A retained lease, even expired/released, has execution lineage. Ownership
-  // and exclusions must not change beneath it through a metadata operation.
-  if ((lease !== undefined || mode === "hard_lease") && TODO_OWNERSHIP_INTENT_FIELDS.some(field =>
-    Object.hasOwn(input.planning_intent ?? {}, field))) {
-    return failure("update_lease_ownership_transition_unsupported",
-      "Ownership/exclusion edits require a lease lifecycle transaction; metadata update cannot rewrite an execution grant");
-  }
-  if (lease !== undefined || mode === "hard_lease" ||
-      input.lease_idempotency_key != null || input.lease_expected_version != null) {
-    try {
-      const expires = lease === undefined ? null :
-        typeof lease.expires_at === "string" ? parseIsoTimestamp(lease.expires_at) : null;
-      if (lease?.status === "active" && expires === null) {
-        return failure("invalid_coordination_projection", "active lease expiry is invalid");
-      }
-      const fence = evaluateCoordinationTerminalFence({
-        schema_version: COORDINATION_TERMINAL_FENCE_REQUEST_SCHEMA,
-        todo, registered_agents: input.registered_agents, actor_agent_id: input.actor_agent_id,
-        // A historical lease never licenses an unfenced edit. No acquisition or override.
-        handoff_mode: lease !== undefined ? "hard_lease" : mode,
-        lease: lease === undefined ? null : {...lease, present: true,
-          active: lease.status === "active" && expires !== null && expires > input.now,
-          lease_epoch: leaseEpoch(lease)},
-        lease_idempotency_key: input.lease_idempotency_key ?? null,
-        lease_expected_version: input.lease_expected_version ?? null,
-        allow_user_gate_auto_acquire: false, delegated_authority: false,
-        require_active_when_fence_supplied: true,
-      });
-      if (fence.outcome !== "apply") {
-        return failure(String(fence.code), "Todo update requires the current active lease execution proof");
-      }
-      if (lease !== undefined && todo.claimed_by !== input.actor_agent_id) {
-        return failure("update_owner_mismatch", "Leased Todo update requires the current claim owner");
-      }
-      const status = input.planning_intent?.status;
-      if (lease !== undefined && TODO_WORK_REQUIREMENT_FIELDS.some(field =>
-        Object.hasOwn(input.planning_intent ?? {}, field))) {
-        return failure("update_lease_requirements_transition_unsupported",
-          "Changing leased work requirements requires a new execution grant; metadata update leaves the lease unchanged");
-      }
-      if (lease !== undefined && typeof status === "string" && status.toLowerCase() !== todo.status) {
-        return failure("update_lease_status_transition_unsupported",
-          "Changing a leased Todo status requires an atomic lifecycle operation; planning update leaves the lease unchanged");
-      }
-    } catch (error) {
-      return failure("invalid_coordination_projection",
-        error instanceof Error ? error.message : "invalid lease facts");
-    }
-  }
-  return null;
-}
-
-function prepareUpdatedTodo(
-  todo: JsonObject, input: CoordinationTodoUpdateInput, head: JsonObject,
-): {next: JsonObject; changed: boolean; clearFields: string[]} | CoordinationTodoUpdateResult {
-  const next: JsonObject = {...todo, ...input.patch};
-  for (const field of input.clear_fields) delete next[field];
-  // Preserve the public planner's legacy metadata semantics. Raw copy edits
-  // already carry actor attribution, while planning-only updates historically
-  // leave last_actor_agent_id untouched.
-  const rawCopyChanged = Object.entries(input.patch).some(([field, value]) =>
-    !Object.hasOwn(todo, field) || !canonicalAuthorityBytes(todo[field]).equals(canonicalAuthorityBytes(value))) ||
-    input.clear_fields.some(field => Object.hasOwn(todo, field));
-  if (rawCopyChanged || TODO_OWNERSHIP_INTENT_FIELDS.some(field => Object.hasOwn(input.planning_intent ?? {}, field))) {
-    next.last_actor_agent_id = input.actor_agent_id;
-  }
-  next.updated_at = input.now.toISOString().replace(/\.\d{3}Z$/u, "Z");
-  const clearFields = new Set(input.clear_fields);
-  try {
-    if (Object.keys(input.planning_intent ?? {}).length) {
-      const updates = planNativeTodoUpdate(todo, input.planning_intent!, head,
-        input.actor_agent_id, input.registered_agents, String(next.updated_at));
-      for (const [field, value] of Object.entries(updates)) {
-        // Markdown compatibility omits empty scalar metadata. Treat an
-        // explicit empty planning scalar as a clear in the canonical record as
-        // well; omission and clear are no longer conflated by the planner.
-        if (value === null || value === "") { delete next[field]; clearFields.add(field); }
-        else next[field] = value;
-      }
-      next.done = next.status === "done" || next.status === "deferred";
-    }
-    canonicalTodoRecord(next, "updated Todo");
-  } catch (error) {
-    return failure("invalid_coordination_todo_update",
-      error instanceof Error ? error.message : "invalid updated Todo");
-  }
-  const changedBeforeAudit = {...next};
-  delete changedBeforeAudit.last_actor_agent_id;
-  delete changedBeforeAudit.updated_at;
-  const originalBeforeAudit = {...todo};
-  delete originalBeforeAudit.last_actor_agent_id;
-  delete originalBeforeAudit.updated_at;
-  const changed = !canonicalAuthorityBytes(changedBeforeAudit).equals(
-    canonicalAuthorityBytes(originalBeforeAudit));
-  if (!changed) {
-    next.last_actor_agent_id = todo.last_actor_agent_id;
-    next.updated_at = todo.updated_at;
-  }
-  return {next, changed, clearFields: [...clearFields]};
-}
-
 /** Update mutable Todo metadata from the canonical provider head. */
 export async function executeCoordinationTodoUpdate(
   store: AuthorityStore, rawInput: CoordinationTodoUpdateInput,
+  authoritySourcesCurrent: AuthoritySourceCheck = uncheckedAuthoritySource,
 ): Promise<CoordinationTodoUpdateResult> {
   let input: CoordinationTodoUpdateInput;
-  try { input = normalizeInput(rawInput); } catch (error) {
+  try { input = normalizeTodoUpdateInput(rawInput); } catch (error) {
     return failure("invalid_coordination_todo_update",
       error instanceof Error ? error.message : "invalid Todo update");
+  }
+  if (input.completion !== undefined) {
+    const completion = input.completion;
+    const object = (field: string) => completion[field] == null ? null :
+      canonicalAuthorityObject(completion[field], field);
+    const intent = input.planning_intent!;
+    const result = await executeCoordinationTodoTerminalLifecycle(store, {
+      goal_id: input.goal_id, todo_id: input.todo_id, expected_role: input.expected_role as "user" | "agent" | null,
+      command: "complete", actor_agent_id: input.actor_agent_id, registered_agents: input.registered_agents,
+      lifecycle_grants: input.lifecycle_grants ?? [], authority_reason: input.authority_reason ?? null,
+      decision_outcome: null, operation_identity: {kind: "explicit", operation_id: input.operation_id},
+      lease_idempotency_key: input.lease_idempotency_key ?? null, lease_expected_version: input.lease_expected_version ?? null,
+      allow_user_gate_auto_acquire: input.lease_idempotency_key == null && input.lease_expected_version == null, requested_no_followup: intent.no_followup === true,
+      requested_completion_turn_key: null, requested_completion_identity_source: null,
+      linked_successor_todo_ids: (intent.successor_todo_ids ?? []) as string[], successor_intents: [],
+      note: null, evidence: null, reason: null, clear_claim: intent.clear_claim === true,
+      validation_declaration: object("validation_declaration"), validation_receipt: object("validation_receipt"),
+      completion_policy_request: object("completion_policy_request"),
+      goal_acceptance_source_binding: object("goal_acceptance_source_binding"),
+      goal_acceptance_validation_receipts: completion.goal_acceptance_validation_receipts,
+      dry_run: input.dry_run, now: input.now, user_update: {
+        patch: input.patch, clear_fields: input.clear_fields, planning_intent: intent,
+        ...(input.expected_provider_revision === undefined ? {} : {expected_provider_revision: input.expected_provider_revision}),
+        ...(input.expected_registry_sha256 === undefined ? {} : {expected_registry_sha256: input.expected_registry_sha256}),
+        ...(completion.source_provider_revision == null ? {} : {
+          validation_source_provider_revision: requireAuthorityStoreId(completion.source_provider_revision, "completion source provider revision")}),
+      },
+    }, authoritySourcesCurrent);
+    return {...result, schema_version: COORDINATION_TODO_UPDATE_RESULT_SCHEMA};
   }
   const requestSha = updateRequestSha(input);
   const receipt = updateReceipt(input, requestSha);
   const replay = await receipt.read(store);
   if (replay !== null) return replay;
+  const sourceChanged = () => failure(AUTHORITY_SOURCE_CHANGED.code, AUTHORITY_SOURCE_CHANGED.reason);
+  if (!await authoritySourcesCurrent()) return sourceChanged();
   // Legacy single-agent callers historically omitted actor_agent_id for an
   // unowned Todo. Keep that narrow compatibility path, while retaining the
   // registered-actor requirement for multi-agent or explicitly-owned work.
@@ -341,7 +172,9 @@ export async function executeCoordinationTodoUpdate(
       !input.registered_agents.includes(input.actor_agent_id)) {
     return failure("actor_not_registered", "Todo update requires a registered actor");
   }
-  const head = await store.loadAuthority();
+  const observation = await receipt.observe(store);
+  if (observation.kind === "receipt") return observation.result;
+  const head = observation.authority;
   if (head.status !== "loaded") {
     return {schema_version: COORDINATION_TODO_UPDATE_RESULT_SCHEMA, ...head, changed: false};
   }
@@ -352,23 +185,100 @@ export async function executeCoordinationTodoUpdate(
 
   const target = loadUpdateTarget(head.head, input);
   if (isFailure(target)) return target;
-  const rejected = targetRejection(head.head, target.todo, target.leases, input);
-  if (rejected !== null) return rejected;
-  const prepared = prepareUpdatedTodo(target.todo, input, head.head);
-  if (isFailure(prepared)) return prepared;
-  const {next, changed, clearFields} = prepared;
-  if (input.dry_run) return {schema_version: COORDINATION_TODO_UPDATE_RESULT_SCHEMA,
-    status: changed ? "planned" : "no_change", changed, todo_id: input.todo_id,
-    provider_revision: head.provider_revision, cursor: head.cursor, dry_run: true};
+  const rejected = todoUpdateAdmissionRejection(head.head, target.todo, target.leases, input);
+  if (rejected !== null) return {...failure(rejected.code, rejected.reason),
+    ...(rejected.handoff_mode === undefined ? {} : {handoff_mode: rejected.handoff_mode}),
+    ...(rejected.recovery === undefined ? {} : {recovery: rejected.recovery})};
+  let prepared: ReturnType<typeof prepareUpdatedTodo>;
+  try { prepared = prepareUpdatedTodo(target.todo, input, head.head); }
+  catch (error) { return failure("invalid_coordination_todo_update",
+    error instanceof Error ? error.message : "invalid updated Todo"); }
+  let {next, changed, clearFields} = prepared;
+  let completionValidationRevisionReceipt: JsonObject | null = null;
+  if (input.completion_validation_revision !== undefined) {
+    try {
+      const planned = planCompletionValidationRevision({
+        todo: target.todo,
+        revision: input.completion_validation_revision,
+        actor_agent_id: input.actor_agent_id,
+        operation_id: input.operation_id,
+        revised_at: input.now.toISOString().replace(/\.\d{3}Z$/u, "Z"),
+      });
+      next = {
+        ...next,
+        ...planned.updates,
+        last_actor_agent_id: input.actor_agent_id,
+        updated_at: input.now.toISOString().replace(/\.\d{3}Z$/u, "Z"),
+      };
+      completionValidationRevisionReceipt = planned.receipt;
+      changed = true;
+      clearFields = clearFields.filter(
+        (field) => !Object.hasOwn(planned.updates, field),
+      );
+      canonicalTodoRecord(next, "updated Todo");
+    } catch (error) {
+      return failure(
+        "invalid_completion_validation_revision",
+        error instanceof Error
+          ? error.message
+          : "invalid completion validation revision",
+      );
+    }
+  }
+  let cycle: ReturnType<typeof planMonitorCycleTransition>;
+  let deferredCycle: ReturnType<typeof planDeferredReopen> | null = null;
+  let blockedCycle: ReturnType<typeof planBlockedLifecycleTransition> | null = null;
+  try {
+    cycle = planMonitorCycleTransition({goal_id: input.goal_id, before: target.todo, after: next,
+      lease: target.leases.get(input.todo_id), handoff_mode: head.head.handoff_mode, now: input.now});
+    if (head.head.handoff_mode === "hard_lease" && isDeferredReopen(input, target.todo)) {
+      deferredCycle = planDeferredReopen({goal_id: input.goal_id, before: target.todo, after: next,
+        lease: target.leases.get(input.todo_id), now: input.now});
+    }
+    if (head.head.handoff_mode === "hard_lease" && isBlockedLifecycleTransition(input, target.todo)) {
+      blockedCycle = planBlockedLifecycleTransition({goal_id: input.goal_id, before: target.todo, after: next,
+        lease: target.leases.get(input.todo_id), now: input.now});
+    }
+  } catch (error) {
+    return failure("invalid_coordination_projection", error instanceof Error ? error.message : "invalid retained lease");
+  }
   const commit: AuthorityStoreCommit = changed ? prepareCoordinationProjectionCommit({
     goal_id: input.goal_id, operation_id: input.operation_id,
     expected_provider_revision: head.provider_revision, projection: head.head,
-    mutations: [{kind: "todo_upsert", todo: next, clear_fields: clearFields}],
+    mutations: [{kind: "todo_upsert", todo: next, clear_fields: clearFields},
+      ...cycle.mutations, ...(deferredCycle?.mutations ?? []), ...(blockedCycle?.mutations ?? [])],
   }) : {operation_id: input.operation_id,
     expected_provider_revision: head.provider_revision, next_projection: head.head,
     events: [], receipts: []};
+  // Planning can assign a claim too. Admit that assignment against the full
+  // candidate head so a simultaneous semantic edit cannot retain stale approval.
+  if (input.planning_intent?.claimed_by != null) {
+    const acceptance = acceptanceWorkGuard(commit.next_projection, input.goal_id, input.todo_id);
+    if (acceptance !== null && !acceptance.allowed) {
+      return {...failure(String(acceptance.reason_code), `${String(acceptance.reason)} Inspect Goal acceptance and ask the owner to configure or rebind this Todo.`),
+        goal_acceptance_guard: acceptance};
+    }
+  }
+  // The provider CAS covers Todo/lease state. Registry configuration is a
+  // separate source witness, not part of a distributed transaction.
+  if (!await authoritySourcesCurrent()) return sourceChanged();
+  if (input.dry_run) return {schema_version: COORDINATION_TODO_UPDATE_RESULT_SCHEMA,
+    status: changed ? "planned" : "no_change", changed, todo_id: input.todo_id,
+    provider_revision: head.provider_revision, cursor: head.cursor, dry_run: true,
+    ...(prepared.monitorTransition ? {monitor_poll_transition: prepared.monitorTransition} : {}),
+    ...(completionValidationRevisionReceipt === null ? {} :
+      {completion_validation_revision: completionValidationRevisionReceipt}),
+    ...(cycle.transition === null ? {} : {monitor_lifecycle_transition: cycle.transition}),
+    ...(deferredCycle?.transition == null ? {} : {deferred_resume_transition: deferredCycle.transition}),
+    ...(blockedCycle?.transition == null ? {} : {blocked_lifecycle_transition: blockedCycle.transition})};
   commit.receipts = [{schema_version: COORDINATION_TODO_UPDATE_RECEIPT_SCHEMA,
     operation_id: input.operation_id, goal_id: input.goal_id,
-    todo_id: input.todo_id, request_sha256: requestSha, changed}];
+    todo_id: input.todo_id, request_sha256: requestSha, changed,
+    ...(prepared.monitorTransition ? {monitor_poll_transition: prepared.monitorTransition} : {}),
+    ...(completionValidationRevisionReceipt === null ? {} :
+      {completion_validation_revision: completionValidationRevisionReceipt}),
+    ...(cycle.transition === null ? {} : {monitor_lifecycle_transition: cycle.transition}),
+    ...(deferredCycle?.transition == null ? {} : {deferred_resume_transition: deferredCycle.transition}),
+    ...(blockedCycle?.transition == null ? {} : {blocked_lifecycle_transition: blockedCycle.transition})}];
   return receipt.commit(store, commit);
 }

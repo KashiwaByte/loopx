@@ -16,6 +16,12 @@ from .kiro_cli_goal_mode import (
 from .opencode_goal_mode import plugin_source, runtime_source
 from .pi_goal_mode import extension_source as pi_extension_source
 from .pi_goal_mode import runtime_source as pi_runtime_source
+from .pi_goal_mode.installation import (
+    _pi_agent_dir,
+    _pi_extension_path,
+    _pi_extension_root,
+    _pi_runtime_path,
+)
 from .slash_command_files import (
     front_matter as _front_matter,
     install_skill_facade as _install_skill_facade,
@@ -177,6 +183,7 @@ def _command_prompt_specs(*, cli_bin: str, include_legacy_aliases: bool) -> list
                     host_surface=None,
                 ),
                 "Treat the returned `ordered_steps` and `goal_start_contract` as authoritative. Follow their identity, capability-route, Todo, writeback, host-loop, quota, and stop/gate rules before substantive work; do not reconstruct those rules from skill memory.",
+                "When the host explicitly supplies a `loopx_task_planning_v0` packet from `loopx todo plan` for a registered Goal/Agent, execute that bounded planning checkpoint instead of starting another Goal. Follow its shared planner and Todo delta, then return actual Todo ids for readback. Its caller-owned execution_handoff retains host activation and quota; do not create a planning Todo, execute task work, or claim delivery during the checkpoint.",
                 "For a Codex App heartbeat, run the returned activation command, require ok=true, and save its `LoopX managed heartbeat bootstrap v2` task_body through automation_update. The saved loader fetches the current thin contract on every wake; do not persist a raw thin/compact/full execution body. Preserve the current goal, registered agent, task binding and existing schedule; read back the automation through the same App.",
                 "If the packet exposes a goal-selection gate, rerun one exact choice before any mutation.",
                 "When authoring task Todos, treat `--action-kind` as the documented extensible public-safe token: choose a short task-relevant value such as `implement`, `test`, or `review`; do not search the LoopX source for an allowlist.",
@@ -356,11 +363,23 @@ def materialize_loopx_entry_skill(
             else "codex-skills"
         ),
     )
-    return {
-        "skill_id": "loopx",
-        "path": str(skill_path),
-        "status": _target_status(skill_path, content, execute=execute),
-    }
+    status = _target_status(skill_path, content, execute=execute)
+    result = {"skill_id": "loopx", "path": str(skill_path), "status": status}
+    # Workflow installs can generate this entry without slash-commands. Keep
+    # the Codex presentation identical, without changing exact managed hosts.
+    if host_surface is None and status not in {
+        "skipped_user_file", "preserved_existing_loopx_skill",
+    }:
+        result["metadata_status"] = _target_status(
+            skill_path.parent / "agents" / "openai.yaml",
+            _openai_skill_metadata(
+                command=str(spec["command"]),
+                display_name="LoopX",
+                short_description=str(spec["description"]),
+            ),
+            execute=execute,
+        )
+    return result
 
 
 def _codex_home(value: str | None = None) -> Path:
@@ -746,14 +765,6 @@ def _merge_cursor_mcp(cursor_root: Path, *, uninstall: bool, execute: bool) -> s
     return "written"
 
 
-def _pi_extension_path(project_root: Path) -> Path:
-    return project_root / ".pi" / "extensions" / "loopx-goal.ts"
-
-
-def _pi_runtime_path(project_root: Path) -> Path:
-    return project_root / ".pi" / "extensions" / "pi-goal-loop-runtime.mjs"
-
-
 def install_slash_commands(
     *,
     execute: bool,
@@ -772,6 +783,8 @@ def install_slash_commands(
     agy_home: str | None = None,
     kiro_home: str | None = None,
     pi_project: str | None = None,
+    pi_scope: str = "project",
+    pi_user_home: str | None = None,
 ) -> dict[str, Any]:
     specs = _command_prompt_specs(cli_bin=cli_bin, include_legacy_aliases=include_legacy_aliases)
     effective_surfaces = _normalize_surfaces(surfaces)
@@ -783,7 +796,13 @@ def install_slash_commands(
     zcode_root = _zcode_home(zcode_home or zcode_agents_home)
     agy_root = _agy_home(agy_home)
     kiro_root = _kiro_home(kiro_home)
+    if pi_scope not in {"project", "user"}:
+        raise ValueError("pi_scope must be 'project' or 'user'")
     pi_project_root = Path(pi_project or ".").expanduser().resolve()
+    pi_agent_dir = _pi_agent_dir(pi_user_home)
+    pi_extension_root = _pi_extension_root(
+        pi_project_root, scope=pi_scope, agent_dir=pi_agent_dir
+    )
     installed: list[dict[str, Any]] = []
 
     if with_goal_bridge and "opencode" not in effective_surfaces:
@@ -1295,11 +1314,15 @@ def install_slash_commands(
                 )
 
     if "pi" in effective_surfaces:
-        extension_path = _pi_extension_path(pi_project_root)
-        runtime_path = _pi_runtime_path(pi_project_root)
+        extension_path = _pi_extension_path(pi_extension_root, scope=pi_scope)
+        runtime_path = _pi_runtime_path(pi_extension_root)
         extension_content = pi_extension_source()
         runtime_content = pi_runtime_source()
         if uninstall:
+            # Uninstall stays per-file like every other surface: LoopX-managed
+            # files are removed and a user-owned file is reported as skipped.
+            # Aborting the whole scope instead would leave the managed adapter
+            # loaded and remove the only supported way to uninstall it.
             for mechanism, path in (
                 ("pi_goal_extension", extension_path),
                 ("pi_goal_extension_runtime", runtime_path),
@@ -1369,6 +1392,11 @@ def install_slash_commands(
         status = str(item["status"])
         status_counts[status] = status_counts.get(status, 0) + 1
 
+    pi_target_note = (
+        "the user agent dir <agent-dir>/extensions/loopx/ (scope=user)"
+        if pi_scope == "user"
+        else "the project's .pi/extensions/ (scope=project)"
+    )
     return {
         "ok": not any(status.startswith("blocked_") for status in status_counts),
         "schema_version": SCHEMA_VERSION,
@@ -1395,8 +1423,9 @@ def install_slash_commands(
             "opencode_command_dir": str(opencode_root / "commands") if "opencode" in effective_surfaces else None,
             "opencode_plugin_path": str(opencode_root / "plugins" / "loopx-goal.js") if "opencode" in effective_surfaces and with_goal_bridge else None,
             "opencode_package_path": str(opencode_root / "package.json") if "opencode" in effective_surfaces and with_goal_bridge else None,
-            "pi_extension_path": str(_pi_extension_path(pi_project_root)) if "pi" in effective_surfaces else None,
-            "pi_runtime_path": str(_pi_runtime_path(pi_project_root)) if "pi" in effective_surfaces else None,
+            "pi_scope": pi_scope if "pi" in effective_surfaces else None,
+            "pi_extension_path": str(_pi_extension_path(pi_extension_root, scope=pi_scope)) if "pi" in effective_surfaces else None,
+            "pi_runtime_path": str(_pi_runtime_path(pi_extension_root)) if "pi" in effective_surfaces else None,
             "status_counts": status_counts,
             "skip_policy": (
                 "Uninstall removes only LoopX-managed files; user files without a LoopX managed marker are preserved"
@@ -1417,7 +1446,7 @@ def install_slash_commands(
             f"Kiro CLI discovers global skills from {_KIRO_SKILLS_ROOT_LABEL}/<name>/SKILL.md (default ~/.kiro/skills) and exposes each as a `/<skill-name>` slash command; the kiro-cli surface is opt-in and resolves KIRO_HOME so install and uninstall target the profile the running host reads. Kiro resolves .kiro/prompts and KIRO_HOME/prompts before skills, so a same-named user prompt shadows the managed skill.",
             "OpenCode discovers global skills from OPENCODE_CONFIG_DIR/skills in addition to the static command facade; a command is typed by the user, a skill can be reached by the model itself.",
             "The default all surface installs only OpenCode's static command facade; the executable goal bridge requires --with-goal-bridge.",
-            "The Pi surface is opt-in and installs the self-contained goal extension and its loop runtime into the project's .pi/extensions/; it is not part of the default all surface.",
+            f"The Pi surface is opt-in and installs the self-contained goal extension and its loop runtime into {pi_target_note}; it is not part of the default all surface.",
             "The OpenCode goal bridge uses Bun-managed config-directory dependencies and must replace any direct goal-plugin registration.",
             "OpenCode bridge uninstall preserves package.json dependencies because they may be shared by user-owned local plugins.",
             "Uninstall is fail-closed: it retires only files carrying the LoopX managed marker and leaves user-owned files in place.",

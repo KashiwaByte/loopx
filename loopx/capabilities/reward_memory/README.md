@@ -53,6 +53,32 @@ OpenViking is the first provider used by the Issue Fix pilot, but it is not a
 global LoopX feature flag or mandatory dependency; another provider can
 satisfy the same binding contract.
 
+### Recovering a changed binding
+
+Editing the ignored config invalidates its old enablement receipt. `enablement_stale`
+and `enablement_unverified` now return a shared `repair` plan: reuse the invoked
+registry and existing Agent allowlist with `configure-goal`, inspect the config
+change, preview, apply within existing authorization, then verify `available`.
+Commands are explicitly marked templates with a required `<invoked-registry>`
+binding. Bind it to the exact invocation registry before execution; an omitted
+registry must never silently select a default. The private registry path, config
+pointer and provider scopes are not published. The config pointer is retained. Apply re-runs provider write/exact-readback and
+synchronizes the source/global binding. Never repair drift by copying a digest
+into an old receipt. Disabled capabilities offer no re-enable plan.
+
+The configuration catalog checks the live config digest and reuses runtime
+admission validation rather than presenting a cached receipt as current verification. It separates `desired_automation` and
+`recorded_verified_agents` from `binding_status`, `effective_available` and
+effective automation. The existing settings summary renders these same fields.
+
+The same plan is carried through Turn recall, quota and agent status/Markdown;
+the explicit recall CLI preserves the actual failure instead of labelling every
+unavailable configuration `disabled`. The existing capability editor can preview
+and reapply the retained pointer/Agent list through the same owner. No automatic
+configuration acceptance or new provider permissions are introduced. Recovery of
+enablement must still be followed by a real qualified experience write, exact
+readback and destination recall before claiming useful memory is available.
+
 ### OpenViking v0.4.19 identity boundary
 
 LoopX currently assumes one Agent belongs to exactly one Goal, while a Goal may
@@ -179,10 +205,14 @@ path rather than a compatibility fallback.
 
 The production Codex CLI Turn performs recall after quota/Todo admission and
 accepts outcome ingestion only after independent validation, durable writeback,
-and quota settlement. A reflection must use `turn_reward_memory_reflection_v0`
+and quota settlement. A reflection must use `turn_reward_memory_reflection_v1`
 and include an exact configured surface, a distinct research/simulation/real/
 engineering source kind, and opaque evidence refs; an ordinary Turn summary is
-not evidence. Ambiguous provider commits and unverified readbacks remain in a
+not evidence. It also carries `procedural_experience_contract_v0` with
+applicability, observed outcome, attribution, complete future behavior,
+limitations, and the same evidence refs. Legacy v0 reflections remain
+audit-only and cannot become durable memory. Ambiguous provider commits and
+unverified readbacks remain in a
 mode-0600 Goal+Agent+event sidecar. The next executing Turn retries the same
 deterministic event before recall, so the provider can deduplicate it and LoopX
 can require exact readback. Explicit disable suppresses reconciliation and all
@@ -191,7 +221,7 @@ provider calls.
 The Codex App uses the same settlement boundary without copying the raw
 reflection into run indexes, rollout events, or public projections. For a
 Todo-bound accountable refresh, the caller may add
-`--reward-memory-reflection-json <turn_reward_memory_reflection_v0 JSON>`.
+`--reward-memory-reflection-json <turn_reward_memory_reflection_v1 JSON>`.
 LoopX stores that candidate only in a mode-0600 Goal+Agent+candidate sidecar and
 runs the exact completion-validation command already declared by that Todo. The
 validator must return `reward_memory_reflection_validation_v0` with the exact
@@ -261,7 +291,12 @@ The agent reviews the conversation before choosing what, if anything, to learn:
    `schema_version=scoped_feedback_reward_memory_event_v0`, a stable
    `feedback_ref`, actual `source`, `reasoning`, `guard_context`, compact
    `content_summary`, `target_class`, and exact identity/surface/revision/action
-   scope. Advisory classes require empty `requested_action_scopes`; allowed
+   scope. `procedural_experience` additionally requires a typed
+   `procedural_experience_contract_v0`: applicability, observed outcome,
+   attribution, future behavior (`trigger`, `action`, `validation`, and
+   `stop_condition`), limitations, and opaque evidence refs. A fact recap does
+   not satisfy this contract. Advisory classes require empty
+   `requested_action_scopes`; allowed
    policy scopes do not grant advisory memory action authority. Do not copy the
    fixture's actor or verified-guard assertions.
 4. Replace the hint's input placeholder and preview `ingest-event` without
@@ -286,7 +321,7 @@ the agent (or its applicable route); no extra store, queue or scheduler exists.
 | `run_bound_reward` | Explicit human judgment attached to one exact goal/run. | Evidence about that outcome only. Future influence requires compact candidate derivation and an activation policy; the overlay itself is not a standing instruction. | Append-only overlay; corrections and revocations append references instead of rewriting the judged run. |
 | `hard_policy` | Explicit user/repository/operator authority, or policy content inferred from verified owner/core-contributor evidence and bound to an existing project/action authority scope. | Constraint or veto inside the verified scope. Reasoning may infer policy meaning from rewards, preferences, current-artifact-verified experience, selected options, accepted/rejected outcomes, and maintainer corrections; it may not infer credentials, new publish/production scope, or cross-user/repository authority. | Active records retain actor, evidence, scope, and derivation provenance until superseded, revoked, or expired; temporary or weakly reinforced inference should expire or return to review. |
 | `soft_preference` | Explicit feedback, selected options, or later reviewed candidates scoped to a workspace/project and module-owned surface. | Advisory ranking or rewrite only. It cannot grant publish, merge, write, credential, or production authority. | Durable only after explicit review; editable, rejectable, supersedable, revocable, and retireable. |
-| `procedural_experience` | Revision-stamped trajectories, distilled experiences, maintainer corrections, accepted/rejected changes, and reviewed architectural learning, with repository/module/revision/applicability scope. | Advisory diagnosis, scope, routing, or validation guidance only after current-artifact verification. A training/evaluation case is evidence, not an executable instruction. Retrieval alone has zero patch authority. | Trajectories may be add-only; distilled or architectural experiences are supersedable. New source truth can stale, quarantine, refute, or retire them. |
+| `procedural_experience` | Revision-stamped trajectories, distilled experiences, maintainer corrections, accepted/rejected changes, and reviewed architectural learning. The typed experience contract preserves applicability, observed outcome, attribution, future behavior, limitations, and evidence refs. | Advisory diagnosis, scope, routing, or validation guidance only after current-artifact verification and experience-quality qualification. A fact-only summary or successful provider write is not experience evidence. Retrieval alone has zero patch authority. | New source truth or application evidence can mark an experience stale, harmful, refuted, superseded, or retired. Initial qualification means structurally reusable and evidence-bound; value remains unproven until application/outcome attribution. |
 | `working_context` | Either fresh execution state (`fresh_execution_context`) or a revisioned session-continuation summary (`session_working_memory`). | Supports only the current execution/session continuation. Neither subtype becomes reusable policy or grants action authority. Fresh source-of-truth reads outrank recalled material. | `fresh_execution_context` already exists in LoopX registry/state/todo/quota/checkout observations and is reused, not rebuilt. Session context remains bound to its session/archive revision. |
 
 Every durable record must name `source`, `scope`, `authority`, `confidence`,
@@ -459,13 +494,32 @@ repository write authority, publish/production scope, or cross-project
 authority. Out-of-scope, conflicted, stale, raw, or unmodelled input is
 `guard_blocked` before any provider call.
 
+For `procedural_experience`, deterministic guards first require the complete
+typed experience contract. Missing or malformed future behavior, limitations,
+or evidence binding is rejected before the provider is called. The complete
+contract participates in `candidate_ref`, survives the active envelope, and is
+injected into recall guidance. Legacy fact-only procedural records are not
+recallable. This is a qualification gate, not a claim of proven utility:
+application receipts and verified outcome attribution still decide whether an
+experience was helpful, neutral, harmful, or should be retired.
+
 The command then composes deterministic `candidate_ref` deduplication, standing
 policy acceptance, active-envelope construction, declared-provider `sync`, and
-one exact-corpus/surface function-boundary recall. A
+one exact-corpus/surface function-boundary readback. For
+`procedural_experience`, it also performs a destination-surface
+`business_recall` using the applicability and future-behavior fields, without
+the candidate id in the query. The recalled record must match both the
+candidate and experience digests. This prevents an exact-id storage check from
+being mistaken for evidence that a lesson can be found where decisions use it. A
 `reward_memory_ingest_receipt_v0` reports `activated` and
 `memory_available_for_recall=true` only when resource ref, candidate ref, and
-canonical content digest all match. Provider unavailability, pending commit,
-or readback mismatch fails open and does not block the caller's normal work.
+canonical content digest all match, the class-specific experience-quality gate
+passes, and any required destination recall succeeds. A destination miss stays
+`recall_unverified` for bounded reconciliation rather than becoming active.
+`exact_readback_verified=true` alone proves persistence, not experience quality,
+discoverability, or utility. Provider unavailability, pending commit, readback
+mismatch, or destination-recall miss fails open and does not block the caller's
+normal work.
 `observed_at` is the immutable first-observed event timestamp and must be reused
 on retries. The provider target binds both standing-policy and candidate
 digests so a policy revision cannot silently reuse an older activation.
@@ -596,6 +650,11 @@ performs no provider or external write.
 
 ## Stage 3 recall and application seam
 
+For an explicit query-ready decision, use the optional
+[decision-consumption caller API](../../../docs/reference/reward-memory-decision-consumption.md).
+It distinguishes private context delivery from attributed semantic assessment,
+reuses the existing provider/applier, and retains the original optional-callback SDK path.
+
 Stage 3 accepts only an explicit `reward_memory_recall_request_v0` naming one
 registered corpus and one module-owned surface. The request carries a matching
 read-authority checkpoint and current freshness/conflict observations. A
@@ -616,6 +675,17 @@ corpus and surface. Private summaries remain transient in-process. Public
 packets expose opaque provider references and compact lineage; application
 receipts contain hashed memory references, the model-owned reasoning summary,
 and current-artifact verification, never raw provider content.
+
+Recall packets also separate a provider that returned no items from provider
+items rejected by the exact-record gates. `provider_item_count`,
+`filtered_item_count`, and `filtered_reason_counts` expose only bounded counts
+for contract, scope, lifecycle, expiry, quality, and legacy-contract filters;
+they never expose provider content. A fact-only procedural record is reported
+as `legacy_contract_missing` while remaining non-recallable. Its maintenance
+projection offers only two owner-governed paths: ingest a separately validated
+replacement and then retire the legacy record, or retire it directly through
+the corpus's declared retirement authority. Both paths require provider write
+readback. Recall itself performs no migration or retirement write.
 
 Provider unavailability returns setup guidance and preserves the base output.
 It is an agent/runtime condition, not a user gate. Invalid or failed model

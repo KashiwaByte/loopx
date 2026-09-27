@@ -41,7 +41,7 @@
     "query_hint": "X browser draft preparation: multi-link card selection, rich-text replacement and final readback",
     "instructions": [
       "Use the actor's explicitly configured corpus and provider; do not discover or reuse another Agent's private memory.",
-      "Review this seed against current artifacts and higher-priority instructions. Fill the existing scoped_feedback event with the configured scope, this content_summary and a seed/version/digest source reference.",
+      "Review this seed against current artifacts and higher-priority instructions. Fill the existing scoped_feedback event with the configured scope, this content_summary and a seed/version/digest source reference. Map applicability, an observed outcome and attribution from observations, future_behavior from the procedure, limits, and the reviewed seed ref into procedural_experience_contract_v0.",
       "Do not mark current_artifact_verified merely because the seed exists. Import as procedural_experience only after current verification through the existing candidate/review and ingest-event path.",
       "Require the existing provider write and exact readback receipt before claiming initialization. Deduplicate the same scoped seed revision; review updates rather than overwriting newer local experience.",
       "For automatic recall, configure the existing agent_workflow.turn_admission surface and include the actual X preparation work in the selected Todo. A configured provider alone does not connect a recall surface.",

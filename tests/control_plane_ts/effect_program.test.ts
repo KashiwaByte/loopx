@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   commitStepPayload,
   effectProgramFromOrderedSteps,
+  interpretQuotaShouldRunPacket,
+  interpretTurnResultPacket,
   requireMatchingEffectId,
   seedCommittedSteps,
   settlementBindGate,
@@ -45,6 +47,74 @@ const invalidSettlementResult: SettlementResult<{ value: number }> = {
 };
 void invalidSettlementResult;
 
+test("Turn-result verdicts and host actions never become quota actions", () => {
+  for (const resultKind of ["validated_progress", "repair_required", "wait", "host_failure"]) {
+    for (const hostAction of [undefined, null, "", "normal_run", "agent_scope_wait", "wait", "foreign_action", 42, { action: "normal_run" }]) {
+      const packet = {
+        result_kind: resultKind,
+        effective_action: hostAction,
+        failed_phase: "validation",
+        completed_phases: ["host_execute", "typed_result"],
+        next_cli_actions: ["loopx status"],
+        scheduler_hint: {
+          action: "apply_rrule", cadence_class: "repair",
+          codex_app: {
+            ack_hint: { cli_args: ["quota", "scheduler-ack-current"] },
+            failure_hint: { cli_args: ["quota", "scheduler-ack-current", "--failure"] },
+          },
+        },
+      };
+      const before = structuredClone(packet);
+      const turn = interpretTurnResultPacket(packet);
+      const noAction: null = turn.observation.effective_action;
+      // @ts-expect-error result observations cannot hold even a valid quota action
+      const foreignAction: typeof noAction = "normal_run";
+      void foreignAction;
+      assert.equal(noAction, null);
+      assert.equal(turn.observation.decision, resultKind);
+      assert.equal(turn.observation.should_run, false);
+      assert.equal(turn.request.context.failed_phase, "validation");
+      assert.deepEqual(turn.next_effect, {
+        cli_actions: ["loopx status"], execution_mode: null,
+        scheduler_action: "apply_rrule", cadence_class: "repair",
+        ack_cli_args: ["quota", "scheduler-ack-current"],
+        failure_cli_args: ["quota", "scheduler-ack-current", "--failure"],
+      });
+      assert.equal(JSON.parse(JSON.stringify(turn)).observation.effective_action, null);
+      assert.deepEqual(packet, before);
+    }
+  }
+});
+
+test("quota observations retain their string action and ignore host verdict fields", () => {
+  for (const action of ["normal_run", "quota_skip", "agent_scope_wait", "successor_replan_required"]) {
+    const turn = interpretQuotaShouldRunPacket({
+      decision: "run", should_run: true, effective_action: action, result_kind: "wait",
+      interaction_contract: {
+        schema_version: "loopx_interaction_contract_v0", mode: "bounded_delivery",
+        user_channel: { action_required: false, notify: "DONT_NOTIFY" },
+        agent_channel: { must_attempt: true, delivery_allowed: true, quiet_noop_allowed: false },
+        cli_channel: {},
+      },
+    });
+    const quotaAction: string = turn.observation.effective_action;
+    assert.equal(quotaAction, action);
+    assert.equal(turn.observation.decision, "run");
+    assert.equal(turn.observation.should_run, true);
+  }
+  assert.throws(() => interpretQuotaShouldRunPacket({}), /interaction_contract must be an object/);
+});
+
+test("missing or malformed result packets cannot manufacture an action", () => {
+  for (const packet of [undefined, null, [], "wait", {}, { effective_action: "normal_run" }]) {
+    const turn = interpretTurnResultPacket(packet);
+    assert.equal(turn.observation.effective_action, null);
+    assert.equal(turn.observation.decision, "");
+    assert.equal(turn.observation.should_run, false);
+    assert.deepEqual(turn.next_effect.cli_actions, []);
+  }
+});
+
 test("ordered Effect Program steps preserve data and skip malformed entries", () => {
   const program = effectProgramFromOrderedSteps(
     [
@@ -79,7 +149,7 @@ test("settlement identity makes illegal dual bindings unrepresentable", () => {
   );
 });
 
-test("receipt-bound monitor settlement phase is derived from typed receipts", () => {
+test("a committed receipt-bound monitor poll is always a no-spend closeout", () => {
   assert.equal(
     receiptBoundMonitorPhase({
       poll_present: false,
@@ -105,7 +175,16 @@ test("receipt-bound monitor settlement phase is derived from typed receipts", ()
       durable_writeback_present: true,
       quota_spend_present: false,
     }),
-    "settlement_pending",
+    "settled",
+  );
+  assert.equal(
+    receiptBoundMonitorPhase({
+      poll_present: true,
+      material_change: true,
+      durable_writeback_present: false,
+      quota_spend_present: false,
+    }),
+    "settled",
   );
   assert.equal(
     receiptBoundMonitorPhase({
@@ -148,6 +227,16 @@ test("receipt-bound replay settlement follows its binding and full chain", () =>
   assert.equal(
     receiptBoundReplayPhase({
       binding_kind: "autonomous_replan",
+      completion_receipt_present: false,
+      durable_writeback_present: true,
+      quota_spend_present: true,
+    }),
+    "settled",
+  );
+  assert.equal(
+    receiptBoundReplayPhase({
+      binding_kind: "todo",
+      writeback_completes_binding: true,
       completion_receipt_present: false,
       durable_writeback_present: true,
       quota_spend_present: true,

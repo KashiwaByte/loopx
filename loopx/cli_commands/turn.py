@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ..control_plane.quota.effective_action import EffectiveAction
 
 import argparse
 import json
@@ -8,28 +9,24 @@ from pathlib import Path
 from typing import Any
 
 from ..cli_rollout import append_cli_rollout_event
-from ..capabilities.explore.composition_frontier import (
-    project_live_explore_composition_frontier,
-)
-from ..capabilities.agent_turn_recall import (
-    run_configured_agent_turn_recall_fail_open,
-)
-from ..capabilities.reward_memory import (
-    run_configured_turn_outcome_ingest_fail_open,
-)
+from ..capabilities.explore.composition_frontier import project_live_explore_composition_frontier
+from ..capabilities.agent_turn_recall import run_configured_agent_turn_recall_fail_open
+from ..capabilities.reward_memory import run_configured_turn_outcome_ingest_fail_open
 from ..capabilities.periodic_report.cadence_runtime import extend_cadence_turn_start_dispatch
-from ..capabilities.periodic_report.pending_intent import periodic_report_pending_intent_interaction_hook
 from ..control_plane.quota.live_decision import build_live_quota_should_run_decision
 from ..control_plane.agents.workspace_guard import capture_delivery_workspace
-from ..control_plane.quota.heartbeat_receipt import (
-    ensure_turn_heartbeat_settlement_receipt,
+from ..control_plane.goals.first_party_host_admission import (
+    FirstPartyHostGoalAdmission,
+    capture_first_party_host_goal_ref,
 )
+from ..control_plane.quota.heartbeat_receipt import ensure_turn_heartbeat_settlement_receipt
 from ..control_plane.quota.settlement import (
     SettlementIdentity,
     SettlementStepKind,
     read_heartbeat_settlement,
 )
 from ..control_plane.quota.turn_envelope import build_turn_envelope
+from ..control_plane.work_items.autonomous_replan_obligation import replan_obligation_id_from_packet
 from ..control_plane.runtime.status_projection_cache import (
     resolve_status_projection_cache_runtime_root,
 )
@@ -40,37 +37,36 @@ from ..control_plane.todos.durable_completion import (
     read_persisted_todo_record,
     read_persisted_todo_record_with_source,
 )
-from ..control_plane.scheduler.execution_context import (
-    scheduler_execution_context_for_turn,
-)
 from ..control_plane.turn_driver import (
-    LOOPX_TURN_EXECUTION_SCHEMA_VERSION,
-    LOOPX_TURN_SESSION_BINDING_SCHEMA_VERSION,
-    TurnRecoveryBlockedError,
     build_loopx_turn_command_validator,
     build_loopx_turn_plan,
     codex_cli_session_binding,
     load_loopx_turn_plan_from_journal,
     run_codex_cli_host,
     run_loopx_turn_once,
+    inspect_loopx_turn_journal,
     selected_turn_todo,
 )
+from ..control_plane.operator_provider import operator_provider_environ
 from ..quota import spend_quota_slot
 from ..state_refresh import refresh_state_run
-from ..status import AUTONOMOUS_REPLAN_PERIODIC_LOOKBACK, collect_status
 from ..todos import resolve_todo_state_path
-from .lark_inbox import (
-    build_lark_operator_inbox_urgency_projector,
-    dispatch_goal_lark_turn_start_hooks,
+from .lark_inbox import dispatch_goal_lark_turn_start_hooks
+from .turn_cadence import managed_cadence_start
+from .turn_decision import (
+    build_fresh_turn_decision_owner,
+    collect_turn_status_payload,
 )
 from .turn_dsh_host import build_dsh_host_runner
 from .turn_registration import register_turn_commands as register_turn_commands
 from .turn_inspection import handle_turn_journal_inspection
+from .turn_managed_step import handle_turn_managed_step
 from .turn_rendering import (
+    build_turn_error_payload,
     render_loopx_turn_execution_markdown as _render_loopx_turn_execution_markdown,
     render_loopx_turn_plan_markdown as _render_loopx_turn_plan_markdown,
 )
-from .turn_selection import turn_controller_advisory_primary
+from .turn_selection import managed_executor_cli_binding, resolve_turn_resume_session_binding
 from .turn_todo_writeback import (
     write_turn_repair_update,
     write_turn_validated_completion,
@@ -85,8 +81,6 @@ PrintPayload = Callable[
     None,
 ]
 FormatSelector = Callable[..., str]
-
-
 
 
 def handle_turn_command(
@@ -108,14 +102,33 @@ def handle_turn_command(
     )
     if inspection_result is not None:
         return inspection_result
+    if args.turn_command == "managed-step":
+        return handle_turn_managed_step(
+            args, registry_path=registry_path, runtime_root_arg=runtime_root_arg,
+            output_format=output_format, print_payload=print_payload,
+        )
+    payload: dict[str, Any] = {}
+    execution_started = False
     try:
-        scan_roots = [Path(item).expanduser() for item in args.scan_path]
-        if not scan_roots:
-            scan_roots = [Path(args.scan_root).expanduser()]
+        if getattr(args, "todo_id", None) is not None and (
+            getattr(args, "resume_turn_key", None)
+            or any(getattr(args, key, None) for key in ("resume_goal_id", "resume_agent_id", "resume_todo_id"))
+        ):
+            raise ValueError("--todo-id selects fresh work and cannot retarget a resumed Turn or session")
         runtime_root = resolve_status_projection_cache_runtime_root(
             registry_path=registry_path,
             runtime_root_override=runtime_root_arg,
         )
+        goal_ref = capture_first_party_host_goal_ref(
+            registry_path=registry_path,
+            goal_id=args.goal_id,
+        )
+        goal_admission = FirstPartyHostGoalAdmission.for_plan(
+            registry_path=registry_path,
+            goal_id=args.goal_id,
+            planned_goal_ref=goal_ref,
+        )
+        strict_goal_admission = goal_admission if goal_admission.enabled else None
         # Planning and dry-run execution inspect existing admitted intents.
         # Only an executing wake may sync inboxes or reserve a calendar window.
         turn_start_hook_dispatch = {}
@@ -141,84 +154,21 @@ def handle_turn_command(
                 agent_id=args.agent_id,
                 available=args.available_capabilities,
             )
-        operator_inbox_urgency_projector = build_lark_operator_inbox_urgency_projector(
-            runtime_root_arg=runtime_root,
-        )
-        status_payload = collect_status(
+        # `run-once` and `managed-step` must resolve the same governing decision
+        # from the same live status, scheduler context and capability hooks, so
+        # this Turn takes all of them -- and its later settle-against inputs --
+        # from the shared decision owner instead of rebuilding them per command.
+        decision_owner = build_fresh_turn_decision_owner(
+            args,
             registry_path=registry_path,
-            runtime_root_override=runtime_root_arg,
-            scan_roots=scan_roots,
-            limit=max(max(0, args.limit), AUTONOMOUS_REPLAN_PERIODIC_LOOKBACK),
-            goal_id=args.goal_id,
-            available_capabilities=args.available_capabilities,
+            runtime_root=runtime_root,
+            runtime_root_arg=runtime_root_arg,
+            turn_start_hook_dispatch=turn_start_hook_dispatch,
         )
-        scheduler_context = scheduler_execution_context_for_turn(
-            host=args.host,
-            execution_mode=args.execution_mode,
-            scheduler_owner=args.scheduler_owner,
-        )
-        def build_turn_decision(
-            *, requested_action_todo_id: str | None = None
-        ) -> dict[str, Any]:
-            return build_live_quota_should_run_decision(
-                status_payload,
-                goal_id=args.goal_id,
-                agent_id=args.agent_id,
-                available_capabilities=args.available_capabilities,
-                include_scheduler_detail=False,
-                codex_app_current_rrule=None,
-                registry_path=registry_path,
-                runtime_root=runtime_root,
-                route_source="loopx_turn_plan",
-                scheduler_execution_context=scheduler_context,
-                operator_inbox_urgency_projector=operator_inbox_urgency_projector,
-                bounded_research_frontier_projector=(
-                    project_live_explore_composition_frontier
-                ),
-                requested_action_todo_id=requested_action_todo_id,
-                turn_start_hook_dispatch=turn_start_hook_dispatch,
-                interaction_projection_hooks=(periodic_report_pending_intent_interaction_hook(
-                    registry_path=registry_path, runtime_root=runtime_root,
-                    goal_id=args.goal_id, agent_id=args.agent_id),),
-            )
-
-        decision = build_turn_decision()
-        controller_default = turn_controller_advisory_primary(decision)
-        if controller_default is not None:
-            primary_todo_id, advisory_portfolio = controller_default
-            decision = build_turn_decision(
-                requested_action_todo_id=primary_todo_id,
-            )
-            selected_todo = decision.get("selected_todo")
-            if not isinstance(selected_todo, dict) or (
-                selected_todo.get("todo_id") != primary_todo_id
-            ):
-                raise ValueError(
-                    "Turn controller advisory primary failed current eligibility"
-                )
-            selected_todo["selected_by"] = "turn_controller_advisory_primary"
-            decision["action_portfolio"] = advisory_portfolio
-        resume_identity = {
-            "goal_id": args.resume_goal_id,
-            "agent_id": args.resume_agent_id,
-            "todo_id": args.resume_todo_id,
-        }
-        supplied_resume_fields = [
-            field for field, value in resume_identity.items() if value is not None
-        ]
-        if supplied_resume_fields and len(supplied_resume_fields) != len(
-            resume_identity
-        ):
-            raise ValueError(
-                "resume planning requires --resume-goal-id, --resume-agent-id, "
-                "and --resume-todo-id together"
-            )
-        session_binding = None
-        if supplied_resume_fields:
-            session_binding = {
-                "schema_version": LOOPX_TURN_SESSION_BINDING_SCHEMA_VERSION,
-                **resume_identity,
-            }
+        operator_inbox_urgency_projector = decision_owner.operator_inbox_urgency_projector
+        scheduler_context = decision_owner.scheduler_execution_context
+        decision = decision_owner.resolve()
+        resume_requested, session_binding = resolve_turn_resume_session_binding(args)
         turn_envelope = build_turn_envelope(
             decision,
             scheduler_execution_context=scheduler_context,
@@ -226,10 +176,19 @@ def handle_turn_command(
         if (
             args.turn_command == "run-once"
             and args.host == "codex-cli"
-            and not supplied_resume_fields
-            and turn_envelope.get("effective_action") != "governed_capability_intent"
+            and not resume_requested
+            and not args.resume_turn_key
+            and turn_envelope.get("effective_action") != EffectiveAction.GOVERNED_CAPABILITY_INTENT.value
         ):
-            session_binding = codex_cli_session_binding(runtime_root, turn_envelope)
+            session_binding = (
+                codex_cli_session_binding(
+                    runtime_root,
+                    turn_envelope,
+                    goal_admission=strict_goal_admission,
+                )
+                if strict_goal_admission is not None
+                else codex_cli_session_binding(runtime_root, turn_envelope)
+            )
         payload = build_loopx_turn_plan(
             turn_envelope,
             host=args.host,
@@ -238,7 +197,11 @@ def handle_turn_command(
             session_binding=session_binding,
             turn_instance_id=args.turn_instance_id,
             iteration_context_policy=args.iteration_context.replace("-", "_"),
+            goal_ref=goal_ref,
         )
+        # Resolve machine authentication once for the readback and host launch.
+        operator_environ = operator_provider_environ()
+        payload["managed_executor"] = managed_executor_cli_binding(args, environ=operator_environ)
         if (
             args.turn_command == "run-once"
             and args.execute
@@ -300,7 +263,7 @@ def handle_turn_command(
                     raise ValueError(
                         "--resume-turn-key cannot be combined with --turn-instance-id"
                     )
-                if supplied_resume_fields:
+                if resume_requested:
                     raise ValueError(
                         "--resume-turn-key cannot be combined with host session identity flags"
                     )
@@ -318,6 +281,14 @@ def handle_turn_command(
                     raise ValueError(
                         "LoopX Turn resume journal belongs to another agent"
                     )
+                goal_admission = FirstPartyHostGoalAdmission.for_plan(
+                    registry_path=registry_path,
+                    goal_id=args.goal_id,
+                    planned_goal_ref=payload.get("goal_ref"),
+                )
+                strict_goal_admission = goal_admission if goal_admission.enabled else None
+                if strict_goal_admission is not None:
+                    strict_goal_admission.require_current()
             if payload.get("route", {}).get("kind") == "capability_action_required":
                 # The normal host transaction forbids Core mutations. A
                 # capability may prepare artifacts and require authored input;
@@ -407,12 +378,14 @@ def handle_turn_command(
                 and persisted_effect_id != settlement_identity.effect_id
             ):
                 raise ValueError("Turn settlement identity effect_id is inconsistent")
-            if args.execute:
-                ensure_turn_heartbeat_settlement_receipt(
-                    runtime_root,
-                    settlement_identity,
-                )
-
+            stable_envelope: Mapping[str, Any] = (
+                envelope if isinstance(envelope, Mapping) else {}
+            )
+            replan_guard_scoped = "replan_action_packet" in stable_envelope
+            replan_obligation_id = (
+                replan_obligation_id_from_packet(stable_envelope.get("replan_action_packet"))
+                if replan_guard_scoped else None
+            )
             def require_effect_ref(
                 effect_ref: str,
                 step_kind: SettlementStepKind,
@@ -698,13 +671,10 @@ def handle_turn_command(
                 return todo_completion(result, effect_ref=effect_ref)
 
             def current_status() -> dict[str, object]:
-                return collect_status(
+                return collect_turn_status_payload(
+                    args,
                     registry_path=registry_path,
-                    runtime_root_override=runtime_root_arg,
-                    scan_roots=scan_roots,
-                    limit=max(max(0, args.limit), AUTONOMOUS_REPLAN_PERIODIC_LOOKBACK),
-                    goal_id=args.goal_id,
-                    available_capabilities=args.available_capabilities,
+                    runtime_root_arg=runtime_root_arg,
                 )
 
             def spend(*, effect_ref: str) -> dict[str, object]:
@@ -1009,28 +979,44 @@ def handle_turn_command(
                 def run_built_in_host(
                     request: Mapping[str, Any],
                 ) -> dict[str, Any]:
-                    return run_codex_cli_host(
-                        request,
-                        runtime_root=runtime_root,
-                        project=project,
-                        codex_bin=args.codex_bin,
-                        sandbox=args.codex_sandbox,
-                        model=args.codex_model,
-                        timeout_seconds=max(1.0, args.timeout_seconds - 5.0),
-                    )
+                    options = {
+                        "runtime_root": runtime_root,
+                        "project": project,
+                        "codex_bin": args.codex_bin,
+                        "sandbox": args.codex_sandbox,
+                        "model": args.codex_model,
+                        "reasoning_effort": args.codex_reasoning_effort,
+                        "mcp_server": args.codex_mcp_server_json,
+                        "timeout_seconds": max(1.0, args.timeout_seconds - 5.0),
+                    }
+                    if strict_goal_admission is not None:
+                        options["goal_admission"] = strict_goal_admission
+                    return run_codex_cli_host(request, **options)
 
                 host_runner = run_built_in_host
 
                 def resolve_built_in_session_binding(
                     turn_envelope: Mapping[str, Any],
                 ) -> dict[str, str] | None:
-                    return codex_cli_session_binding(runtime_root, turn_envelope)
+                    return (
+                        codex_cli_session_binding(
+                            runtime_root,
+                            turn_envelope,
+                            goal_admission=strict_goal_admission,
+                        )
+                        if strict_goal_admission is not None
+                        else codex_cli_session_binding(
+                            runtime_root,
+                            turn_envelope,
+                        )
+                    )
 
                 session_binding_resolver = resolve_built_in_session_binding
             elif args.host == "dsh":
                 host_runner = build_dsh_host_runner(
                     args,
                     workspace=project,
+                    environ=operator_environ,
                 )
 
             def post_settlement_reward_memory(
@@ -1051,6 +1037,24 @@ def handle_turn_command(
                     settlement_evidence=settlement_evidence,
                 )
 
+            def on_managed_start_admitted() -> None:
+                ensure_turn_heartbeat_settlement_receipt(
+                    runtime_root,
+                    settlement_identity,
+                    semantic_replan_guard_scoped=replan_guard_scoped,
+                    semantic_replan_obligation_id=replan_obligation_id,
+                )
+
+            managed_cadence = managed_cadence_start(
+                runtime_root=runtime_root,
+                goal_id=args.goal_id,
+                agent_id=args.agent_id,
+                automation_id=args.automation_id,
+                manual_reason=args.manual_interval_bypass_reason,
+                on_admitted=on_managed_start_admitted,
+            )
+
+            execution_started = bool(args.execute)
             payload = run_loopx_turn_once(
                 payload,
                 host_argv=raw_argv,
@@ -1079,32 +1083,27 @@ def handle_turn_command(
                     if args.execute and args.host == "codex-cli"
                     else None
                 ),
+                admit_start=managed_cadence.admit if args.execute else None,
+                confirm_start=managed_cadence.confirm if args.execute else None,
+                goal_admission=strict_goal_admission,
             )
         else:
             raise ValueError("turn requires the `plan` or `run-once` subcommand")
     except Exception as exc:  # noqa: BLE001 - CLI boundary renders typed JSON failure
-        payload = {
-            **({"error_code": exc.code, **getattr(exc, "payload", {})} if isinstance(getattr(exc, "code", None), str) else {}),
-            "ok": False,
-            "schema_version": (
-                LOOPX_TURN_EXECUTION_SCHEMA_VERSION
-                if args.turn_command == "run-once"
-                else "loopx_turn_plan_v0"
-            ),
-            "mode": "run_once" if args.turn_command == "run-once" else "plan",
-            "error": str(exc),
-            "effects": {
-                "host_invoked": False,
-                "state_written": False,
-                "scheduler_acknowledged": False,
-                "quota_spent": False,
-            },
-            **(
-                {"recovery_decision": exc.decision}
-                if isinstance(exc, TurnRecoveryBlockedError)
-                else {}
-            ),
-        }
+        journal_readback = None
+        if execution_started:
+            transaction = payload.get("transaction") or {}
+            try:
+                journal_readback = inspect_loopx_turn_journal(
+                    runtime_root, goal_id=args.goal_id, agent_id=args.agent_id,
+                    turn_key=str(transaction.get("turn_key") or ""),
+                )
+            except Exception:  # noqa: BLE001 - retain original error and unknown effects
+                pass
+        payload = build_turn_error_payload(
+            payload, exc, turn_command=args.turn_command,
+            execution_started=execution_started, journal_readback=journal_readback,
+        )
     renderer = (
         _render_loopx_turn_execution_markdown
         if args.turn_command == "run-once"

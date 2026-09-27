@@ -2,7 +2,16 @@ import type { WorkspaceGoal } from "./personal-workspace-model";
 import { useWorkspaceI18n } from "./i18n";
 
 export function GoalAcceptanceObservationCard({ goal }: { goal: WorkspaceGoal }) {
-  const { t } = useWorkspaceI18n();
+  const { t, locale } = useWorkspaceI18n();
+  const checkLabels = locale === "zh-CN" ? {
+    checkpoint_satisfied: "检查点满足", checkpoint_fresh: "检查点有效",
+    path_outcome_valid: "路径决策有效", evidence_refs_present: "证据引用齐全",
+    final_outcome_claim_present: "最终成果声明齐全", no_reported_outcome_gap: "无已报告成果缺口",
+  } : {
+    checkpoint_satisfied: "Checkpoint satisfied", checkpoint_fresh: "Checkpoint current",
+    path_outcome_valid: "Valid path decision", evidence_refs_present: "Evidence refs present",
+    final_outcome_claim_present: "Final outcome claim present", no_reported_outcome_gap: "No reported outcome gap",
+  };
   const labels = {
     connected: t("acceptance.connected"), mapped: t("acceptance.mapped"), refreshed: t("acceptance.refreshed"),
     adapter_inspected: t("acceptance.inspected"), run_recorded: t("acceptance.recorded"), reward_judged: t("acceptance.judged"),
@@ -20,6 +29,10 @@ export function GoalAcceptanceObservationCard({ goal }: { goal: WorkspaceGoal })
       <h4>{t("acceptance.gaps")}</h4>
       {projection.acceptance_gaps.length ? projection.acceptance_gaps.map((gap, index) => <div className="personal-acceptance-observation" key={`${gap.kind}:${gap.owner}:${index}`}>
         <p>{gap.reason ?? t("acceptance.reasonUnknown")}</p>
+        {gap.resolution_hint ? <p>{gap.resolution_hint}</p> : null}
+        {gap.component_checks ? <div>{Object.entries(gap.component_checks).map(([key, passed]) =>
+          <p key={key}>{checkLabels[key as keyof typeof checkLabels]}: {locale === "zh-CN" ? (passed ? "通过" : "未通过") : (passed ? "Passed" : "Failed")}</p>
+        )}</div> : null}
         <dl><div><dt>{t("common.owner")}</dt><dd>{gap.owner ?? t("acceptance.unknown")}</dd></div>
           <div><dt>{t("acceptance.required")}</dt><dd>{gap.evidence_required ?? t("acceptance.unknown")}</dd></div>
           <div><dt>{t("acceptance.observed")}</dt><dd>{gap.observed_at ?? t("acceptance.unknown")}</dd></div></dl>

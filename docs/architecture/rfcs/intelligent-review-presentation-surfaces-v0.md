@@ -1,6 +1,7 @@
 # RFC: Intelligent Review and Dynamic Presentation Surfaces v0
 
-- Status: Draft, under maintainer review
+- Status: Accepted
+- Supersedes / closes: none
 - Proposed by: LoopX maintainers
 - Date: 2026-09-01
 - Scope: a provider-neutral typed interaction projection that selects,
@@ -72,6 +73,18 @@ without hiding risk, authority, or degraded outcomes
 Minimizing attention does not mean minimizing information or removing human
 judgment. It means maximizing the decision value of each interruption and each
 visible screen:
+
+Each visible element must earn its place through **high-value information,
+essential interaction, or expressive visual presentation** (at least one).
+Evaluate the whole viewport, not isolated components. The canonical development
+and PR evidence workflow is [Earn The User's Attention](../../development/design.md#earn-the-users-attention).
+The bounded workspace application spans Goal conversations, manager home,
+overview, Tasks, outputs and Settings: one-step execution inspection; populated
+home lanes and change-only digests; compact progress and usage; short conversation
+receipts above the unchanged Kanban; output provenance in the existing drawer;
+and configuration consequences kept visible beside the existing preview/apply
+flow. Failures and uncertainty remain prominent. This presentation slice does
+not claim the shared interaction compiler or cross-channel projection is implemented.
 
 - routine, reversible, verified work should stay quiet or complete directly;
 - material progress should be legible without demanding a decision;
@@ -661,6 +674,101 @@ canonical facts, authority, evidence status, or whether an effect committed.
 Adaptive policies must be inspectable and resettable. Their outputs carry
 reason codes and preserve a deterministic fallback.
 
+### 8.7 Live team workspace
+
+[Live Team Workspace v0](live-team-workspace-v0.md) specifies the S5/R2 research
+journey: a command surface and spatial studio share typed facts with the list,
+semantic zoom and historical replay. Purposeful motion is a product objective;
+registration, execution, return, independent acceptance and requester adoption
+remain distinct. Preserve source/revision lineage and uncertainty; never infer
+activity from decorative motion or confidence from agreement counts. This is a
+Accepted design for a planned presentation slice; no shipped team stream or new scheduling authority is claimed.
+Its L1–L3 plan and V1–V7 acceptance extend this RFC's Stage 3 presentation journey;
+they do not close cross-channel or governed settlement acceptance here.
+
+### 8.8 Reusable conversation work surface
+
+**App-first continuation.** The [App/inbox integration design](app-conversation-and-async-inbox-v0.md)
+turns this surface into the working conversation for managed and attached
+LoopX Agents. Preserve the existing runtime binding and work lineage, show
+native steering versus next-Turn delivery honestly, and return artifacts here.
+Named conversations, compact owner/return lines and a dominant readable answer
+area take precedence over a dashboard of protocol fields. Lark uses the same
+facts after separate qualification; visual parity is not an App release blocker.
+The design includes the Lorca screenshot's observed hierarchy, its evidence
+limits, failure matrix and existing-owner refactor cadence.
+
+Steward Chat, Goal Chat, direct Agent conversations and their frontend/Lark
+projections share one interaction pattern. A short factual question deserves a
+direct answer and source; a complex investigation deserves a leading conclusion,
+readable Markdown report, evidence links, decisions and bounded uncertainty.
+Answer shape follows the task, not a compulsory four-section template. Complete
+answer bytes and a separately addressable report reference are preserved when
+the existing artifact owner supports one. Render model Markdown with an admitted
+safe subset; executable HTML is never accepted from answer text. Channel limits
+may change the presentation density, but cannot silently remove the conclusion
+or evidence path. A report attachment alone does not settle an answer obligation.
+
+The first delivery slice replaces the steward's fixed four-label instruction
+with a task-adaptive answer rule shared by Codex, managed and direct-model Chat
+Turns. The original conversation keeps the complete answer; Chat and report
+views share the same inert Markdown table renderer, while the steward readback
+records Markdown format and answer length rather than claiming answer quality.
+This does not yet establish qualitative live-model answer quality, a separately
+addressable versioned report for every investigation, or complete long-answer
+delivery across every external channel; those remain Stage 3 acceptance work.
+The next local Chat slice gives substantive, completed answers a stable reader
+link backed by the immutable saved Session message id. The reader reuses the
+safe Markdown renderer, preserves the original conversation in its own tab,
+and never starts another model Turn on open or reload. This is a local answer
+record, not a claim that every investigation has a separately governed report
+artifact; cross-channel delivery and report artifact ownership remain open.
+
+Project only real host events into a compact current-phase line and expandable
+history: accepted, queued, started, tool/public progress, waiting, interrupted,
+failed and completed. The final answer has priority; completed routine activity
+folds, while refusal, missing result and lost receiver remain visible. Preserve
+source message, admitted Turn, current continuation owner, event cursor and
+final-result identities separately. Reconnect and replay must neither start a
+second model Turn nor duplicate events or drop the final result. No adapter may
+claim tool activity it did not emit.
+
+Stop and correction bind the current session and Turn. An old control cannot
+affect a later Turn. Stop readback distinguishes actual interruption, already
+terminal and unsupported/refused. A busy correction is accepted as native
+in-Turn steering or explicitly queued for a later Turn with a recoverable ingress
+receipt; completion races and lost acknowledgements cannot silently discard it.
+Stopping a conversation Turn has no implicit effect on a delegated worker's
+Todo/lease or an outstanding return obligation. Frontend and Lark qualify the
+same identity, interruption, replay and audience-isolation cases at their own
+display densities. This shared contract reuses Chat/session, artifact, and
+presentation owners; it creates no second conversation store or scheduler.
+
+**Attention-oriented return.** The original conversation distinguishes requested
+results, routine progress and decisions needing the owner. Requested results
+return normally; unchanged progress folds into a digest; material decisions show
+the concrete object, recommendation, evidence and consequence of inaction.
+Keep deeper evidence and the responsible Agent's conversation directly reachable.
+A correction made there returns its relevant decision/work change to the steward
+through the same request lineage, without copying the entire private dialogue.
+Source coverage and unresolved work remain visible. An empty directory or a
+saved answer with failed delivery cannot be presented as a successful conclusion.
+
+Creation and first submission are part of this shared surface: preserve the
+message and its pending/failed state across navigation or reload, expose a safe
+retry/readback, and distinguish Goal created, Agent connected and work started.
+An optimistic disappearing composer is not an accepted request. The
+[golden-query pack](../../product/use-cases/steward/golden-queries.md) checks these
+entry states alongside the full conversation, in packaged frontend and each
+claimed channel; it does not specialize activity presentation to reports.
+
+Botmux is an interaction reference: its [live card](https://github.com/deepcoldy/botmux/blob/982e2c9f16e4f45ae2581967bc1a35a286e7bfa2/docs-site/docs/zh/cards.md)
+keeps final text ahead of collapsible recorded activity, its [session model](https://github.com/deepcoldy/botmux/blob/982e2c9f16e4f45ae2581967bc1a35a286e7bfa2/docs-site/docs/zh/session-model.md)
+distinguishes talk and operation rights, and its [Codex steering study](https://github.com/deepcoldy/botmux/blob/982e2c9f16e4f45ae2581967bc1a35a286e7bfa2/docs/design/2026-05-28-codex-type-ahead-steer-design.md)
+records merged versus separate replies under type-ahead. Stop support varies by
+backend. These public sources guide the race and display cases; they do not
+qualify LoopX adapters or require installing Botmux on an existing Lark token.
+
 ## 9. Coverage across the long-horizon lifecycle
 
 | Phase | Intelligent surface responsibility |
@@ -896,6 +1004,27 @@ deduplication. CLI and Lark contracts are unchanged.
 
 ### Stage 4: replan, acceptance, and settlement review
 
+The local Goal **Overview** delivery section composes the existing bounded
+`task_graph_projection_v0` and `goal_acceptance_observation_projection_v0` in
+one on-demand Chat read. It supports map/list layouts, search, direct-neighbor
+focus, current-source navigation and a Markdown snapshot export. Coverage,
+missing predecessors, omitted gates and unassessed acceptance remain explicit.
+Workspace changes invalidate navigation/export until refresh; failed reads and
+source/Goal mismatch never become empty success. Outputs retain their existing Files owner and are not exported as acceptance evidence.
+Overview, Tasks, Chat and Files are direct Goal navigation; configuration opens
+the existing settings editor. Visited views retain filters, completed history
+and scroll within the same Goal/source. The delivery section is inline in
+Overview, not a third board/list layout or nested settings modal.
+
+This is a bounded S5/G2 visibility slice, not G2 qualification or a general
+interaction compiler. It reuses existing graph, acceptance and preview/apply
+owners; it creates no task, lease, permission or acceptance writer. CLI readback
+retains the same projections. Lark's existing Goal Channel is unchanged;
+cross-channel review rendering and governed amendment/settlement interaction
+remain the next domain-owned boundary in this tracker. Validation:
+`tests/test_delivery_review.py`, Dashboard `smoke:delivery-review`, and real
+packaged-browser interaction in both locales and narrow/desktop layouts.
+
 - add domain adapters for material replan delta, acceptance gaps, and effect
   repair state;
 - keep each domain reducer authoritative;
@@ -971,6 +1100,14 @@ Measure both attention cost and outcome quality:
 - model-advice override, hallucination, over-escalation, and dangerous
   suppression rates.
 
+The [golden-query evaluation](../../product/use-cases/steward/golden-queries.md)
+operationalizes these measures with paired baseline/candidate tasks and separate
+per-surface results. Count avoidable finding/context/repetition/chasing/relay work;
+report legitimate authorization, goal changes and voluntary learning separately.
+Include failed/abandoned attempts and unknown cost/coverage. Silence, a short
+answer or fewer messages alone cannot improve the score. All live case outcomes
+remain unqualified until their independent evidence exists.
+
 Reducing clicks while lowering accepted outcome quality is a regression, not a
 success.
 
@@ -1025,7 +1162,7 @@ success.
 
 ## 18. Acceptance criteria for this RFC
 
-The RFC may move beyond Draft when maintainers agree on:
+Merge accepts this design basis. Implementation qualification still covers:
 
 1. the projection-only authority boundary;
 2. the closed interaction modes and precedence;

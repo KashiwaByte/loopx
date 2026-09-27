@@ -340,7 +340,7 @@ stateDiagram-v2
 | --- | --- | --- | --- |
 | `run_now` | `active_work` | 3 / 10 minutes | Work or repair must be attempted. |
 | `backoff_waiting_for_user` | `human_gate` | 30 / 120 minutes | Concrete user/controller action is next. |
-| `backoff_until_reassigned` | `agent_scope_wait` | 10 / 60 minutes, progression 10/20/30/60 | Handoff owner or reassignment may unblock this agent. |
+| `backoff_until_reassigned` | `agent_scope_wait` or `peer_coordination_wait` | 10 / 60 minutes, progression 10/20/30/60 | Handoff owner, peer readiness, coordinator configuration, reassignment, or new local work may unblock this agent. |
 | `backoff_until_material_transition` | `monitor_wait` | 15 / 60 minutes | Monitor-only liveness without compute spend. |
 | `backoff_until_fresh_evidence` | `unchanged_noop` | 60 / 240 minutes | Wait for fresh mapped or post-handoff evidence. |
 | `backoff_until_state_change` | `quiet_wait` | 30 / 120 minutes | No specific user/monitor path is projected. |
@@ -474,12 +474,18 @@ The same ordering applies when an agent records a bounded
 as a goal-frontier `acceptance_gaps[]` entry. If no advancement frontier remains,
 the gap becomes a replan trigger before the lane can quietly back off.
 
-Long runnable lanes also pass through this machine. When the current agent can
-select about 15 advancement todos, or about 20 open todos with advancement work
-still present, quota should trigger a bounded vision replan before continuing
-linearly. The replan reads the agent-scoped evidence log, uses bounded public
+Long runnable lanes also pass through this machine. When the current agent owns
+at least 15 open advancement todos, quota should trigger a bounded vision replan
+before continuing linearly. The replan reads the agent-scoped evidence log, uses bounded public
 research when local evidence is insufficient for a public claim, then groups,
 prunes, or reprioritizes the chain into the next high-value runnable slice.
+Shared unclaimed candidates remain selectable but do not count toward this lane
+threshold. Continuous monitors also do not count: their due schedules and
+no-change review rules remain independent, and the former 20-claimed-open
+threshold no longer creates new Agent-lane obligations. Historical checkpoints
+remain readable. A valid evidence-linked vision path can retain existing runnable
+work and settle the projected Turn without adding another planning Todo. Shared-pool
+churn preserves its obligation identity; owned material changes rearm it.
 
 The same ordering also applies to `vision_checkpoint_v0`: if a role records
 material progress but omits both a vision patch and an unchanged/no-follow-up

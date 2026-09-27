@@ -13,10 +13,13 @@ import { FileAuthorityStore } from "../../loopx/control_plane/coordination/file_
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import { authorityStoreCommitFixture } from "./authority_store_conformance.ts";
-import * as runtime from "../../loopx/control_plane/coordination/local_authority_runtime.ts";
+import * as mutations from "../../loopx/control_plane/coordination/local_authority_runtime.ts";
+import * as reads from "../../loopx/control_plane/coordination/local_authority_read.ts";
+const runtime = {...mutations, ...reads};
 import { qualifiedShadow, promotionRequest, engageFence } from "./local_promotion_fixture.ts";
 import { loadLegacyCoordinationWriterFence, legacyCoordinationWriterFencePath } from "../../loopx/control_plane/coordination/legacy_writer_fence.ts";
-import { acknowledgeLocalCoordinationTodoArchive, archiveLocalCoordinationTodos, listLocalCoordinationTodos, mutateLocalCoordinationAuthority } from "../../loopx/control_plane/coordination/local_authority_runtime.ts";
+import {acknowledgeLocalCoordinationTodoArchive, archiveLocalCoordinationTodos} from "../../loopx/control_plane/coordination/local_authority_runtime.ts";
+import {listLocalCoordinationTodos} from "../../loopx/control_plane/coordination/local_authority_read.ts";
 
 for (const [fault, source, reason] of [
   ["database_missing", "sqlite_v0", "local_authority_provider_missing"],
@@ -30,6 +33,8 @@ for (const [fault, source, reason] of [
 ] as const) {
   test(`selected provider ${fault} has accurate failure across runtime entrypoints and no fallback`, async t => {
     const directory = await root(t);
+    await writeFile(join(directory, "registry.json"), "{}");
+    await writeFile(join(directory, "ACTIVE_GOAL_STATE.md"), "# Synthetic source\n");
     await selectLocalSqliteAuthority(directory, "goal-a", true);
     const store = await openLocalAuthorityStore(directory, "goal-a");
     assert.ok(store instanceof SqliteAuthorityStore);
@@ -77,7 +82,6 @@ for (const [fault, source, reason] of [
     // Even an existing fence cannot be claimed as verified if opening fails
     // first. Its independent existence does not replace this call's readback.
     const promotion = promotionRequest(directory, {}, "file:synthetic:1");
-    await writeFile(join(directory, "ACTIVE_GOAL_STATE.md"), "# Synthetic source\n");
     await engageFence(promotion);
     const fenced = await loadLegacyCoordinationWriterFence(directory, "goal-a");
     assert.equal(fenced.status, "loaded");
@@ -94,11 +98,17 @@ for (const [fault, source, reason] of [
 // Valid transport to each owning runtime entrypoint; failed opening must be
 // independent of dry-run, command family, and the caller's requested mutation.
 function providerCalls(directory: string, revision: string, dryRun: boolean) {
-  const input = {runtime_root: directory, goal_id: "goal-a", todo_id: "todo-a", role: "agent",
-    operation_id: "open-failure", expected_provider_revision: revision, dry_run: dryRun,
+  const updateInput = {runtime_root: directory, goal_id: "goal-a", todo_id: "todo-a", role: "agent",
+    operation_id: "open-failure", dry_run: dryRun,
     registered_agents: ["agent-a"], actor_agent_id: "agent-a", claimed_by: "agent-a",
-    observed_at: "2026-09-08T01:00:00Z", clear_fields: [], patch: {text: "Correction"},
+    observed_at: "2026-09-08T01:00:00Z", clear_fields: [], patch: {text: "Correction"}};
+  // Legacy update requests must reach provider opening without v2-only fields.
+  const input = {...updateInput, expected_provider_revision: revision,
     lifecycle_grants: [], successor_intents: [], linked_successor_todo_ids: []};
+  // Current transports must reach the same provider boundary with a valid
+  // witness; keep it out of legacy requests, which intentionally reject it.
+  const witnessed = {...input, registry_source: {path: join(directory, "registry.json"),
+    sha256: createHash("sha256").update("{}").digest("hex")}};
   type Entrypoint = {[K in keyof typeof runtime]: typeof runtime[K] extends
     (value: unknown) => Promise<unknown> ? K : never}[keyof typeof runtime];
   // A new exported runtime action must deliberately enter this failure matrix.
@@ -106,19 +116,60 @@ function providerCalls(directory: string, revision: string, dryRun: boolean) {
     observeLocalCoordinationOwnership: [{...input, schema_version: "loopx_local_ownership_observation_request_v0"}],
     listLocalCoordinationTodos: [{...input, schema_version: runtime.LOCAL_COORDINATION_TODO_LIST_REQUEST_SCHEMA}],
     readLocalCoordinationTodo: [{...input, schema_version: runtime.LOCAL_COORDINATION_TODO_READ_REQUEST_SCHEMA}],
-    mutateLocalCoordinationAuthority: [{...input, schema_version: runtime.LOCAL_COORDINATION_MUTATION_REQUEST_SCHEMA,
-      mutations: [{kind: "todo_remove", todo_id: "todo-a"}]}],
-    createLocalCoordinationTodo: [{...input, schema_version: "loopx_local_coordination_todo_create_request_v0", todo: {}}],
-    claimLocalCoordinationTodo: [{...input, schema_version: runtime.LOCAL_COORDINATION_TODO_CLAIM_REQUEST_SCHEMA}],
+    readLocalCoordinationOperationReceipt: [{
+      runtime_root: directory,
+      goal_id: "goal-a",
+      schema_version: "loopx_local_coordination_operation_receipt_request_v0",
+      operation_id: "open-failure",
+    }],
+    createLocalCoordinationTodo: [
+      {...input, schema_version: runtime.LOCAL_COORDINATION_TODO_CREATE_REQUEST_SCHEMA, todo: {}},
+      {...witnessed, schema_version: runtime.LOCAL_COORDINATION_TODO_CREATE_WITNESSED_REQUEST_SCHEMA, todo: {}}],
+    claimLocalCoordinationTodo: [
+      {...input, schema_version: runtime.LOCAL_COORDINATION_TODO_CLAIM_REQUEST_SCHEMA},
+      {...witnessed, schema_version: runtime.LOCAL_COORDINATION_TODO_CLAIM_WITNESSED_REQUEST_SCHEMA}],
     updateLocalCoordinationTodo: [
-      {...input, schema_version: "loopx_local_coordination_todo_update_request_v0"},
-      {...input, schema_version: "loopx_local_coordination_todo_update_request_v1", planning_intent: {status: "blocked"}}],
-    editLocalCoordinationTodo: [input],
-    terminalLifecycleLocalCoordinationTodo: [{...input, schema_version: runtime.LOCAL_COORDINATION_TODO_TERMINAL_LIFECYCLE_REQUEST_SCHEMA}],
+      {...updateInput, schema_version: "loopx_local_coordination_todo_update_request_v0"},
+      {...updateInput, schema_version: "loopx_local_coordination_todo_update_request_v1", planning_intent: {status: "blocked"}},
+      {...witnessed, schema_version: "loopx_local_coordination_todo_update_request_v2"}],
+    terminalLifecycleLocalCoordinationTodo: [
+      (() => {
+        const {operation_id, ...terminal} = witnessed;
+        return {...terminal, schema_version: runtime.LOCAL_COORDINATION_TODO_TERMINAL_LIFECYCLE_REQUEST_SCHEMA,
+          command: "complete", operation_identity: {kind: "explicit", operation_id}};
+      })()],
     archiveLocalCoordinationTodos: [{...input, schema_version: runtime.LOCAL_COORDINATION_TODO_ARCHIVE_REQUEST_SCHEMA, max_active_done: 0}],
     acknowledgeLocalCoordinationTodoArchive: [{...input, schema_version: runtime.LOCAL_COORDINATION_TODO_ARCHIVE_ACK_REQUEST_SCHEMA}],
+    executeReviewedCoordinationPromotion: [{
+      schema_version:"loopx_reviewed_coordination_promotion_operation_v0",action:"recover",
+      runtime_root:directory,goal_id:"goal-a",execute:!dryRun,
+      reviewed_plan:{schema_version:"loopx_reviewed_coordination_promotion_v0",
+        promotion_plan_sha256:runtime.localCoordinationPromotionPlanSha256(promotionRequest(directory,{},"file:synthetic:1")),
+        request:promotionRequest(directory,{},"file:synthetic:1")},
+    }],
     promoteLocalCoordinationAuthority: [promotionRequest(directory, {}, "file:synthetic:1")],
-    pollLocalCoordinationMonitor: [{...input, schema_version: "loopx_coordination_monitor_poll_request_v0", observation: {}, intent: {}}],
+    reviewLocalCoordinationAuthorityPromotion: [{
+      schema_version: runtime.LOCAL_COORDINATION_PROMOTION_REVIEW_REQUEST_SCHEMA,
+      runtime_root: directory,
+      goal_id: "goal-a",
+      operation_id: "promote:goal-a:reviewed",
+      projection: {},
+      source_snapshot: {
+        state_path: join(directory, "ACTIVE_GOAL_STATE.md"),
+        registered_runtime_root: directory,
+        registered_state_path: join(directory, "ACTIVE_GOAL_STATE.md"),
+        state_bytes_sha256: `sha256:${"0".repeat(64)}`,
+        lease_inventory: [],
+        projection_sha256: `sha256:${"0".repeat(64)}`,
+        evidence_files: [],
+      },
+      minimum_operations: 1,
+      required_event_kinds: [],
+      execute: !dryRun,
+    }],
+    pollLocalCoordinationMonitor: [
+      {...input, schema_version: "loopx_coordination_monitor_poll_request_v0", observation: {}, intent: {}},
+      {...witnessed, schema_version: "loopx_coordination_monitor_poll_request_v2", observation: {}, intent: {}}],
     continueLocalTodo: [{...input, schema_version: "loopx_local_coordination_todo_continuation_request_v0",
       todo_id: "todo-a", agent_id: "agent-a", session_id: "session-1", action: "inspect",
       registered_agents: ["agent-a", "agent-b"]}],
@@ -313,16 +364,32 @@ for (const provider of ["file", "sqlite"] as const) {
       const directory = await root(t);
       if (provider === "sqlite") await selectLocalSqliteAuthority(directory, "goal-a", true);
       const canonical = await openLocalAuthorityStore(directory, "goal-a");
-      const shadow = await qualifiedShadow(directory);
+      const shadow = await qualifiedShadow(directory, "hard_lease");
       const shadowStore = new FileAuthorityStore(join(directory, "authority-shadow", "file-v0"), "goal-a");
-      const request = promotionRequest(directory, shadow.projection, shadow.providerRevision);
+      const canonicalAuthority = provider === "sqlite" ? "sqlite_v0" : "file_v0";
+      const request = promotionRequest(
+        directory,
+        shadow.projection,
+        shadow.providerRevision,
+        canonicalAuthority,
+      );
       if (phase === "shadow_invalid") {
         // A valid store row can still contain an invalid domain projection.
         const projection = {...shadow.projection, goal_id: "different-goal"};
         const committed = await shadowStore.commitAuthority({operation_id: "invalid-domain",
           expected_provider_revision: shadow.providerRevision, next_projection: projection, receipts: [], events: []});
         assert.equal(committed.status, "applied"); if (committed.status !== "applied") return;
-        Object.assign(request, promotionRequest(directory, projection, committed.provider_revision));
+        Object.assign(request, promotionRequest(
+          directory,
+          projection,
+          committed.provider_revision,
+          canonicalAuthority,
+        ));
+      }
+      if (phase === "qualification") {
+        // An otherwise valid fenced source has only one verified mutation.
+        request.minimum_operations = 2;
+        request.writer_fence.promotion_plan_sha256 = runtime.localCoordinationPromotionPlanSha256(request);
       }
       if (phase !== "fence_missing") await engageFence(request);
       const fencePath = legacyCoordinationWriterFencePath(directory, "goal-a");
@@ -338,7 +405,9 @@ for (const provider of ["file", "sqlite"] as const) {
           operation_id: request.operation_id, goal_id: request.goal_id,
           source_shadow_provider_revision: request.expected_shadow_provider_revision,
           source_projection_sha256: request.expected_shadow_projection_sha256,
-          writer_fence_id: request.writer_fence.fence_id, source_version: request.writer_fence.source_version};
+          writer_fence_id: request.writer_fence.fence_id,
+          source_version: request.writer_fence.source_version,
+          promotion_plan_sha256: request.writer_fence.promotion_plan_sha256};
         const seeded = await canonical.commitAuthority({operation_id: phase === "receipt_missing" ? "other-operation" : request.operation_id,
           expected_provider_revision: null, next_projection: phase === "lineage_mismatch" ?
             {...shadow.projection, extra: "different snapshot"} : shadow.projection,

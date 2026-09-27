@@ -70,6 +70,8 @@ def write_monitor_poll_todo_state(
     next_user_task_class: str | None = None,
     next_claimed_by: str | None = None,
     agent_id: str | None = None,
+    task_lease_idempotency_key: str | None = None,
+    task_lease_expected_version: int | None = None,
 ) -> dict[str, Any] | None:
     """Apply one monitor poll observation as a complete Todo writeback.
 
@@ -86,13 +88,19 @@ def write_monitor_poll_todo_state(
         require_legacy_coordination_write_allowed,
     )
 
+    lease_proof = ({"idempotency_key": task_lease_idempotency_key,
+                    "expected_version": task_lease_expected_version}
+                   if task_lease_idempotency_key is not None or task_lease_expected_version is not None else None)
     if not todo_id and not target_key:
+        if lease_proof is not None:
+            raise ValueError("lease proof requires a Monitor target")
         return None
     from .provider_monitor_poll import poll_canonical_monitor_if_promoted
 
     canonical = poll_canonical_monitor_if_promoted(
         registry_path=registry_path, runtime_root=runtime_root, goal_id=goal_id,
         execute=execute, monitor_effect_id=monitor_effect_id, agent_id=agent_id,
+        lease_proof=lease_proof,
         observation={"todo_id": todo_id, "target_key": target_key,
             "result_hash": result_hash, "material_change": material_change,
             "generated_at": generated_at, "cadence": cadence,
@@ -106,6 +114,8 @@ def write_monitor_poll_todo_state(
     )
     if canonical is not None:
         return canonical
+    if lease_proof is not None:
+        raise ValueError("Monitor lease proof requires promoted canonical authority; no legacy write attempted")
     if execute:
         require_legacy_coordination_write_allowed(
             runtime_root=runtime_root,

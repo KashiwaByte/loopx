@@ -24,11 +24,6 @@ from loopx.control_plane.testing.cli_output_budget import (
     measure_cli_output,
     public_manifest,
 )
-from loopx.event_sourced_state import (
-    AppendOnlyStateEventStore,
-    TODO_ADDED,
-    make_state_event,
-)
 from loopx.heartbeat_prompt import build_heartbeat_prompt
 from loopx.help_surface import COMMAND_GROUPS
 from loopx.rollout_event_log import rollout_event_log_path
@@ -309,48 +304,6 @@ def _write_todo_list_limit_stress_fixture(state_file: Path) -> None:
     state_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_todo_list_limit_overlay_stress_fixture(state_file: Path) -> None:
-    lines = [
-        "---",
-        "status: active",
-        "updated_at: 2026-01-01T00:00:00+00:00",
-        "---",
-        "",
-        "# Todo List Limit Overlay Stress Fixture",
-        "",
-        "## Agent Todo",
-        "",
-    ]
-    for index in range(3_000):
-        lines.extend(
-            [
-                f"- [ ] Observe overlay lineage {index:04d}.",
-                (
-                    "  <!-- loopx:todo "
-                    f"todo_id=todo_overlay_{index:04d} status=open "
-                    "task_class=continuous_monitor "
-                    f"action_kind=observe_{index % 4} claimed_by=codex-alpha -->"
-                ),
-            ]
-        )
-    state_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    store = AppendOnlyStateEventStore(state_file.with_name("events.jsonl"))
-    store.append(
-        make_state_event(
-            event_id="evt-limit-overlay",
-            goal_id=GOAL_ID,
-            event_type=TODO_ADDED,
-            refs={"todo_id": "todo_overlay_0000"},
-            payload={
-                "role": "agent",
-                "title": "Overlay the first advancement step.",
-                "task_class": "continuous_monitor",
-                "claimed_by": AGENT_IDS[0],
-            },
-            recorded_at="2026-01-01T00:00:00Z",
-            producer="todo-list-limit-overlay-budget",
-        )
-    )
 
 
 def _invoke_cli(args: list[str]) -> tuple[int, str]:
@@ -729,6 +682,8 @@ def _mode_variant_commands(
         + [
             "turn",
             "run-once",
+            "--host",
+            "generic-cli",
             "--goal-id",
             GOAL_ID,
             "--agent-id",
@@ -1090,6 +1045,22 @@ def test_quota_cli_bounds_real_scale_vision_audit_and_keeps_cold_detail(
     )
     assert "registry_read_instruction" not in compact_audit["vision_gap_judge"]
     assert "registry_read_instruction" in detailed_audit["vision_gap_judge"]
+    compact_replan = default_payload["replan_action_packet"]
+    detailed_replan = detail_payload["replan_action_packet"]
+    assert compact_replan["payload_compaction"] == {
+        "schema_version": "quota_cli_replan_action_compaction_v0",
+        "mode": "compact_hot_path",
+        "compacted_fields": ["writeback_contract.vision_authoring"],
+        "full_detail_cold_path": "quota should-run --include-detail vision",
+    }
+    assert "vision_authoring" not in compact_replan["writeback_contract"]
+    assert compact_replan["writeback_contract"]["vision_authoring_detail_ref"] == (
+        "quota should-run --include-detail vision"
+    )
+    assert detailed_replan["writeback_contract"]["vision_authoring"][
+        "schema_version"
+    ] == "goal_vision_replan_contract_v0"
+    assert "payload_compaction" not in detailed_replan
     assert default_payload["goal_frontier_projection"][
         "vision_continuation_audit"
     ]["projection_ref"] == "$.vision_continuation_audit"
@@ -1122,6 +1093,38 @@ def test_quota_cli_bounds_real_scale_vision_audit_and_keeps_cold_detail(
     assert default_interaction["cli_channel"]["next_cli_actions"] == (
         detail_interaction["cli_channel"]["next_cli_actions"]
     )
+
+
+def test_crowded_turn_plan_budget_preserves_executable_vision_authoring(
+    tmp_path: Path,
+) -> None:
+    with _stable_budget_fixture_root(tmp_path / "turn-plan-vision") as stable_root:
+        project, runtime, registry_path, state_file = _write_fixture(
+            stable_root,
+            SCENARIOS[1],
+        )
+        command = _surface_commands(
+            project=project,
+            runtime=runtime,
+            registry_path=registry_path,
+            state_file=state_file,
+            output_format="json",
+        )["loopx_turn_plan"]
+        exit_code, text = _invoke_cli(command)
+
+    assert exit_code == 0, text
+    payload = json.loads(text)
+    writeback = payload["turn_envelope"]["replan_action_packet"][
+        "writeback_contract"
+    ]
+    assert "path_delta.evidence_refs" in writeback["required_fields"]
+    assert writeback["vision_authoring"]["schema_version"] == (
+        "goal_vision_replan_contract_v0"
+    )
+    # This fixed executable schema legitimately crosses the old 12k/320
+    # ceiling; retain bounded headroom without relaxing Todo-scale growth.
+    assert 12_000 < len(text) <= 14_500
+    assert len(text.splitlines()) <= 400
 
 
 def test_quota_cli_keeps_full_user_todo_diagnostics_on_explicit_cold_path(
@@ -1411,10 +1414,33 @@ def test_collection_growth_and_bootstrap_duplication_are_explicit(tmp_path: Path
             crowded[spec.surface_id]["json"]["chars"]
             - small[spec.surface_id]["json"]["chars"]
         )
-        assert growth <= spec.max_json_growth_chars_per_unit * units, (
+        fixed_semantic_growth = spec.max_json_fixed_semantic_growth_chars
+        if fixed_semantic_growth:
+            assert spec.surface_id == "loopx_turn_plan"
+            small_packet = small[spec.surface_id]["json"]["payload"][
+                "turn_envelope"
+            ].get("replan_action_packet")
+            crowded_packet = crowded[spec.surface_id]["json"]["payload"][
+                "turn_envelope"
+            ]["replan_action_packet"]
+            small_writeback = (
+                small_packet.get("writeback_contract")
+                if isinstance(small_packet, dict)
+                else None
+            )
+            assert not isinstance(small_writeback, dict) or not isinstance(
+                small_writeback.get("vision_authoring"), dict
+            )
+            assert isinstance(
+                crowded_packet["writeback_contract"]["vision_authoring"], dict
+            )
+        assert growth <= (
+            spec.max_json_growth_chars_per_unit * units + fixed_semantic_growth
+        ), (
             spec.surface_id,
             growth,
             units,
+            fixed_semantic_growth,
         )
 
     start_payload = small["start_goal_guided"]["json"]["payload"]
@@ -1663,44 +1689,6 @@ def test_todo_list_explicit_limit_bounds_monitor_and_blocker_lanes(
     }
 
 
-def test_todo_list_explicit_limit_bounds_projection_overlay_ids(
-    tmp_path: Path,
-) -> None:
-    with _stable_budget_fixture_root(
-        tmp_path / "todo-list-limit-overlay",
-    ) as stable_root:
-        project, runtime, registry_path, state_file = _write_fixture(
-            stable_root,
-            SCENARIOS[1],
-        )
-        _write_todo_list_limit_overlay_stress_fixture(state_file)
-        command = _mode_variant_commands(
-            project=project,
-            runtime=runtime,
-            registry_path=registry_path,
-            state_file=state_file,
-            output_format="json",
-        )["todo_list_limited"]
-        exit_code, text = _invoke_cli(command)
-
-    assert exit_code == 0, text
-    spec = CLI_OUTPUT_MODE_VARIANT_BY_ID["todo_list_limited"]
-    measurement = measure_cli_output(text, output_format="json")
-    assert_cli_output_mode_variant(
-        spec,
-        output_format="json",
-        text=text,
-        measurement=measurement,
-    )
-    payload = json.loads(text)
-    overlay = payload["projection_overlay"]
-    assert overlay["markdown_only_count"] == 2_999
-    assert overlay["event_only_count"] == 0
-    assert overlay["overlaid_count"] == 1
-    assert overlay["full_detail_cold_path"] == (
-        "todo list without --limit or active state"
-    )
-    assert [key for key in overlay if key.endswith("_todo_ids")] == []
 
 
 def test_turn_envelope_cli_preserves_codex_app_scheduler_binding(

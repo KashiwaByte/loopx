@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep public workflows on official Actions with a native Node 24 runtime."""
+"""Keep public workflows on official Actions with qualified Node runtimes."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ NODE24_ACTION_MAJORS = {
 }
 
 PRIMARY_NODE_VERSION = "24"
-MINIMUM_NODE_VERSION = "22.18.0"
+MINIMUM_NODE_VERSION = "22.22.3"
 MINIMUM_NODE_ACTION_VERSION = MINIMUM_NODE_VERSION
 FORWARD_NODE_VERSION = "26"
 # SQLite needs both synchronous statement finalization and the WAL-reset fix.
@@ -63,11 +63,19 @@ def main() -> int:
     for name, versions in declared_versions.items():
         if not versions:
             continue
-        expected = (
-            {PRIMARY_NODE_VERSION, MINIMUM_NODE_ACTION_VERSION, FORWARD_NODE_VERSION, SQLITE_NODE_VERSION}
-            if name == "python-tests.yml"
-            else {PRIMARY_NODE_VERSION}
-        )
+        if name == "python-tests.yml":
+            expected = {
+                PRIMARY_NODE_VERSION,
+                MINIMUM_NODE_ACTION_VERSION,
+                FORWARD_NODE_VERSION,
+                SQLITE_NODE_VERSION,
+            }
+        elif name == "postgresql-integration.yml":
+            # The authority ladder drives the same kernel runtime as the
+            # SQLite-dependent jobs, so it pins the one qualified 22.x build.
+            expected = {PRIMARY_NODE_VERSION, SQLITE_NODE_VERSION}
+        else:
+            expected = {PRIMARY_NODE_VERSION}
         assert set(versions) <= expected, (name, versions)
 
     python_versions = declared_versions["python-tests.yml"]
@@ -80,8 +88,12 @@ def main() -> int:
         r"^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
         python_workflow, re.MULTILINE | re.DOTALL,
     ))
-    for name in ("kernel-static-checks", "dashboard-acceptance", "windows-powershell"):
+    for name in ("typescript-core", "node-minimum-compatibility", "dashboard-acceptance", "windows-powershell"):
         assert SQLITE_NODE_VERSION in node_version_pattern.findall(jobs[name]), name
+    postgresql_versions = node_version_pattern.findall(
+        workflows["postgresql-integration.yml"]
+    )
+    assert postgresql_versions == [SQLITE_NODE_VERSION], postgresql_versions
     assert "node-forward-compatibility:" in python_workflow
     assert "continue-on-error: true" in python_workflow
     assert "needs: [changes, checks, pytest, node-minimum-compatibility," in python_workflow
@@ -89,7 +101,10 @@ def main() -> int:
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     assert package["engines"]["node"] == f">={MINIMUM_NODE_VERSION}"
 
-    print("github-actions-runtime-smoke ok: Node 24 primary, 22.18 minimum, 26 forward")
+    print(
+        "github-actions-runtime-smoke ok: Node 24 primary, "
+        "22.22.3 minimum and SQLite/authority reference, 26 forward"
+    )
     return 0
 
 

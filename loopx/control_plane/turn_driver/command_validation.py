@@ -122,7 +122,7 @@ def build_loopx_turn_command_validator(
                 normalized,
                 cwd=project,
                 input=json.dumps(result, ensure_ascii=False, separators=(",", ":")),
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=max(1.0, timeout_seconds),

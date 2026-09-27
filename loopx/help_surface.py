@@ -30,6 +30,10 @@ COMMAND_GROUPS: list[dict[str, object]] = [
                 "purpose": "Print a local first-run receipt and an optional public feedback issue link.",
             },
             {
+                "command": "loopx usage-ping [status|enable|disable]",
+                "purpose": "Show or change the default-on basic usage statistics and its exact payload.",
+            },
+            {
                 "command": "loopx slash-commands --install",
                 "purpose": "Refresh host slash-command prompt and skill files.",
             },
@@ -244,6 +248,10 @@ COMMAND_GROUPS: list[dict[str, object]] = [
                 "purpose": "Qualify one exact final diff against an enabled project policy and receipt contract.",
             },
             {
+                "command": "loopx goal-acceptance",
+                "purpose": "Configure, inspect or verify a versioned Goal acceptance basis.",
+            },
+            {
                 "command": "loopx integration-branch --help",
                 "purpose": "Detect reviewed source-branch drift and rebuild one local integration branch.",
             },
@@ -258,6 +266,10 @@ COMMAND_GROUPS: list[dict[str, object]] = [
                 "purpose": "Safely retire explicitly named orphaned global goal routes.",
             },
             {"command": "loopx register-agent", "purpose": "Register an automation agent."},
+            {
+                "command": "loopx agent-directory",
+                "purpose": "Produce the local, goal-scoped peer agent directory this host can hand work to.",
+            },
             {"command": "loopx lark-kanban", "purpose": "Project LoopX state into a Feishu/Lark Base board."},
             {
                 "command": "loopx presentation",
@@ -274,6 +286,10 @@ COMMAND_GROUPS: list[dict[str, object]] = [
             {
                 "command": "loopx connector",
                 "purpose": "List, register, rank, and record usage for public connector providers.",
+            },
+            {
+                "command": "loopx external-evidence",
+                "purpose": "Plan, admit, and retire provenance-bound external evidence.",
             },
             {"command": "loopx issue-fix", "purpose": "Build public-safe issue or PR fix workflow packets."},
             {
@@ -313,10 +329,13 @@ MANPAGE_COMMAND_HELP_ONLY = frozenset(
         "agent-context",
         "archive-runtime",
         "automation-prompts",
+        "automation-cadence",
+        "authority-archive",
         "authority-shadow",
         "backup-state",
         "capability",
         "chat-endpoint",
+        "checkpoint-context",
         "codex-cli-bounded-visible-pilot-adapter",
         "codex-cli-exec-handoff",
         "codex-cli-local-driver-plan",
@@ -331,6 +350,7 @@ MANPAGE_COMMAND_HELP_ONLY = frozenset(
         "codex-cli-visible-local-driver-pilot",
         "codex-cli-visible-session-proof",
         "configure-goal",
+        "delegation",
         "content-ops",
         "decision-context",
         "dash",
@@ -341,6 +361,7 @@ MANPAGE_COMMAND_HELP_ONLY = frozenset(
         "global-risks",
         "global-summary",
         "global-todos",
+        "goal-actions",
         "goal-alignment",
         "amendment-proposal",
         "goal-amendment-proposal",
@@ -349,6 +370,7 @@ MANPAGE_COMMAND_HELP_ONLY = frozenset(
         "import-doc-registry-authority",
         "lark-inbox",
         "migrate-state",
+        "native-child",
         "ml-experiment",
         "opencode2-goal-worker",
         "operator-gate",

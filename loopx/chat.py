@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .todos import add_goal_todo
+from .control_plane.work_items.governed_transition_proposal import (
+    STEWARD_TEAM_PLAN_PREVIEW_KIND,
+)
 
 
 CHAT_AGENT_RESPONSE_SCHEMA_VERSION = "loopx_chat_agent_response_v0"
@@ -178,12 +181,29 @@ def _compact_line(value: Any, *, limit: int) -> str:
     return text[:limit].strip()
 
 
-def _normalize_proposals(value: Any, *, protected_paths: Iterable[Path | str]) -> list[dict[str, str]]:
-    proposals: list[dict[str, str]] = []
+def _normalize_proposals(
+    value: Any,
+    *,
+    protected_paths: Iterable[Path | str],
+    team_plan_context: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    proposals: list[dict[str, Any]] = []
     if not isinstance(value, list):
         return proposals
     for raw in value[:5]:
-        if not isinstance(raw, dict) or raw.get("kind") != "todo":
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("kind") == STEWARD_TEAM_PLAN_PREVIEW_KIND:
+            # A team plan is admitted here or not at all: without the host facts
+            # that say which Agents and action kinds exist, a preview cannot be
+            # validated, so it is never surfaced half-checked.
+            preview = _validated_team_plan_preview(raw, team_plan_context)
+            if preview is not None:
+                proposals.append(
+                    {"kind": STEWARD_TEAM_PLAN_PREVIEW_KIND, "preview": preview}
+                )
+            continue
+        if raw.get("kind") != "todo":
             continue
         text = _compact_line(redact_local_paths(str(raw.get("text") or ""), protected_paths=protected_paths), limit=400)
         if not text:
@@ -204,6 +224,55 @@ def _normalize_proposals(value: Any, *, protected_paths: Iterable[Path | str]) -
             }
         )
     return proposals
+
+
+def _validated_team_plan_preview(
+    raw: Mapping[str, Any], context: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Return the validated preview, or ``None`` when it may not be surfaced.
+
+    A preview names its Goal, so the host facts are per Goal rather than for
+    "the" Goal: the manager channel is not bound to one, and a plan for a Goal
+    the host was not given facts for is dropped instead of being validated
+    against another Goal's Agents.
+    """
+
+    if not isinstance(context, Mapping):
+        return None
+    from .control_plane.work_items.governed_transition_proposal import (
+        validate_steward_team_plan_preview,
+    )
+
+    goal_id = str(raw.get("goal_id") or "")
+    agents: list[str] | None = None
+    by_goal = context.get("registered_agents_by_goal")
+    if isinstance(by_goal, Mapping):
+        declared = by_goal.get(goal_id)
+        if isinstance(declared, (list, tuple)):
+            agents = [str(value) for value in declared]
+    if agents is None:
+        # A host with a large Goal set resolves on demand, and only for the
+        # Goal the plan named, so admission stays bounded by one lookup.
+        resolve = context.get("resolve_registered_agents")
+        if callable(resolve):
+            try:
+                resolved = resolve(goal_id)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                resolved = None
+            if isinstance(resolved, (list, tuple)):
+                agents = [str(value) for value in resolved]
+    if agents is None:
+        return None
+    try:
+        return validate_steward_team_plan_preview(
+            raw,
+            registered_agent_ids=agents,
+            supported_action_kinds=list(context.get("supported_action_kinds") or []),
+        )
+    except ValueError:
+        # A malformed preview is dropped exactly like any other proposal this
+        # normalizer cannot accept; the answer text still reaches the owner.
+        return None
 
 
 def _normalize_protected_action(
@@ -272,6 +341,7 @@ def normalize_agent_response(
     payload: Mapping[str, Any],
     *,
     protected_paths: Iterable[Path | str] = (),
+    team_plan_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize one structured provider response to the public Chat contract."""
 
@@ -289,6 +359,7 @@ def normalize_agent_response(
         "proposals": _normalize_proposals(
             payload.get("proposals"),
             protected_paths=protected,
+            team_plan_context=team_plan_context,
         ),
         "protected_action": _normalize_protected_action(
             payload.get("protected_action"),
@@ -302,6 +373,7 @@ def parse_agent_response(
     raw_text: str,
     *,
     protected_paths: Iterable[Path | str] = (),
+    team_plan_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     protected = tuple(protected_paths)
     start = raw_text.rfind(CHAT_REVIEW_OPEN_TAG)
@@ -313,7 +385,11 @@ def parse_agent_response(
         except json.JSONDecodeError:
             payload = None
         if isinstance(payload, dict):
-            return normalize_agent_response(payload, protected_paths=protected)
+            return normalize_agent_response(
+                payload,
+                protected_paths=protected,
+                team_plan_context=team_plan_context,
+            )
         key = re.search(r'"message"\s*:\s*', body)
         if key:
             try:
@@ -465,6 +541,7 @@ def _add_review_todo(
     registry_path: Path,
     goal_id: str,
     text: str,
+    priority: str | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     return add_goal_todo(
@@ -472,6 +549,7 @@ def _add_review_todo(
         goal_id=goal_id,
         role="agent",
         text=_normalize_todo_text(text),
+        priority=priority,
         task_class="advancement_task",
         action_kind=CHAT_TODO_ACTION_KIND,
         dry_run=dry_run,
@@ -483,11 +561,13 @@ def build_todo_review_preview(
     registry_path: Path,
     goal_id: str,
     text: str,
+    priority: str | None = None,
 ) -> dict[str, Any]:
     payload = _add_review_todo(
         registry_path=registry_path,
         goal_id=goal_id,
         text=text,
+        priority=priority,
         dry_run=True,
     )
     compact = _compact_todo_payload(payload, applied=False)
@@ -500,12 +580,14 @@ def apply_todo_review_preview(
     registry_path: Path,
     goal_id: str,
     text: str,
+    priority: str | None = None,
     preview_id: str,
 ) -> dict[str, Any]:
     current_preview = _add_review_todo(
         registry_path=registry_path,
         goal_id=goal_id,
         text=text,
+        priority=priority,
         dry_run=True,
     )
     if not preview_id or preview_id != _todo_preview_fingerprint(current_preview):
@@ -520,6 +602,7 @@ def apply_todo_review_preview(
         registry_path=registry_path,
         goal_id=goal_id,
         text=text,
+        priority=priority,
         dry_run=False,
     )
     compact = _compact_todo_payload(applied, applied=True)

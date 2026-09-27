@@ -31,7 +31,9 @@ bundle and its runtime as well as the CLI. `loopx doctor` exposes
 still does not prove which App process is running. Upgrade the App and its
 bundled runtime together, then restart and verify the App, CLI and service
 source revisions. Never claim a desktop upgrade from CLI/HTTP checks alone:
-opening an older App can replace a separately upgraded CLI with its bundle.
+current App builds ask before replacing a different CLI runtime (update the
+App, or align the CLI to the App's bundled runtime), while an older build can
+still replace a separately upgraded CLI with its bundle.
 Keep SSH host verification separate; a host without an App needs no App install.
 
 When the visible user message is exactly a LoopX slash command or starts with a
@@ -686,21 +688,48 @@ subcommand:
 loopx --format json review-packet --goal-id <STABLE_GOAL_ID>
 ```
 
-When the human/controller decision is already approved and the only remaining
-step is to relay the target-agent instruction, use the minimal handoff form:
+To relay current target-agent context within existing authorization, use the
+handoff form. Ordinary handoffs add no new approval; actual operator gates
+still apply:
 
 ```bash
 loopx review-packet --goal-id <STABLE_GOAL_ID> --handoff-only
 ```
 
-This command is read-only. It packages the current status into the same Review
-Packet shape as the dashboard; it does not append human reward, append an
-operator gate, refresh state, grant write-control, or authorize production
-actions. `--handoff-only` only strips the human decision wrapper from markdown
-output; JSON output returns a minimized handoff payload with `handoff_text`
-instead of the full operator packet. If the selected queue item is legacy/raw
+This read-only command assembles agent context directly from current status.
+The full Review Packet consumes the same context and adds human presentation.
+Neither path grants authority or changes work state. JSON `handoff_text` and
+`project_agent_handoff` always contain complete prepared text. On overflow,
+`project_agent_handoff_fragments` contains all ordered shards including index 0;
+Markdown prints the shard set. The complete text may exceed 16 lines / 1800
+characters; each shard fits that budget. In-budget output keeps its old shape. If the selected queue item is legacy/raw
 fallback rather than project-asset-backed, do not treat raw queue fields as
 owner, gate, or stop-condition authority.
+
+Collect and restore the entire producer output before using a sharded handoff:
+
+```bash
+loopx --format json review-packet --goal-id <STABLE_GOAL_ID> --handoff-only > handoff.json
+loopx handoff restore --input handoff.json --format json
+```
+
+For raw sharded Markdown use `--input-format markdown`; `--input -` reads stdin.
+JSON avoids relying on a renderer preserving HTML comment envelopes. A fragment
+title without its envelope, or an indented envelope, is rejected rather than
+returned as plain text. If both title and envelope disappear, only the original
+JSON output can establish completeness. Complete unfragmented handoff-only
+Markdown is accepted as plain text without an integrity claim; use JSON for
+unfragmented full Review Packets. Missing,
+reordered, duplicate, mixed or changed parts fail with a nonzero exit and
+`error_code`, without partial text. Obtain the original complete output and
+retry. There is no collector or business-request deduplication by content hash.
+
+A successful restore is content recovery only: it does not execute a command,
+adopt work, change Todo/claim/lease or start a session. Check current goal,
+source freshness, write scope and real gates using existing status/quota and
+ownership workflows. `handoff prepare/inspect/adopt` retains its separate
+ownership contract; restore is not a replacement for it. Do not infer sender
+identity or permission from a checksum.
 
 Read the packet in order:
 
@@ -966,11 +995,15 @@ loopx reward \
   --dry-run
 ```
 
-Only after the user has explicitly approved recording the reward, rerun without
-`--dry-run`. The durable source of truth is still the run-bound
-`human_reward` overlay. The active-state writeback is a `Progress Ledger`
-summary for future agents; project agents should read the reward through the
-returned `project_agent_visibility.history_command`.
+The preview may stay anonymous. Only after the user has explicitly approved
+recording the reward, rerun without `--dry-run` and add exactly one reviewed
+actor classification: `--actor-kind owner` for the owner's judgment or
+`--actor-kind controller` for an authorized controller's judgment. Never infer
+that classification from the process, Agent id, or command defaults. The
+durable source of truth is still the run-bound `human_reward` overlay. The
+active-state writeback is a `Progress Ledger` summary for future agents;
+project agents should read the reward through the returned
+`project_agent_visibility.history_command`.
 
 ## Multi-Project Status
 

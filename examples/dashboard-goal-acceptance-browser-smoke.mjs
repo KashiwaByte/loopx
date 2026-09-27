@@ -6,12 +6,13 @@ import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanupBrowserSmoke, launchBrowser, loadPlaywright, startViteDashboardServer, waitForHttp } from "./dashboard-browser-smoke-support.mjs";
+import { resolveTestPython } from "../scripts/test-python.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.LOOPX_GOAL_ACCEPTANCE_PORT ?? 5291);
 const packaged = process.env.LOOPX_GOAL_ACCEPTANCE_PACKAGED === "1";
-const python = process.env.LOOPX_PYTHON ?? "python3";
-const payload = JSON.parse(execFileSync(python, ["-c", "import runpy,tempfile,json; from pathlib import Path; m=runpy.run_path('tests/control_plane/test_goal_acceptance_observation.py'); t=tempfile.TemporaryDirectory(); print(json.dumps(m['collect_fixture'](Path(t.name))))"], { cwd: root, encoding: "utf8" }));
+const python = resolveTestPython();
+const payload = JSON.parse(execFileSync(python, ["-c", "import runpy,tempfile,json; from pathlib import Path; m=runpy.run_path('tests/control_plane/test_goal_acceptance_observation.py'); t=tempfile.TemporaryDirectory(); print(json.dumps(m['collect_fixture'](Path(t.name), missing_claim=True)))"], { cwd: root, encoding: "utf8" }));
 const dashboardDir = resolve(root, "apps/presentation/dashboard");
 const server = packaged
   ? spawn(python, ["-m", "http.server", String(port), "--bind", "127.0.0.1", "--directory", resolve(root, "loopx/web")], { stdio: "ignore" })
@@ -33,14 +34,16 @@ try {
       if (await sidebar.isVisible()) await sidebar.click();
     }
     await page.locator(".personal-goal-link").first().click({timeout: 10000});
-    await page.getByRole("button", {name: language === "en" ? "Open Goal details or capability settings" : "打开 Goal 详情或能力配置"}).click();
-    await page.getByRole("group", {name: language === "en" ? "Goal settings" : "Goal 设置"}).getByRole("button", {name: /Goal details|Goal 详情/}).click();
+    await page.getByRole("button", {name: language === "en" ? "Overview" : "概览", exact: true}).click();
     const card = page.locator(".personal-goal-acceptance");
     await card.getByText("Independent verification report", {exact: true}).waitFor();
     assert.match(await card.innerText(), /agent-a/);
+    assert.match(await card.innerText(), /vision_patch.acceptance_summary/);
+    assert.match(await card.innerText(), language === "en" ? /Final outcome claim present: Failed/ : /最终成果声明齐全: 未通过/);
+    assert.match(await card.innerText(), language === "en" ? /Valid path decision: Passed/ : /路径决策有效: 通过/);
     assert.match(await card.innerText(), language === "en" ? /do not prove Goal acceptance/ : /不能证明 Goal 已通过验收/);
     await card.locator("summary").click();
-    await card.scrollIntoViewIfNeeded();
+    await card.locator(".personal-detail-card-title").scrollIntoViewIfNeeded();
     assert.equal(await card.evaluate(el => el.scrollWidth > el.clientWidth + 2), false, "Acceptance content must wrap on mobile");
     await page.screenshot({path: resolve(output, `${packaged ? "packaged" : "development"}-${language}.png`)});
     if (language === "en") {
@@ -57,8 +60,7 @@ try {
         const navigation = page.getByRole("button", {name: "Open Goal navigation"});
         if (await navigation.isVisible()) await navigation.click();
         await page.locator(".personal-goal-link").first().click();
-        await page.getByRole("button", {name: "Open Goal details or capability settings"}).click();
-        await page.getByRole("group", {name: "Goal settings"}).getByRole("button", {name: /Goal details/}).click();
+        await page.getByRole("button", {name: "Overview", exact: true}).click();
         const refreshedCard = page.locator(".personal-goal-acceptance");
         if (observation === current) {
           await refreshedCard.getByText("Independent verification report", {exact: true}).waitFor();

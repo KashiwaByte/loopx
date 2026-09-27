@@ -40,7 +40,8 @@ import type {
 import type { LarkGoalConnection } from "../../data/chat";
 import { localizedAttentionAge, localizedGoalState, localizedSessionStatus, useWorkspaceI18n } from "./i18n";
 import { formatCostUsd, formatDurationMs, formatTokenCount, formatUsageValue } from "./personal-workspace-model";
-import { todoResumeWhenFromMessage } from "./personal-workspace-router";
+import { TeamPlanResult } from "./team-plan-result";
+import { parseTodoResumeCondition } from "./todo-resume-condition";
 
 function subagentModelRequest(include: boolean, model: string, effort: string) {
   if (!include) return {};
@@ -62,7 +63,9 @@ const focusableSelector = [
 type TodoOperation = "block" | "complete" | "defer" | "successor_create";
 
 type GoalSubagentPreview = {
+  codexHostCapacity?: WorkspaceGoalSubagentConfiguration["codexHostCapacity"];
   modelConfig?: { model: string; reasoning_effort?: string } | null;
+  executionConfig?: string;
   allowedDomains: string[];
   changed: boolean;
   enabled: boolean;
@@ -96,6 +99,7 @@ function subagentConfigurationsMatch(
   return left.enabled === right.enabled
     && left.maxChildren === right.maxChildren
     && JSON.stringify(left.modelConfig ?? null) === JSON.stringify(right.modelConfig ?? null)
+    && (left.executionConfig ?? "") === (right.executionConfig ?? "")
     && [...left.allowedDomains].sort((a, b) => a.localeCompare(b)).join("\u0000")
       === [...right.allowedDomains].sort((a, b) => a.localeCompare(b)).join("\u0000");
 }
@@ -127,12 +131,14 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
   const [subagentMaxChildren, setSubagentMaxChildren] = useState(2);
   const [subagentModel, setSubagentModel] = useState("");
   const [subagentEffort, setSubagentEffort] = useState("");
+  const [subagentExecutionConfig, setSubagentExecutionConfig] = useState("");
   const [subagentMutationState, setSubagentMutationState] = useState<"idle" | "previewing" | "ready" | "applying" | "success" | "warning" | "error">("idle");
   const [subagentPreview, setSubagentPreview] = useState<GoalSubagentPreview | null>(null);
   const [verifiedSubagentConfiguration, setVerifiedSubagentConfiguration] = useState<WorkspaceGoalSubagentConfiguration | null>(null);
   const lastAuthoritativeSubagentConfigurationRef = useRef<WorkspaceGoalSubagentConfiguration | null>(null);
   const verifiedSubagentBaselineRef = useRef<WorkspaceGoalSubagentConfiguration | null>(null);
   const [todoAgentId, setTodoAgentId] = useState(agents.find((agent) => agent.available)?.agentId ?? "codex");
+  const [todoPriority, setTodoPriority] = useState("");
   const [todoResumeWhen, setTodoResumeWhen] = useState("");
   const closeRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
@@ -155,6 +161,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
     setSubagentAllowedDomains(configuration?.allowedDomains ?? []);
     setSubagentModel(configuration?.modelConfig?.model ?? "");
     setSubagentEffort(configuration?.modelConfig?.reasoning_effort ?? "");
+    setSubagentExecutionConfig(configuration?.executionConfig ?? "");
     setSubagentMaxChildren(configuration?.maxChildren ? Math.min(configuration.maxChildren, 32) : 2);
     setSubagentFeedback(null);
     setSubagentMutationState("idle");
@@ -184,6 +191,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
         setSubagentAllowedDomains(authoritativeSubagentConfiguration.allowedDomains);
         setSubagentModel(authoritativeSubagentConfiguration.modelConfig?.model ?? "");
         setSubagentEffort(authoritativeSubagentConfiguration.modelConfig?.reasoning_effort ?? "");
+        setSubagentExecutionConfig(authoritativeSubagentConfiguration.executionConfig ?? "");
         setSubagentMaxChildren(authoritativeSubagentConfiguration.maxChildren || 2);
         setSubagentFeedback(null);
         setSubagentMutationState("idle");
@@ -209,6 +217,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
         setSubagentAllowedDomains(authoritativeSubagentConfiguration.allowedDomains);
         setSubagentModel(authoritativeSubagentConfiguration.modelConfig?.model ?? "");
         setSubagentEffort(authoritativeSubagentConfiguration.modelConfig?.reasoning_effort ?? "");
+        setSubagentExecutionConfig(authoritativeSubagentConfiguration.executionConfig ?? "");
         setSubagentMaxChildren(
           authoritativeSubagentConfiguration.maxChildren || 2,
         );
@@ -265,7 +274,8 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
     : selection.kind === "todo" ? t("drawer.taskDetails")
       : selection.kind === "run" ? t("drawer.runDetails")
         : selection.kind === "output" ? t("drawer.titleOutput")
-          : selection.kind === "proposal" ? t(selection.item.status === "applied" ? "drawer.titleProposalApplied" : "drawer.titleProposalConfirm")
+          : selection.kind === "proposal" && selection.item.actionKind === "team.plan" && selection.item.status === "applied" ? t("proposal.teamPlan.resultTitle")
+          : selection.kind === "proposal" ? t(selection.item.reviewPlan?.retryOriginal ? "drawer.recoverEditResult" : selection.item.status === "applied" ? "drawer.titleProposalApplied" : "drawer.titleProposalConfirm")
             : selection.kind === "schedule" ? (selection.item.scheduleKind === "heartbeat" ? "Heartbeat" : t("drawer.titleSchedule"))
               : t("drawer.goalDetails");
   const goalId = selection.kind === "proposal" ? selection.item.goalId ?? "manager"
@@ -276,6 +286,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
         : selection.kind === "output" ? selection.item.goalTitle ?? t("drawer.currentGoal")
           : selection.kind === "goal" ? selection.item.title
             : selection.kind === "schedule" ? t("drawer.goalAutoRun")
+              : selection.kind === "proposal" && selection.item.status === "applied" && selection.item.actionKind === "team.plan" ? selection.item.goalId ?? t("drawer.currentGoal")
               : selection.item.goalId ? t("drawer.goalChanges") : t("drawer.managerChanges");
   const selectedGoalRun = selection.kind === "goal"
     ? runs.find((run) => run.goalId === selection.item.goalId && Boolean(run.sessionId))
@@ -287,7 +298,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
     || Boolean(selection.item.outputs?.length)
   );
   const attentionAge = selection.kind === "attention" ? localizedAttentionAge(selection.item.updatedAt, t) : null;
-  const normalizedTodoResumeWhen = todoResumeWhenFromMessage(todoResumeWhen);
+  const normalizedTodoResumeWhen = parseTodoResumeCondition(todoResumeWhen);
 
   async function sendCorrection() {
     if (selection.kind !== "run" || !correction.trim()) return;
@@ -379,6 +390,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
     setSubagentAllowedDomains(currentSubagentConfiguration.allowedDomains);
     setSubagentModel(currentSubagentConfiguration.modelConfig?.model ?? "");
     setSubagentEffort(currentSubagentConfiguration.modelConfig?.reasoning_effort ?? "");
+    setSubagentExecutionConfig(currentSubagentConfiguration.executionConfig ?? "");
     setSubagentMaxChildren(currentSubagentConfiguration.maxChildren || 2);
     setSubagentFeedback(null);
     setSubagentMutationState("idle");
@@ -414,10 +426,12 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
       return;
     }
     const request = {
+      alignCodexHostCapacity: enabled,
       allowedDomains: allowedDomains ?? [],
       enabled,
       goalId: selection.item.goalId,
       maxChildren: enabled ? subagentMaxChildren : 0,
+      executionConfig: subagentExecutionConfig.trim(),
       ...subagentModelRequest(includeModel, subagentModel, subagentEffort),
     };
     setSubagentMutationState("previewing");
@@ -435,12 +449,18 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
         setSubagentAllowedDomains(preview.configuration.allowedDomains);
         setSubagentModel(preview.configuration.modelConfig?.model ?? "");
         setSubagentEffort(preview.configuration.modelConfig?.reasoning_effort ?? "");
+        setSubagentExecutionConfig(preview.configuration.executionConfig ?? "");
         setSubagentMaxChildren(preview.configuration.maxChildren || 2);
         setSubagentMutationState("success");
         setSubagentFeedback(t("drawer.subagentNoChange"));
         return;
       }
-      setSubagentPreview({ ...request, changed: preview.changed, previewId: preview.previewId });
+      setSubagentPreview({
+        ...request,
+        codexHostCapacity: preview.configuration.codexHostCapacity,
+        changed: preview.changed,
+        previewId: preview.previewId,
+      });
       setSubagentMutationState("ready");
       setSubagentFeedback(t("drawer.subagentPreviewReady"));
     } catch (error) {
@@ -456,10 +476,12 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
     try {
       const verifiedConfiguration = await callbacks.onApplyGoalSubagentConfiguration({
         allowedDomains: subagentPreview.allowedDomains,
+        alignCodexHostCapacity: subagentPreview.enabled,
         enabled: subagentPreview.enabled,
         goalId: subagentPreview.goalId,
         maxChildren: subagentPreview.maxChildren,
         modelConfig: subagentPreview.modelConfig,
+        executionConfig: subagentPreview.executionConfig,
         previewId: subagentPreview.previewId,
       });
       verifiedSubagentBaselineRef.current = authoritativeSubagentConfiguration
@@ -471,9 +493,14 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
       setSubagentAllowedDomains(verifiedConfiguration.allowedDomains);
       setSubagentModel(verifiedConfiguration.modelConfig?.model ?? "");
       setSubagentEffort(verifiedConfiguration.modelConfig?.reasoning_effort ?? "");
+      setSubagentExecutionConfig(verifiedConfiguration.executionConfig ?? "");
       setSubagentMaxChildren(verifiedConfiguration.maxChildren || 2);
       setSubagentMutationState("success");
-      setSubagentFeedback(t("drawer.subagentApplied"));
+      setSubagentFeedback(t(
+        verifiedConfiguration.codexHostCapacity?.newSessionRequired
+          ? "drawer.subagentAppliedRestart"
+          : "drawer.subagentApplied",
+      ));
       setSubagentPreview(null);
       try {
         await callbacks.onRefresh?.();
@@ -561,6 +588,11 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
                 {selection.item.status === "deferred" || selection.item.resumeWhen ? <div><dt>{t("drawer.resumeWhen")}</dt><dd>{selection.item.resumeWhen || t("drawer.notSet")}</dd></div> : null}
                 {selection.item.resumeWhen ? <div><dt>{t("drawer.resumeState")}</dt><dd>{selection.item.resumeReady ? t("drawer.resumeReady") : t("drawer.resumePending")}</dd></div> : null}
                 {selection.item.resumeReceiptId ? <div><dt>{t("drawer.resumeReceipt")}</dt><dd>{selection.item.resumeReceiptId}</dd></div> : null}
+                {selection.item.validationDigest ? <>
+                  <div><dt>{t("drawer.validationRevision")}</dt><dd>{selection.item.validationRevision ?? 0}</dd></div>
+                  <div><dt>{t("drawer.validationDigest")}</dt><dd><code>{selection.item.validationDigest}</code></dd></div>
+                  {selection.item.validationRevisionActor ? <div><dt>{t("drawer.validationRevisionActor")}</dt><dd>{selection.item.validationRevisionActor}</dd></div> : null}
+                </> : null}
                 <div><dt>{t("drawer.nextTransition")}</dt><dd>{selection.item.nextTransition ?? (selection.item.done ? t("drawer.taskNextCompleted") : selection.item.resumeReady ? t("drawer.taskNextResumeReady") : selection.item.status === "deferred" ? t("drawer.taskNextDeferred") : t("drawer.taskNextOpen"))}</dd></div>
               </dl>
             </section>
@@ -579,6 +611,21 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
                       idempotencyKey: `workspace-todo-${selection.item.todoId}-reassign-${todoAgentId}-${Date.now().toString(36)}`,
                       normalizedParameters: { agent_id: todoAgentId, goal_id: selection.item.goalId, operation: "reassign", todo_id: selection.item.todoId },
                       summary: t("drawer.reassignSummary", { task: selection.item.text }),
+                    })} type="button">{t("timeline.review")}</button>
+                  </label>
+                  <label className="personal-inline-agent-select">{t("drawer.taskPriority")}
+                    <select aria-label={t("drawer.taskPriority")} value={todoPriority} onChange={(event) => setTodoPriority(event.target.value)}>
+                      <option value="">{t("drawer.taskPriorityChoose")}</option>
+                      {["P0", "P1", "P2", "P3", "P4"].map((priority) => <option key={priority} value={priority}>{priority}</option>)}
+                      <option value="clear">{t("drawer.taskPriorityClear")}</option>
+                    </select>
+                    <button className="personal-secondary-action" disabled={!todoPriority} onClick={() => void callbacks.onPreviewAction?.({
+                      actionKind: "todo.update",
+                      context: {goal_id: selection.item.goalId, kind: "todo", todo_id: selection.item.todoId},
+                      idempotencyKey: `workspace-todo-${selection.item.todoId}-priority-${todoPriority}-${Date.now().toString(36)}`,
+                      normalizedParameters: {goal_id: selection.item.goalId, todo_id: selection.item.todoId, operation: "edit",
+                        ...(todoPriority === "clear" ? {clear_priority: true} : {priority: todoPriority})},
+                      summary: `${t("drawer.taskPriority")}: ${todoPriority === "clear" ? t("drawer.taskPriorityClear") : todoPriority}`,
                     })} type="button">{t("timeline.review")}</button>
                   </label>
                   <strong>{t("drawer.taskDeferUntil")}</strong>
@@ -689,6 +736,18 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
               <button className="personal-secondary-action" onClick={() => callbacks.onRequestScheduleConfig?.("heartbeat", selection.item.goalId)} type="button"><Radio size={16} />{t("drawer.setupHeartbeat")}</button>
               <button className="personal-secondary-action" onClick={() => callbacks.onRequestScheduleConfig?.("monitor", selection.item.goalId)} type="button"><CalendarClock size={16} />{t("drawer.scheduleAdd")}</button>
             </div> : null}
+            {selection.item.nativeChildActivity?.observation === "coordinator_reported" ? (
+              <section className="personal-detail-card personal-native-child-activity">
+                <h3>{t("drawer.subagentReportTitle")}</h3>
+                <p>{t("drawer.subagentReportedActivity", {
+                  started: selection.item.nativeChildActivity.launched_count,
+                  skipped: selection.item.nativeChildActivity.skipped_count,
+                  rejected: selection.item.nativeChildActivity.capacity_rejected_count,
+                  failed: selection.item.nativeChildActivity.host_failed_count,
+                  accepted: selection.item.nativeChildActivity.parent_accepted_count,
+                })}</p>
+              </section>
+            ) : null}
             {selection.item.subagentExecution ? <section className="personal-detail-card personal-goal-subagents">
               <div className="personal-subagent-heading">
                 <div>
@@ -727,6 +786,16 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
                       })
                     : t("drawer.subagentDisableSummary")}</p>
                   {subagentPreview.modelConfig !== undefined ? <p>{t("drawer.subagentModel")}: {subagentPreview.modelConfig?.model || t("drawer.subagentModelDefault")} · {subagentPreview.modelConfig?.reasoning_effort || t("drawer.subagentModelDefault")}</p> : null}
+                  <p>{t("drawer.subagentExecutionConfig")}: {subagentPreview.executionConfig || t("drawer.subagentExecutionConfigNone")}</p>
+                  {subagentPreview.enabled && subagentPreview.codexHostCapacity ? <p>{t(
+                    subagentPreview.codexHostCapacity.writeRequired
+                      ? "drawer.subagentHostCapacityRaise"
+                      : "drawer.subagentHostCapacityReady",
+                    {
+                      configured: subagentPreview.codexHostCapacity.configuredChildren ?? t("drawer.subagentHostCapacityImplicit"),
+                      required: subagentPreview.codexHostCapacity.requiredChildren,
+                    },
+                  )}</p> : null}
                   <div>
                     <button className="personal-primary-action" onClick={() => void applyGoalSubagentConfiguration()} type="button">{t("common.confirm")}</button>
                     <button className="personal-secondary-action" onClick={resetSubagentDraft} type="button">{t("common.cancel")}</button>
@@ -744,6 +813,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
                 <div><dt>{t("drawer.subagentEffort")}</dt><dd>{currentSubagentConfiguration.modelConfig?.reasoning_effort || t("drawer.subagentModelDefault")}</dd></div>
                 <div><dt>{t("drawer.subagentCurrentBoundary")}</dt><dd>{currentSubagentConfiguration.allowedDomains.join(" · ") || t("drawer.subagentDomainsUnrestricted")}</dd></div>
                 <div><dt>{t("drawer.subagentChildLimit")}</dt><dd>{currentSubagentConfiguration.maxChildren || 0}</dd></div>
+                <div><dt>{t("drawer.subagentExecutionConfig")}</dt><dd>{currentSubagentConfiguration.executionConfig || t("drawer.subagentExecutionConfigNone")}</dd></div>
               </dl>
               {readOnly ? (
                 <p className="personal-subagent-read-only">{t("drawer.subagentRemoteReadOnly")}</p>
@@ -790,6 +860,17 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
                   <button className="personal-secondary-action" disabled={subagentBusy} type="button" onClick={() => { setSubagentModel("gpt-5.6-luna"); setSubagentEffort("max"); setSubagentPreview(null); setSubagentMutationState("idle"); setSubagentFeedback(null); }}>{t("drawer.subagentLunaPreset")}</button>
                   <button className="personal-secondary-action" disabled={subagentBusy} type="button" onClick={() => { setSubagentModel(""); setSubagentEffort(""); setSubagentPreview(null); setSubagentMutationState("idle"); setSubagentFeedback(null); }}>{t("drawer.subagentClearModel")}</button>
                   <p>{t("drawer.subagentModelHint")}</p>
+                  <label>
+                    <span>{t("drawer.subagentExecutionConfig")}</span>
+                    <input
+                      aria-label={t("drawer.subagentExecutionConfig")}
+                      disabled={subagentBusy}
+                      onChange={(event) => { setSubagentExecutionConfig(event.target.value); setSubagentPreview(null); setSubagentMutationState("idle"); setSubagentFeedback(null); }}
+                      placeholder=".loopx/config/delegations.json"
+                      value={subagentExecutionConfig}
+                    />
+                  </label>
+                  <p>{t("drawer.subagentExecutionConfigHint")}</p>
                   <label className="personal-subagent-limit-field">
                     <span>{t("drawer.subagentMaxChildren")}</span>
                     <select
@@ -959,25 +1040,25 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
 
         {selection.kind === "proposal" ? (
           <>
-            <section className="personal-proposal-card">
+            {selection.item.actionKind === "team.plan" && selection.item.status === "applied" ? <TeamPlanResult proposal={selection.item} t={t} /> : <section className="personal-proposal-card">
               <small>{selection.item.actionKind} · {selection.item.status}</small>
               <h3>{selection.item.title}</h3>
-              <p>{selection.item.impact}</p>
-              {selection.item.reviewPlan ? <p className="personal-proposal-explainer" data-action-review={selection.item.reviewPlan.interaction}>{selection.item.actionKind === "operation.execute" && selection.item.status === "gated"
+              {selection.item.impact ? <p>{selection.item.impact}</p> : null}
+              {selection.item.reviewPlan && !selection.item.reviewPlan.retryOriginal && selection.item.actionKind !== "team.plan" ? <p className="personal-proposal-explainer" data-action-review={selection.item.reviewPlan.interaction}>{selection.item.actionKind === "operation.execute" && selection.item.status === "gated"
                 ? t("actionReview.operation_group_confirmation")
                 : selection.item.actionKind === "operation.execute" && selection.item.reviewPlan.reason === "readback_unverified"
                   ? t("actionReview.operation_result_delivery_pending")
                   : t(`actionReview.${selection.item.reviewPlan.reason}`)}</p> : null}
-              {selection.item.status === "ready" ? <p className="personal-proposal-explainer">{t("drawer.proposalExplainer")}</p> : null}
+              {selection.item.status === "ready" && selection.item.actionKind !== "team.plan" ? <p className="personal-proposal-explainer">{t("drawer.proposalExplainer")}</p> : null}
               <dl>{selection.item.fields.map((field) => <div key={field.key}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}</dl>
-            </section>
-            {selection.item.status === "applied" ? <p className={`personal-proposal-state ${selection.item.actionKind === "operation.execute" && selection.item.reviewPlan?.reason === "readback_unverified" ? "is-gated" : "is-applied"}`}><Check size={16} />{selection.item.actionKind === "operation.execute" ? selection.item.primaryLabel : t("drawer.proposalApplied")}</p> : null}
-            {selection.item.status === "applied" && selection.item.actionKind !== "operation.execute" && selection.item.goalId ? <button className="personal-primary-action" onClick={() => { const goalId = selection.item.goalId!; onClose(); void callbacks.onOpenGoal?.(goalId); }} type="button"><ExternalLink size={16} />{selection.item.actionKind === "goal.create" ? t("drawer.proposalEnterGoal") : t("drawer.proposalViewGoal")}</button> : null}
+            </section>}
+            {selection.item.status === "applied" && selection.item.actionKind !== "team.plan" ? <p className={`personal-proposal-state ${selection.item.actionKind === "operation.execute" && selection.item.reviewPlan?.reason === "readback_unverified" ? "is-gated" : "is-applied"}`}><Check size={16} />{selection.item.actionKind === "operation.execute" ? selection.item.primaryLabel : t("drawer.proposalApplied")}</p> : null}
+            {selection.item.status === "applied" && selection.item.actionKind !== "operation.execute" && selection.item.goalId ? <button className="personal-primary-action" onClick={() => { const goalId = selection.item.goalId!; onClose(); void callbacks.onOpenGoal?.(goalId); }} type="button"><ExternalLink size={16} />{selection.item.actionKind === "goal.create" ? t("drawer.proposalEnterGoal") : t(selection.item.actionKind === "team.plan" ? "proposal.teamPlan.openGoal" : "drawer.proposalViewGoal")}</button> : null}
             {selection.item.status === "stale" ? <p className="personal-proposal-state is-stale">{t("drawer.proposalStale")}</p> : null}
-            {selection.item.status === "error" ? <div className="personal-proposal-state is-error"><span>{selection.item.reviewPlan?.reason === "readback_unverified" ? t("actionReview.readback_unverified") : t("drawer.proposalApplyFailed")}</span>{selection.item.errorMessage ? <small>{selection.item.errorMessage}</small> : null}<small>{t("drawer.proposalApplyFailedHint")}</small></div> : null}
+            {selection.item.status === "error" && !selection.item.reviewPlan?.retryOriginal ? <div className="personal-proposal-state is-error"><span>{selection.item.reviewPlan?.reason === "readback_unverified" ? t("actionReview.readback_unverified") : t("drawer.proposalApplyFailed")}</span>{selection.item.errorMessage ? <small>{selection.item.errorMessage}</small> : null}<small>{t(selection.item.actionKind === "team.plan" ? "proposal.teamPlan.retryHint" : "drawer.proposalApplyFailedHint")}</small></div> : null}
             {selection.item.status === "rejected" ? <p className="personal-proposal-state is-error">{t("drawer.proposalRejected")}</p> : null}
             {selection.item.status === "deferred" ? <p className="personal-proposal-state is-gated">{t("drawer.proposalDeferred")}</p> : null}
-            {selection.item.status === "gated" ? <div className="personal-proposal-state is-gated"><span><strong>{selection.item.actionKind === "operation.execute" ? selection.item.primaryLabel : t("drawer.gateRequiresHost")}</strong>{selection.item.actionKind === "operation.execute" ? selection.item.impact : t("drawer.gateRequiresHostDescription")}</span>{selection.item.gate?.nextAction ? <small>{selection.item.gate.nextAction}</small> : null}</div> : null}
+            {selection.item.status === "gated" ? <div className="personal-proposal-state is-gated"><span><strong>{selection.item.actionKind === "operation.execute" ? selection.item.primaryLabel : selection.item.workspaceCandidates?.length ? selection.item.title : t("drawer.gateRequiresHost")}</strong>{selection.item.actionKind === "operation.execute" || selection.item.workspaceCandidates?.length ? selection.item.impact : t("drawer.gateRequiresHostDescription")}</span>{selection.item.gate?.nextAction ? <small>{selection.item.gate.nextAction}</small> : null}</div> : null}
             {selection.item.status === "gated" && selection.item.actionKind === "gate.resolve" ? (() => {
               const fieldValue = (key: string) => selection.item.fields.find((field) => field.key === key)?.value;
               const gateGoalId = fieldValue("goal_id");
@@ -992,7 +1073,7 @@ export function ContextDrawer({ agents, attentionHistory = [], onSelectAttention
               );
             })() : null}
             {!readOnly && selection.item.workspaceCandidates?.length ? <div className="personal-workspace-candidates" aria-label={t("drawer.workspaceCandidates")}>{selection.item.workspaceCandidates.map((candidate) => <button key={candidate.workspaceRef} onClick={() => void callbacks.onSelectWorkspaceCandidate?.(selection.item, candidate.workspaceRef)} type="button"><strong>{candidate.label}</strong><small>{candidate.workspaceRef}</small></button>)}</div> : null}
-            {!readOnly && selection.item.actionKind !== "operation.execute" && selection.item.status === "error" ? <button className="personal-primary-action" onClick={() => void callbacks.onTransitionProposal?.(selection.item, "regenerate")} type="button"><RotateCcw size={17} />{t("drawer.proposalRegenerate")}</button> : !readOnly && selection.item.actionKind !== "operation.execute" && selection.item.status !== "gated" ? <button className="personal-primary-action" disabled={!['ready', 'deferred'].includes(selection.item.status) || selection.item.reviewPlan?.canApply === false} onClick={() => void callbacks.onApplyProposal?.(selection.item)} type="button"><Check size={17} />{selection.item.status === "applying" ? t("drawer.applying") : selection.item.primaryLabel ?? t("drawer.apply")}</button> : null}
+            {!readOnly && selection.item.actionKind !== "operation.execute" && selection.item.status === "error" ? <button className="personal-primary-action" onClick={() => void ((selection.item.actionKind === "team.plan" || selection.item.reviewPlan?.retryOriginal) ? callbacks.onApplyProposal?.(selection.item) : callbacks.onTransitionProposal?.(selection.item, "regenerate"))} type="button"><RotateCcw size={17} />{t(selection.item.reviewPlan?.retryOriginal ? "drawer.retryOriginal" : selection.item.actionKind === "team.plan" ? "proposal.teamPlan.retry" : "drawer.proposalRegenerate")}</button> : !readOnly && selection.item.actionKind !== "operation.execute" && selection.item.status !== "gated" && !(selection.item.actionKind === "team.plan" && selection.item.status === "applied") ? <button className="personal-primary-action" disabled={!['ready', 'deferred'].includes(selection.item.status) || selection.item.reviewPlan?.canApply === false} onClick={() => void callbacks.onApplyProposal?.(selection.item)} type="button"><Check size={17} />{selection.item.status === "applying" ? t("drawer.applying") : selection.item.primaryLabel ?? t("drawer.apply")}</button> : null}
             {!readOnly && selection.item.actionKind !== "operation.execute" && (["stale", "gated", "rejected"].includes(selection.item.status) || (selection.item.status === "ready" && selection.item.reviewPlan?.canApply === false)) ? <button className="personal-secondary-action" onClick={() => void callbacks.onTransitionProposal?.(selection.item, "regenerate")} type="button"><RotateCcw size={16} />{t("drawer.proposalRecheck")}</button> : null}
             {!readOnly && selection.item.actionKind !== "operation.execute" && ["ready", "gated"].includes(selection.item.status) ? <div className="personal-drawer-action-grid"><button className="personal-secondary-action" onClick={() => void callbacks.onTransitionProposal?.(selection.item, "defer")} type="button">{t("drawer.proposalDefer")}</button><button className="personal-secondary-action" onClick={() => void callbacks.onTransitionProposal?.(selection.item, "reject")} type="button">{t("drawer.decisionReject")}</button></div> : null}
             {!["applied", "applying"].includes(selection.item.status) ? <button className="personal-secondary-action" onClick={onClose} type="button">{t("drawer.proposalClose")}</button> : null}

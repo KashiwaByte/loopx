@@ -354,7 +354,7 @@ def _run_scheduler_executor_shell_command(
         completed = subprocess.run(
             argv,
             check=False,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout_seconds,
             stdout=stdout,
             stderr=stderr,

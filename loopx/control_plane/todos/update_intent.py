@@ -9,44 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-
-# Keep governance decisions and monitor effects on their owning paths. These
-# are exactly the planning fields accepted by native_update_plan.ts; the set
-# is intentionally duplicated here as a boundary check, not as a second rule
-# implementation. Decision outcomes remain effect-owned; only declarative
-# decision scope metadata crosses this transaction boundary.
-_CANONICAL_INTENT_FIELDS = frozenset(
-    {
-        "status",
-        "evidence",
-        "reason",
-        "task_class",
-        "action_kind",
-        "task_domain",
-        "task_repository",
-        "continuation_policy",
-        "required_write_scopes",
-        "required_capabilities",
-        "target_capabilities",
-        "explore_result_node_refs",
-        "decision_scope",
-        "required_decision_scopes",
-        "claimed_by",
-        "bound_agent",
-        "goal_bound",
-        "blocks_agent",
-        "clear_blocks_agent",
-        "excluded_agents",
-        "global_gate",
-        "clear_global_gate",
-        "unblocks_todo_id",
-        "successor_todo_ids",
-        "resume_when",
-        "clear_resume_when",
-        "no_followup",
-        "clear_claim",
-    }
-)
+from .monitor_metadata import MonitorPollObservation
 
 
 def build_canonical_update_intent(
@@ -127,23 +90,20 @@ def canonical_update_is_supported(
     note: str | None,
     intent: dict[str, Any],
     monitor_metadata: Any,
-    authority_reason: str | None,
-    status: str | None,
 ) -> bool:
     """Whether an ordinary update can use the canonical transaction.
 
-    Terminal completion and monitor polling retain their effect-owned paths.
+    User completion is routed to the typed terminal owner; Monitor observations
+    carry a versioned effect intent instead of a raw metadata patch.
+    Ordinary metadata is validated by the typed transaction, including rejection
+    of unsupported fields; this transport must not duplicate its field catalog.
     They must not silently fall back to Markdown after authority promotion.
     """
 
-    if monitor_metadata or authority_reason:
-        return False
-    if status is not None and status.strip().lower() == "done":
-        return False
-    if any(field not in _CANONICAL_INTENT_FIELDS for field in intent):
-        return False
+    if isinstance(monitor_metadata, MonitorPollObservation):
+        return True
     # Empty notes are the long-standing compatibility spelling for omission;
     # routing them to the canonical adapter would produce an empty patch and a
     # less useful protocol error. Text still uses the normal non-empty text
     # validator at the provider boundary.
-    return text is not None or (note is not None and bool(note.strip())) or bool(intent)
+    return text is not None or (note is not None and bool(note.strip())) or bool(intent) or bool(monitor_metadata)

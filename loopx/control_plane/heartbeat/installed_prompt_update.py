@@ -109,7 +109,7 @@ def reconcile(*, before: dict, registry: Path, home: Path,
                 # complete prompt-only request, plus a precondition to re-view.
                 import tomllib
                 try:
-                    manifest = tomllib.loads((home / "automations" / identifier / "automation.toml").read_text())
+                    manifest = tomllib.loads((home / "automations" / identifier / "automation.toml").read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     manifest = {}
                 required = {"name", "status", "rrule", "target_thread_id"}
@@ -123,6 +123,9 @@ def reconcile(*, before: dict, registry: Path, home: Path,
                             "notificationPolicy": manifest.get("notification_policy"),
                             "prompt": now["desired_prompt"]}})
         results.append(result)
+    from .prompt_upgrade_hook import record_deferred_upgrades
+    record_deferred_upgrades(registry=registry, home=home, runtime_root=runtime_root,
+        cli_bin=cli_bin, entries=current, results=results)
     pending = any(result["status"] not in {"current", "updated", "unmanaged", "missing"} for result in results)
     return {"ok": not pending, "status": "attention_required" if pending else "current", "results": results,
             "api_updates": api_updates,
@@ -184,7 +187,7 @@ def update_with_prompts(payload: dict, *, registry: Path, runtime_root: str | No
     try:
         # Do not accidentally import a checkout through the parent's PYTHONPATH.
         env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
-        result = subprocess.run(command, capture_output=True, text=True, env=env,
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
                                 timeout=timeout_seconds, cwd=directory)
         report = json.loads(result.stdout)
         if not isinstance(report, dict) or "results" not in report:

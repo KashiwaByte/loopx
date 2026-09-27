@@ -64,6 +64,8 @@ def test_dry_run_cannot_pause_or_resume_a_committed_operation(session):
     assert run(args)["external_sink_delivery_authorized"] is True
     run([*args, "--suppress-external-sinks"])
     denied = run(args, expected=1)
+    assert denied["settlement_progress"]["state"] == "spend_required"
+    assert "settlement_owed" not in denied  # Rejected recovery is not a spend instruction.
     key = denied["external_delivery"]["resume_key"]
     before = journal.read_bytes(), index.read_bytes()
     run([*args, "--resume-external-sinks", key, "--dry-run"])

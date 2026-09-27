@@ -13,7 +13,7 @@ SCHEDULER_ARBITRATION_SCHEMA_VERSION = "scheduler_arbitration_v0"
 
 class SchedulerDisposition(str, Enum):
     TERMINAL_STOP = "terminal_stop"
-    PEER_COORDINATION_STOP = "peer_coordination_stop"
+    PEER_COORDINATION_WAIT = "peer_coordination_wait"
     AGENT_MONITOR_ONLY_WAIT = "agent_monitor_only_wait"
     ACTIVE_WORK = "active_work"
     AGENT_SCOPE_WAIT = "agent_scope_wait"
@@ -80,7 +80,7 @@ def _classify_disposition(
     if mode == "terminal_no_followup":
         return SchedulerDisposition.TERMINAL_STOP, mode
     if mode == "peer_coordination_blocked":
-        return SchedulerDisposition.PEER_COORDINATION_STOP, mode
+        return SchedulerDisposition.PEER_COORDINATION_WAIT, mode
     if mode == "agent_monitor_only":
         return SchedulerDisposition.AGENT_MONITOR_ONLY_WAIT, mode
     if user_required and not must_attempt:

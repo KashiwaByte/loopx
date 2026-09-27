@@ -22,14 +22,15 @@ export const chatRecoveryScenario = {
       if (await managerNavigation.getByRole("button", { name: "总览", exact: true }).getAttribute("aria-current") !== "page") {
         throw new Error("Manager overview did not expose its persistent selected tab");
       }
-      await managerNavigation.getByRole("button", { name: "Chat", exact: true }).click();
-      if (await managerNavigation.getByRole("button", { name: "Chat", exact: true }).getAttribute("aria-current") !== "page") {
+      await managerNavigation.getByRole("button", { name: /^(Chat|对话)$/, exact: true }).click();
+      if (await managerNavigation.getByRole("button", { name: /^(Chat|对话)$/, exact: true }).getAttribute("aria-current") !== "page") {
         throw new Error("Manager Chat did not become the selected view");
       }
       if (await page.locator(".personal-home-board").isVisible()) throw new Error("Manager Chat kept the overview board visible");
       await managerNavigation.getByRole("button", { name: "总览", exact: true }).click();
       await page.locator(".personal-home-board").waitFor({ state: "visible" });
 
+      await page.locator(".personal-composer-tools > summary").click();
       await page.getByRole("button", { name: "汇总所有 Goal 进展" }).click();
       const reportDeadline = Date.now() + 5_000;
       while (!api.turnRequests.some((turn) => turn.message.includes("汇总所有活跃 Goal 的最新进展与阻塞")) && Date.now() < reportDeadline) {
@@ -38,12 +39,21 @@ export const chatRecoveryScenario = {
       if (!api.turnRequests.some((turn) => turn.message.includes("汇总所有活跃 Goal 的最新进展与阻塞"))) throw new Error("Progress report shortcut did not send a useful scoped request");
       while (await page.getByRole("button", { name: "汇总所有 Goal 进展" }).isDisabled()) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
       await page.locator(".personal-manager-conversation-tray").waitFor({ state: "visible" });
-      if (!(await page.getByTestId("personal-home-lane-running").isVisible())) throw new Error("Manager send replaced the four-lane home overview");
+      if (!(await page.locator(".personal-home-lanes").isVisible())) throw new Error("Manager send replaced the home lane overview");
       const managerUrlBefore = page.url();
       await page.getByRole("button", { name: "询问全局待办", exact: true }).click();
       await page.getByLabel("向 LoopX 发送消息").fill("我现在该做什么？只读回答，不要创建或修改任何状态。");
       await page.getByRole("button", { name: "发送", exact: true }).click();
       await page.getByText("管家已读取当前授权范围的 Goal 证据。", { exact: true }).waitFor({ state: "visible" });
+      // The steward answers as the LoopX Manager. The executor that served the
+      // turn belongs to the machine-capability chip, so an answer must never be
+      // labelled with the CLI brand the agent picker happens to hold.
+      const answerIdentity = (
+        await page.locator(".personal-manager-conversation-tray article.is-assistant strong").last().innerText()
+      ).trim();
+      if (answerIdentity !== "LoopX 管家") {
+        throw new Error(`Manager answer was labelled as its executor instead of the steward: ${answerIdentity}`);
+      }
       if (!api.turnRequests.some((turn) => turn.message.startsWith("我现在该做什么？"))) throw new Error("Manager question bypassed the global runtime");
       await page.getByText("查看完整对话", { exact: true }).waitFor({ state: "visible" });
       if (page.url() !== managerUrlBefore) throw new Error(`Manager send navigated away from the overview: ${managerUrlBefore} -> ${page.url()}`);
@@ -76,15 +86,70 @@ export const chatRecoveryScenario = {
       if (await page.locator(".personal-manager-conversation-tray").count()) throw new Error("Full manager Chat kept the compact home tray visible");
       if (await page.locator(".personal-channel-timeline .personal-message").count() < 4) throw new Error("Manager Chat did not show the complete conversation history");
       await page.screenshot({ path: resolve(outputDir, "manager-chat.png"), fullPage: false, animations: "disabled" });
+      await page.getByLabel("向 LoopX 发送消息").fill("请把库存方案交给 worker，保留预留两件的修订，并请同伴独立复核后回报。");
+      await page.getByRole("button", { name: "发送", exact: true }).click();
+      while (await page.getByRole("button", { name: "汇总所有 Goal 进展" }).isDisabled()) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      await page.screenshot({ path: resolve(outputDir, "collaboration-before.png"), fullPage: false, animations: "disabled" });
       const returnSessionId = api.turnRequests.at(-1).sessionId;
       const turnsBeforeReturn = api.turnRequests.length;
+      const delegatedMessage = page.__loopxRuntime.messages.get(returnSessionId).findLast((message) => message.role !== "user");
+      delegatedMessage.collaboration = {
+        schema_version: "collaboration_request_readback_v0", request_id: "a".repeat(64), agent_id: "worker",
+        brief: { purpose: "协作验证库存方案", context: "已否决平均分配；新补充是预留两件。",
+          constraints: ["不可超预算", "不可下真实订单"], inputs: [{ ref: "inputs/demand.csv", description: "需求数据" }],
+          acceptance: ["独立验证库存与预算"], return_requirement: "返回方案和复核结论" },
+        read_status: "pending", decision: "pending", returns: [],
+      };
+      const collaboration = page.getByRole("region", { name: "交办说明" });
+      await collaboration.waitFor({ state: "visible", timeout: 10000 });
+      await collaboration.getByText("查看交办内容", { exact: true }).click();
+      await collaboration.getByText("已否决平均分配；新补充是预留两件。", { exact: true }).waitFor({ state: "visible" });
+      if (!(await collaboration.innerText()).includes("不可超预算")) throw new Error("Delegation lost its constraints");
+      delegatedMessage.collaboration.read_status = "supplied";
+      delegatedMessage.collaboration.decision = "adopt";
+      await collaboration.getByText("接收方判断: 已采纳", { exact: true }).waitFor({ state: "visible", timeout: 10000 });
+      if (api.turnRequests.length !== turnsBeforeReturn) throw new Error("Collaboration readback started another model turn");
+      await page.setViewportSize({ width: 390, height: 844 });
+      await collaboration.evaluate((node) => node.scrollIntoView({ block: "start" }));
+      if (await collaboration.evaluate((node) => node.scrollWidth > node.clientWidth + 1)) throw new Error("Collaboration brief overflows on mobile");
+      await page.screenshot({ path: resolve(outputDir, "collaboration-brief-mobile.png"), fullPage: false, animations: "disabled" });
+      await page.setViewportSize({ width: 1512, height: 982 });
+      await collaboration.evaluate((node) => node.scrollIntoView({ block: "start" }));
+      await page.screenshot({ path: resolve(outputDir, "collaboration-brief-desktop.png"), fullPage: false, animations: "disabled" });
+      delegatedMessage.collaboration.goal_id = "community";
+      delegatedMessage.collaboration.decision = "defer";
+      delegatedMessage.collaboration.decision_reason = "先完成正在进行的交付；问卷尚未制作。";
+      delegatedMessage.collaboration.returns = [{ phase: "conclusion", status: "delivered" }];
+      await collaboration.getByText("接收方判断: 已暂缓", { exact: true }).waitFor({ state: "visible", timeout: 10000 });
+      await collaboration.getByText("原因: 先完成正在进行的交付；问卷尚未制作。", { exact: true }).waitFor({ state: "visible" });
+      await collaboration.getByText("回复已送达", { exact: true }).waitFor({ state: "visible" });
+      await collaboration.getByText("接收方: community / worker", { exact: true }).waitFor({ state: "visible" });
+      if ((await collaboration.innerText()).includes("结论已回传")) throw new Error("Deferred reply was presented as a completed conclusion");
+      await collaboration.evaluate((node) => node.scrollIntoView({ block: "start" }));
+      await page.screenshot({ path: resolve(outputDir, "collaboration-deferred-desktop.png"), fullPage: false, animations: "disabled" });
+      await page.setViewportSize({ width: 390, height: 844 });
+      if (await collaboration.evaluate((node) => node.scrollWidth > node.clientWidth + 1)) throw new Error("Deferred explanation overflows on mobile");
+      await page.screenshot({ path: resolve(outputDir, "collaboration-deferred-mobile.png"), fullPage: false, animations: "disabled" });
+      await page.setViewportSize({ width: 1512, height: 982 });
+      delegatedMessage.collaboration.returns = [{ phase: "conclusion", status: "explicit_unverified" }];
+      await collaboration.getByText("回复送达尚未核验", { exact: true }).waitFor({ state: "visible", timeout: 10000 });
+      if (api.turnRequests.length !== turnsBeforeReturn) throw new Error("Disposition readback started another model turn");
+      pass("collaboration-brief", "Original conversation preserves context, constraints, inputs and receiver decision without a new turn");
+
       const returnText = "处理结论：已核验新约束并关联现有计划，无需再次追问。";
       page.__loopxRuntime.messages.get(returnSessionId).push({
         message_id: "handoff.browser-fixture", turn_id: "original-delegation",
         role: "agent", origin: "manager_followup", text: `${returnText}\n\n- **已完成**：核验新约束\n- 下一步：继续现有计划\n\n1. 核对证据\n2. 汇报结论`,
         created_at: "2026-08-13T01:00:03Z",
+        return_delivery: {
+          schema_version: "manager_return_delivery_status_v0",
+          phase: "conclusion",
+          status: "verification_required",
+          error: "provider_delivery_unverified",
+        },
       });
       await page.getByText(returnText, { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
+      await page.getByText("正在核验送达，不会重复发送", { exact: true }).waitFor({ state: "visible" });
       const richConclusion = page.locator(".personal-channel-timeline .personal-message").filter({ hasText: returnText });
       if (await richConclusion.locator("ul > li").count() !== 2
         || await richConclusion.locator(".personal-md strong").innerText() !== "已完成") {
@@ -100,6 +165,15 @@ export const chatRecoveryScenario = {
       }
       await richConclusion.scrollIntoViewIfNeeded();
       await page.screenshot({ path: resolve(outputDir, "manager-automatic-conclusion.png"), fullPage: false, animations: "disabled" });
+      const returnedMessage = page.__loopxRuntime.messages.get(returnSessionId)
+        .find((message) => message.message_id === "handoff.browser-fixture");
+      returnedMessage.return_delivery = {
+        schema_version: "manager_return_delivery_status_v0",
+        phase: "conclusion",
+        status: "delivered",
+        verification: "reconciled_after_restart",
+      };
+      await page.getByText("恢复后已核验送达", { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
       await page.setViewportSize({ width: 390, height: 844 });
       await page.getByText(returnText, { exact: true }).waitFor({ state: "visible" });
       await richConclusion.scrollIntoViewIfNeeded();
@@ -140,9 +214,9 @@ export const chatRecoveryScenario = {
       pass(19, "Pasting a clipboard PNG attaches through the same validated composer path.");
       await page.locator(".personal-goal-link").first().click();
       const goalNavigation = page.getByRole("navigation", { name: "Goal 视图" });
-      await goalNavigation.getByRole("button", { name: "Chat" }).click();
+      await goalNavigation.getByRole("button", { name: /^(Chat|对话)$/ }).click();
       await page.locator(".personal-goal-link").first().click();
-      await goalNavigation.getByRole("button", { name: "Chat" }).click();
+      await goalNavigation.getByRole("button", { name: /^(Chat|对话)$/ }).click();
       await page.locator(".personal-run-row").first().click();
       await page.getByRole("tab", { name: "详情与操作" }).click();
       await page.getByLabel("输入纠偏信息").fill("保持运行，用于验证刷新恢复。 ");
@@ -159,11 +233,12 @@ export const chatRecoveryScenario = {
         await page.reload({ waitUntil: "networkidle" });
         await page.getByTestId("personal-goal-home").waitFor({ state: "visible" });
         await page.locator(".personal-goal-link").first().click();
-        await goalNavigation.getByRole("button", { name: "Chat" }).click();
-        await page.getByText("保持运行，用于验证刷新恢复。").waitFor({ state: "visible", timeout: 10_000 });
+        await goalNavigation.getByRole("button", { name: /^(Chat|对话)$/ }).click();
+        const recoveredChat = page.locator('[data-goal-panel="chat"]');
+        await recoveredChat.getByText("保持运行，用于验证刷新恢复。", { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
         // The live region also contains "<Agent>: 正在整理…" while a reply is
         // pending. Target the visible message placeholder, not both surfaces.
-        await page.getByText("正在整理…", { exact: true }).waitFor({ state: "hidden", timeout: 10_000 });
+        await recoveredChat.getByText("正在整理…", { exact: true }).waitFor({ state: "hidden", timeout: 10_000 });
         const recovered = page.__loopxRuntime.sessions.get(recoveryTurn.sessionId);
         if (recovered?.active_turn_id !== null && recovered?.active_turn_id !== recoveryTurn.turnId) {
           throw new Error("Recovered Session points at a different active Turn");

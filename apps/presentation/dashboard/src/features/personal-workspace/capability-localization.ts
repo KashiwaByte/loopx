@@ -13,13 +13,21 @@ type FieldCopy = Record<string, Readonly<{ description?: string; label: string }
 const capabilityCopy: Record<WorkspaceLocale, Record<string, LocalizedCopy>> = {
   en: {
     manager_runtime: {
-      displayName: "Manager runtime",
+      displayName: "Runtime",
       description: "Selects the persistent host-tool profile used by owner manager conversations.",
+    },
+    steward_executor: {
+      displayName: "Model and executor",
+      description: "Guides the steward executor, model, and selection boundary for this machine. A pinned route blocks substitution; a flexible pool permits only authorized fallback.",
     },
     todo_replan_cadence: { displayName: "Goal review cadence", description: "Configures the Goal review cadence." },
     change_quality_qualification: {
       displayName: "Change quality qualification",
       description: "Prepares a provider-neutral review packet, allows at most one policy-authorized safe-fix pass, and can require an exact-diff receipt.",
+    },
+    progress_review: {
+      displayName: "Progress-review sentinel",
+      description: "Records typed drift receipts from an external bounded review of scoped file deltas; assist may raise the existing autonomous replan obligation.",
     },
     explore_graph: {
       displayName: "Explore Graph",
@@ -39,8 +47,13 @@ const capabilityCopy: Record<WorkspaceLocale, Record<string, LocalizedCopy>> = {
       description: "Synchronizes accepted LoopX work state to the configured Lark Kanban heartbeat surface.",
     },
     local_authority_shadow: {
-      displayName: "Local authority shadow",
-      description: "Observes post-commit Todo and task-lease state through the shared authority contract without taking write authority.",
+      displayName: "Retired authority observation",
+      description: "No longer writes observations. Retained records are read-only, not promotion evidence.",
+      readOnlyReason: "Clear the old setting with configure-goal --clear-local-authority-shadow. Runtime shadow requires separate configuration and bootstrap.",
+    },
+    coordination_runtime_shadow: {
+      displayName: "Coordination runtime shadow",
+      description: "Captures transaction-bound Todo and task-lease mutations for reviewed whole-Goal coordination-authority promotion.",
     },
     multi_subagent: {
       displayName: "Adaptive child capacity",
@@ -65,13 +78,21 @@ const capabilityCopy: Record<WorkspaceLocale, Record<string, LocalizedCopy>> = {
   },
   "zh-CN": {
     manager_runtime: {
-      displayName: "管家 Runtime",
+      displayName: "运行环境",
       description: "选择管家会话持续生效的宿主工具模式。",
+    },
+    steward_executor: {
+      displayName: "模型与执行器",
+      description: "配置本机管家的执行器、模型与选择边界；锁定路径禁止替代，灵活池只允许在已授权范围内回退。",
     },
     todo_replan_cadence: { displayName: "Goal 复核周期", description: "配置 Goal 的复核周期。" },
     change_quality_qualification: {
       displayName: "变更质量验证",
       description: "生成与 Provider 无关的审阅包，最多允许一次策略授权的安全修复，并可要求精确 diff 回执。",
+    },
+    progress_review: {
+      displayName: "进展评估哨兵",
+      description: "记录外部有界评估对限定文件变化给出的类型化漂移回执；assist 模式可触发已有的自主重规划义务。",
     },
     explore_graph: {
       displayName: "探索图谱",
@@ -91,8 +112,13 @@ const capabilityCopy: Record<WorkspaceLocale, Record<string, LocalizedCopy>> = {
       description: "把 LoopX 已接受的工作状态同步到配置好的飞书看板心跳界面。",
     },
     local_authority_shadow: {
-      displayName: "本地 Authority 影子观测",
-      description: "通过共享 Authority contract 观测提交后的 Todo 与 task lease 状态，但不取得写入权。",
+      displayName: "已退役的 Authority 观测",
+      description: "不再写入观测。保留记录只读，不能作为晋升证据。",
+      readOnlyReason: "通过 configure-goal --clear-local-authority-shadow 清理旧设置；Runtime shadow 需要另行配置与 bootstrap。",
+    },
+    coordination_runtime_shadow: {
+      displayName: "协调 Runtime 影子",
+      description: "捕获事务绑定的 Todo 与 task lease 变更，为经评审的整 Goal 协调 Authority 晋级提供证据。",
     },
     multi_subagent: {
       displayName: "自适应子 Agent 容量",
@@ -120,6 +146,11 @@ const capabilityCopy: Record<WorkspaceLocale, Record<string, LocalizedCopy>> = {
 const fieldCopy: Record<WorkspaceLocale, FieldCopy> = {
   en: {
     runtime_profile: { label: "Runtime profile", description: "Restricted keeps scoped LoopX reads only. Trusted owner enables normal host tools while protected operations retain separate checks." },
+    selection_policy: { label: "Selection policy", description: "Preferred allows an explicit user choice; pinned rejects another executor; flexible permits fallback only inside the eligible pool." },
+    executor_endpoint: { label: "Primary steward executor", description: "The preferred or pinned executor for this machine. In a flexible pool it is tried first when available." },
+    eligible_endpoints: { label: "Flexible eligible executors", description: "One authorized executor per line. Use only with flexible selection and include the primary executor." },
+    executor_model: { label: "Model", description: "Optional model for the selected executor. Leave blank to keep the executor's own default." },
+    executor_reasoning_effort: { label: "Reasoning effort", description: "Optional reasoning effort for the selected executor. Leave blank to keep the executor's own default." },
     completed_todos: { label: "Completed Todos between Goal reviews", description: "Machine default or explicit Goal override, from 1 to 5." },
     allowed_domains: { label: "Allowed responsibility domains", description: "Enter one bounded, public-safe domain per line." },
     coordinator_agent_id: { label: "Coordinator Agent", description: "Use an already registered Agent id; leave blank to disable coordination." },
@@ -129,6 +160,7 @@ const fieldCopy: Record<WorkspaceLocale, FieldCopy> = {
     max_children: { label: "Maximum children", description: "Hard upper bound for concurrently delegated child work." },
     profile: { label: "Planner profile", description: "Select one registered Explore Harness profile." },
     profile_preset: { label: "Report profile", description: "Capability-owned report profile, such as weekly-progress." },
+    wait_for_ci: { label: "Wait for CI", description: "Disable to use local validation without querying or waiting for CI. Merge authority is unchanged." },
     review_priority: { label: "Review priority", description: "Choose whether other developers' PRs or the authenticated reviewer's own PRs are ranked first." },
     route_ref: { label: "Goal Channel route", description: "Public route alias only; credentials and provider identifiers stay outside this form." },
     safe_fix: { label: "Allow one bounded safe-fix pass" },
@@ -140,6 +172,11 @@ const fieldCopy: Record<WorkspaceLocale, FieldCopy> = {
   },
   "zh-CN": {
     runtime_profile: { label: "运行模式", description: "restricted 仅使用受限 LoopX 读取；trusted_owner 开放常规宿主工具，但受保护操作仍单独校验。" },
+    selection_policy: { label: "选择策略", description: "preferred 允许用户显式改选；pinned 拒绝其他执行器；flexible 只在已授权资源池内回退。" },
+    executor_endpoint: { label: "首选管家执行器", description: "本机首选或锁定的执行器；灵活池模式下优先尝试它。" },
+    eligible_endpoints: { label: "灵活池可用执行器", description: "每行一个已授权执行器，仅用于 flexible；必须包含首选执行器。" },
+    executor_model: { label: "模型", description: "所选执行器使用的模型，可留空；留空表示沿用执行器自身的默认模型。" },
+    executor_reasoning_effort: { label: "推理档位", description: "所选执行器使用的推理档位，可留空；留空表示沿用执行器自身的默认档位。" },
     completed_todos: { label: "两次 Goal 复核间的已完成 Todo 数", description: "可设置 1–5；机器默认值可被 Goal 显式覆盖。" },
     allowed_domains: { label: "允许的职责域", description: "每行填写一个有边界、可公开的职责域。" },
     coordinator_agent_id: { label: "协调 Agent", description: "填写一个已经注册的 Agent ID；留空表示关闭协调。" },
@@ -149,6 +186,7 @@ const fieldCopy: Record<WorkspaceLocale, FieldCopy> = {
     max_children: { label: "最大子 Agent 数", description: "可同时委派的子任务硬上限。" },
     profile: { label: "规划 Profile", description: "选择一个已注册的 Explore Harness profile。" },
     profile_preset: { label: "报告 Profile", description: "由该能力管理的报告 profile，例如 weekly-progress。" },
+    wait_for_ci: { label: "等待 CI", description: "关闭后使用本地验证，不查询或等待 CI；不改变合并权限。" },
     review_priority: { label: "审阅优先级", description: "选择先排其他开发者的 PR，还是先排当前已认证审阅者自己的 PR。" },
     route_ref: { label: "Goal Channel 路由", description: "只填写公开 route alias；凭据与 Provider 标识不会进入此表单。" },
     safe_fix: { label: "允许一次有界安全修复" },

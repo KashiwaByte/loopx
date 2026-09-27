@@ -155,8 +155,9 @@ def test_original_source_reply_waits_for_ack_and_rechecks_authority(
             runner=transport,
         )
 
-    with pytest.raises(ValueError, match="initial reply"):
+    with pytest.raises(ValueError, match="initial reply") as pending:
         invoke()
+    assert pending.value.reason == "initial_delivery_receipt_unavailable"
     assert not calls
     acknowledge_lark_event_inbox(
         project=root,
@@ -170,8 +171,9 @@ def test_original_source_reply_waits_for_ack_and_rechecks_authority(
         reaction_id="reaction_Get", emoji_type="Get",
     )
     if revoke_before_send:
-        with pytest.raises(ValueError, match="revoked"):
+        with pytest.raises(ValueError, match="revoked") as revoked:
             invoke()
+        assert revoked.value.reason == "return_authorization_unavailable"
         assert not sent
     else:
         result = invoke()

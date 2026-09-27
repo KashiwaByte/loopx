@@ -4,16 +4,18 @@ import pytest
 from loopx.todos import add_goal_todo, update_goal_todo
 from loopx.control_plane.testing.canary_harness import run_json_cli_result
 from tests.control_plane.test_monitor_followthrough_contract import (
-    AGENT_ID, GOAL_ID, _add_monitor, _write_fixture,
+    AGENT_ID, GOAL_ID, _write_fixture,
 )
 
 
 def waiting_goal(tmp_path):
     registry, runtime, state = _write_fixture(tmp_path)
-    monitor = _add_monitor(registry, text="Observe fixture", target_key="fixture")
-    update_goal_todo(registry_path=registry, goal_id=GOAL_ID,
-        todo_id=monitor["todo_id"], agent_id=AGENT_ID,
-        monitor_metadata={"material_change_generation": "3"})
+    # Initialize historical evidence through the create/import boundary;
+    # ordinary configuration cannot manufacture an observation generation.
+    monitor = add_goal_todo(registry_path=registry, goal_id=GOAL_ID, role="agent",
+        text="Observe fixture", task_class="continuous_monitor", claimed_by=AGENT_ID,
+        monitor_metadata={"target_key": "fixture", "cadence": "1h", "watch_only": "true",
+                          "material_change_generation": "3"})
     def add(text):
         return add_goal_todo(registry_path=registry, goal_id=GOAL_ID,
             role="agent", task_class="advancement_task", text=text, claimed_by=AGENT_ID)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import html
@@ -17,16 +18,24 @@ from ...extensions.runtime import (
     execute_extension_runtime_binding,
     resolve_extension_binding,
 )
+from .card_callback import (
+    callback_card_content_matches,
+    callback_timestamp,
+    operator_membership_verified,
+    patch_result_card,
+    read_callback_card_content,
+    update_callback_card,
+)
 from .goal_channel_contracts import operation_packet
 from .goal_channel_delivery_contract import (
     goal_channel_binding_digest,
     goal_channel_delivery_route,
 )
 from .goal_channel_message_delivery import (
+    GoalChannelDeliveryStageError,
     GoalChannelMessageDeliverySession,
     resolve_bound_goal_channel,
 )
-from .goal_channel_transport import call, json_payload, lark_args
 from .presentation.kanban import CommandRunner, default_subprocess_runner
 
 
@@ -295,6 +304,22 @@ def build_goal_channel_operation_card(
     }
 
 
+def _submitted_confirmation_card(proposal: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild the immutable submitted card after the operation has advanced."""
+
+    operation = proposal.get("operation")
+    if not isinstance(operation, Mapping):
+        raise ValueError("typed operation envelope is unavailable")
+    if operation.get("lifecycle_state") == "awaiting_confirmation":
+        return build_goal_channel_operation_card(proposal)
+    replay = deepcopy(dict(proposal))
+    replay_operation = replay.get("operation")
+    if not isinstance(replay_operation, dict):
+        raise ValueError("typed operation envelope is unavailable")
+    replay_operation["lifecycle_state"] = "awaiting_confirmation"
+    return build_goal_channel_operation_card(replay)
+
+
 def build_goal_channel_operation_result_card(
     proposal: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -410,13 +435,7 @@ def deliver_goal_channel_operation_card(
     goal_id = str(parameters["goal_id"])
     if expected_goal_id is not None and goal_id != expected_goal_id:
         raise ActionConflictError("operation proposal belongs to another goal")
-    resolved_executor = dict(
-        executor_binding_resolver(parameters, runtime_root)
-        if executor_binding_resolver is not None
-        else _resolve_operation_executor_binding(parameters, runtime_root=runtime_root)
-    )
-    if resolved_executor.get("revision") != parameters["executor"]["revision"]:
-        raise ActionConflictError("operation executor revision is not ready")
+    confirmed_operation_executor(parameters, runtime_root, executor_binding_resolver)
     agent_id = str(parameters["agent_id"])
     binding = resolve_bound_goal_channel(
         binding_path=binding_path,
@@ -465,10 +484,22 @@ def deliver_goal_channel_operation_card(
         runner=runner,
     )
     if session.verify(route) is not True:
-        raise ValueError("Goal Channel sender identity could not be verified")
+        raise GoalChannelDeliveryStageError(
+            "Goal Channel sender identity could not be verified",
+            blocker="sender_identity_unverified",
+            failure_stage="verify_sender_identity",
+        )
     sent = dict(session.send(card, key, route))
     message_id = str(sent.get("message_id") or "")
-    observed = dict(session.readback(message_id))
+    try:
+        observed = dict(session.readback(message_id))
+    except Exception as exc:
+        raise GoalChannelDeliveryStageError(
+            "operation card delivery outcome is unknown after the provider write",
+            blocker="delivery_outcome_unknown",
+            failure_stage="read_operation_card",
+            external_write_performed=None,
+        ) from exc
     if not (
         observed.get("verified") is True
         and observed.get("message_id") == message_id
@@ -488,18 +519,30 @@ def deliver_goal_channel_operation_card(
             receipt_id=proposal_id,
             blocker="readback_unverified",
         )
-    store.record_operation_delivery(
-        proposal_id,
-        delivery={
-            "provider": "lark",
-            "message_id": message_id,
-            "chat_id": route["chat_id"],
-            "app_id": route["bot_app_id"],
-            "binding_digest": goal_channel_binding_digest(binding),
-            "card_digest": card_digest,
-            "delivered_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
+    try:
+        store.record_operation_delivery(
+            proposal_id,
+            delivery={
+                "provider": "lark",
+                "message_id": message_id,
+                "chat_id": route["chat_id"],
+                "app_id": route["bot_app_id"],
+                "binding_digest": goal_channel_binding_digest(binding),
+                "card_digest": card_digest,
+                "delivered_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        store.record_operation_delivery_snapshot(
+            proposal_id,
+            submitted_card=card,
+        )
+    except Exception as exc:
+        raise GoalChannelDeliveryStageError(
+            "operation card was delivered but its receipt could not be recorded",
+            blocker="delivery_receipt_write_failed",
+            failure_stage="record_delivery_receipt",
+            external_write_performed=None,
+        ) from exc
     return operation_packet(
         ok=True,
         goal_id=goal_id,
@@ -547,108 +590,36 @@ def _callback_action(event: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _callback_timestamp(value: object) -> str:
-    token = str(value or "").strip()
-    if not token.isdigit() or len(token) > 16:
-        raise ValueError("operation callback timestamp is invalid")
-    return (
-        datetime.fromtimestamp(
-            int(token) / 1000,
-            tz=timezone.utc,
-        )
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
+    return callback_timestamp(value, subject="operation")
 
 
-def _operator_membership_verified(
+_callback_card_content_matches = callback_card_content_matches
+_read_callback_card_content = read_callback_card_content
+
+
+def _callback_replays_confirmation(
     *,
-    runner: CommandRunner,
-    cli_bin: str,
-    profile: str,
-    chat_id: str,
-    operator_id: str,
+    confirmation: object,
+    action: Mapping[str, str],
+    event: Mapping[str, Any],
+    operator_principal: str,
+    profile_app_id: str,
 ) -> bool:
-    chat_result = call(
-        runner,
-        lark_args(
-            cli_bin=cli_bin,
-            profile=profile,
-            tail=[
-                "im",
-                "chats",
-                "get",
-                "--chat-id",
-                chat_id,
-                "--as",
-                "bot",
-                "--format",
-                "json",
-            ],
-        ),
-    )
-    member_result = call(
-        runner,
-        lark_args(
-            cli_bin=cli_bin,
-            profile=profile,
-            tail=[
-                "im",
-                "+chat-members-list",
-                "--chat-id",
-                chat_id,
-                "--member-types",
-                "user",
-                "--member-id-type",
-                "open_id",
-                "--page-all",
-                "--as",
-                "bot",
-                "--format",
-                "json",
-            ],
-        ),
-    )
-    if chat_result.get("returncode") != 0 or member_result.get("returncode") != 0:
+    if not isinstance(confirmation, Mapping):
         return False
-    chat_payload = json_payload(chat_result)
-    member_payload = json_payload(member_result)
-    chat_tenant = _first_tenant_key(chat_payload)
-    member_tenant = _member_tenant_key(member_payload, operator_id)
-    return bool(chat_tenant and member_tenant and chat_tenant == member_tenant)
+    expected = {
+        "event_id": str(event["event_id"]),
+        "principal": operator_principal,
+        "message_id": str(event["message_id"]),
+        "chat_id": str(event["chat_id"]),
+        "app_id": profile_app_id,
+        "confirmation_digest": action["confirmation_digest"],
+        "decision": action["decision"],
+    }
+    return all(confirmation.get(key) == value for key, value in expected.items())
 
 
-def _first_tenant_key(value: object) -> str | None:
-    if isinstance(value, Mapping):
-        candidate = value.get("tenant_key")
-        if isinstance(candidate, str) and candidate:
-            return candidate
-        for child in value.values():
-            if found := _first_tenant_key(child):
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            if found := _first_tenant_key(child):
-                return found
-    return None
-
-
-def _member_tenant_key(value: object, operator_id: str) -> str | None:
-    if isinstance(value, Mapping):
-        identities = {
-            str(value.get(key) or "")
-            for key in ("member_id", "open_id", "operator_id", "id")
-        }
-        tenant_key = value.get("tenant_key")
-        if operator_id in identities and isinstance(tenant_key, str) and tenant_key:
-            return tenant_key
-        for child in value.values():
-            if found := _member_tenant_key(child, operator_id):
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            if found := _member_tenant_key(child, operator_id):
-                return found
-    return None
+_operator_membership_verified = operator_membership_verified
 
 
 def _resolve_operation_executor_binding(
@@ -664,6 +635,76 @@ def _resolve_operation_executor_binding(
         protocol=str(executor["protocol"]),
         permission=str(executor["permission"]),
     )
+
+
+class OperationExecutorDriftError(ActionConflictError):
+    """The requested executor revision does not match the active binding.
+
+    Raised before any durable proposal is written and again at delivery, so
+    a stale proposal can never reach the provider. `details` carries only
+    opaque revision identifiers.
+    """
+
+    def __init__(
+        self,
+        summary: str,
+        *,
+        failure_stage: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(summary)
+        self.blocker = "executor_revision_drift"
+        self.failure_stage = failure_stage
+        self.details = dict(details or {})
+        self.external_write_performed = False
+
+
+def confirmed_operation_executor(
+    parameters: Mapping[str, Any],
+    runtime_root: Path,
+    executor_binding_resolver: (
+        Callable[[Mapping[str, Any], Path], Mapping[str, Any]] | None
+    ),
+) -> dict[str, Any]:
+    """Resolve the declared executor binding against the active revision.
+
+    Shared by prepare (before any durable write) and deliver, so a proposal
+    whose executor revision no longer matches the installed extension is
+    rejected with a typed blocker instead of surfacing later as an
+    unreachable gated proposal. Resolution failures never leak the private
+    resolver text. ``executor_binding_resolver`` is a test seam with the same
+    shape as the delivery runner: production callers leave it unset and get the
+    extension binding resolver, so it is not a supported configuration entry.
+    """
+
+    executor = parameters.get("executor")
+    requested_revision = (
+        executor.get("revision") if isinstance(executor, Mapping) else None
+    )
+    try:
+        resolved = dict(
+            executor_binding_resolver(parameters, runtime_root)
+            if executor_binding_resolver is not None
+            else _resolve_operation_executor_binding(
+                parameters, runtime_root=runtime_root
+            )
+        )
+    except ValueError as exc:
+        raise GoalChannelDeliveryStageError(
+            "operation executor binding is unavailable",
+            blocker="executor_unavailable",
+            failure_stage="resolve_executor_binding",
+        ) from exc
+    if resolved.get("revision") != requested_revision:
+        raise OperationExecutorDriftError(
+            "operation executor revision is not ready",
+            failure_stage="resolve_executor_binding",
+            details={
+                "requested_executor_revision": requested_revision,
+                "active_executor_revision": resolved.get("revision"),
+            },
+        )
+    return resolved
 
 
 def _execute_claimed_operation(
@@ -712,199 +753,8 @@ def _execute_claimed_operation(
     return result
 
 
-def _find_message(value: object, message_id: str) -> Mapping[str, Any] | None:
-    if isinstance(value, Mapping):
-        if str(value.get("message_id") or "") == message_id:
-            return value
-        for child in value.values():
-            if found := _find_message(child, message_id):
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            if found := _find_message(child, message_id):
-                return found
-    return None
-
-
-def _message_card(value: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    body = value.get("body")
-    raw = body.get("content") if isinstance(body, Mapping) else value.get("content")
-    try:
-        card = json.loads(raw) if isinstance(raw, str) else raw
-    except json.JSONDecodeError:
-        return None
-    return card if isinstance(card, Mapping) else None
-
-
-def _result_card_readback_verified(
-    payload: Mapping[str, Any],
-    *,
-    message_id: str,
-    chat_id: str,
-    app_id: str,
-    card: Mapping[str, Any],
-) -> bool:
-    message = _find_message(payload, message_id)
-    sender = message.get("sender") if isinstance(message, Mapping) else None
-    observed_card = _message_card(message) if isinstance(message, Mapping) else None
-    return bool(
-        payload.get("ok") is True
-        and isinstance(message, Mapping)
-        and str(message.get("chat_id") or "") == chat_id
-        and isinstance(sender, Mapping)
-        and sender.get("sender_type") == "app"
-        and sender.get("id") == app_id
-        and isinstance(observed_card, Mapping)
-        and _digest(observed_card) == _digest(card)
-    )
-
-
-def _read_result_card(
-    *,
-    runner: CommandRunner,
-    cli_bin: str,
-    profile: str,
-    message_id: str,
-) -> tuple[Mapping[str, Any], bool]:
-    readback = call(
-        runner,
-        lark_args(
-            cli_bin=cli_bin,
-            profile=profile,
-            tail=[
-                "im",
-                "+messages-mget",
-                "--message-ids",
-                message_id,
-                "--as",
-                "bot",
-                "--no-reactions",
-                "--format",
-                "json",
-            ],
-        ),
-    )
-    return json_payload(readback), readback.get("returncode") == 0
-
-
-def _update_callback_card(
-    *,
-    runner: CommandRunner,
-    cli_bin: str,
-    profile: str,
-    token: str,
-    card: Mapping[str, Any],
-    message_id: str,
-    chat_id: str,
-    app_id: str,
-) -> dict[str, bool]:
-    result = call(
-        runner,
-        lark_args(
-            cli_bin=cli_bin,
-            profile=profile,
-            tail=[
-                "api",
-                "POST",
-                "/open-apis/interactive/v1/card/update",
-                "--as",
-                "bot",
-                "--data",
-                json.dumps(
-                    {"token": token, "card": dict(card)},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ],
-        ),
-    )
-    payload = json_payload(result)
-    write_performed = result.get("returncode") == 0 and payload.get("ok") is True
-    if not write_performed:
-        return {"external_write_performed": False, "readback_verified": False}
-    readback_payload, readback_ok = _read_result_card(
-        runner=runner,
-        cli_bin=cli_bin,
-        profile=profile,
-        message_id=message_id,
-    )
-    verified = bool(
-        readback_ok
-        and _result_card_readback_verified(
-            readback_payload,
-            message_id=message_id,
-            chat_id=chat_id,
-            app_id=app_id,
-            card=card,
-        )
-    )
-    return {
-        "external_write_performed": True,
-        "readback_verified": verified,
-    }
-
-
-def _patch_operation_result_card(
-    *,
-    runner: CommandRunner,
-    cli_bin: str,
-    profile: str,
-    card: Mapping[str, Any],
-    message_id: str,
-    chat_id: str,
-    app_id: str,
-) -> dict[str, bool]:
-    result = call(
-        runner,
-        lark_args(
-            cli_bin=cli_bin,
-            profile=profile,
-            tail=[
-                "im",
-                "messages",
-                "patch",
-                "--message-id",
-                message_id,
-                "--data",
-                json.dumps(
-                    {
-                        "content": json.dumps(
-                            dict(card),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                "--as",
-                "bot",
-                "--format",
-                "json",
-            ],
-        ),
-    )
-    payload = json_payload(result)
-    write_performed = result.get("returncode") == 0 and payload.get("ok") is True
-    if not write_performed:
-        return {"external_write_performed": False, "readback_verified": False}
-    readback_payload, readback_ok = _read_result_card(
-        runner=runner,
-        cli_bin=cli_bin,
-        profile=profile,
-        message_id=message_id,
-    )
-    verified = readback_ok and _result_card_readback_verified(
-        readback_payload,
-        message_id=message_id,
-        chat_id=chat_id,
-        app_id=app_id,
-        card=card,
-    )
-    return {
-        "external_write_performed": True,
-        "readback_verified": verified,
-    }
+_update_callback_card = update_callback_card
+_patch_operation_result_card = patch_result_card
 
 
 def recover_goal_channel_operation_results(
@@ -1071,13 +921,6 @@ def handle_goal_channel_operation_callback(
             raise ValueError(f"operation callback {field} is invalid")
     if str(event.get("host") or "") != "im_message":
         raise ValueError("operation callback host is unsupported")
-    card_content = event.get("card_content")
-    try:
-        card = json.loads(card_content) if isinstance(card_content, str) else None
-    except json.JSONDecodeError as exc:
-        raise ValueError("operation callback card_content is invalid") from exc
-    if not isinstance(card, Mapping):
-        raise ValueError("operation callback requires exact card_content")
     store = ChatActionStore(action_store_root)
     proposal = store.load(action["operation_id"])
     if proposal is None:
@@ -1088,8 +931,6 @@ def handle_goal_channel_operation_callback(
         raise ActionConflictError("operation card delivery was not recorded")
     if action["confirmation_digest"] != operation.get("confirmation_digest"):
         raise ActionConflictError("operation callback digest drifted")
-    if _digest(card) != delivery.get("card_digest"):
-        raise ActionConflictError("operation callback card content drifted")
     if profile_app_id != delivery.get("app_id"):
         raise ActionConflictError("operation callback app identity drifted")
     operator_id = str(event["operator_id"])
@@ -1097,6 +938,35 @@ def handle_goal_channel_operation_callback(
     chat_id = str(event["chat_id"])
     if operator_principal not in set(parameters.get("authorized_principals") or []):
         raise ActionConflictError("principal is not authorized for this operation")
+    if not _callback_replays_confirmation(
+        confirmation=operation.get("confirmation"),
+        action=action,
+        event=event,
+        operator_principal=operator_principal,
+        profile_app_id=profile_app_id,
+    ):
+        submitted_card = delivery.get("submitted_card")
+        expected_card = (
+            dict(submitted_card)
+            if isinstance(submitted_card, Mapping)
+            else _submitted_confirmation_card(proposal)
+        )
+        if _digest(expected_card) != delivery.get("card_digest"):
+            raise ActionConflictError("recorded operation card digest drifted")
+        card_content = event.get("card_content")
+        if card_content is None or card_content == "":
+            card_content = _read_callback_card_content(
+                runner=runner,
+                cli_bin=cli_bin,
+                profile=profile,
+                message_id=str(event["message_id"]),
+                chat_id=chat_id,
+                app_id=profile_app_id,
+            )
+        if card_content is None or card_content == "":
+            raise ValueError("operation callback card content is unavailable")
+        if not _callback_card_content_matches(card_content, expected_card):
+            raise ActionConflictError("operation callback card content drifted")
     if not _operator_membership_verified(
         runner=runner,
         cli_bin=cli_bin,

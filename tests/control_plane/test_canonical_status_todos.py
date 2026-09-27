@@ -71,14 +71,14 @@ def promoted_goal(tmp_path: Path, request):
 
 
 @pytest.mark.parametrize("display", ["stale", "missing", "invalid_utf8"])
-def test_status_uses_provider_even_when_markdown_is_unusable(promoted_goal, display, monkeypatch):
+def test_status_uses_provider_and_allows_native_monitor_writeback_without_display(promoted_goal, display, monkeypatch):
     goal, runtime, state = promoted_goal
     if display == "invalid_utf8":
         state.write_bytes(b"\xff")
     original = state.read_bytes()
     if display == "missing":
         state.unlink()
-    for name in ("active_state_event_projection_fields", "parse_active_state_todos"):
+    for name in ("parse_active_state_todos",):
         monkeypatch.setattr(
             f"loopx.status.{name}",
             lambda *_args, **_kwargs: pytest.fail("promoted read must not parse legacy Todos"),
@@ -89,7 +89,7 @@ def test_status_uses_provider_even_when_markdown_is_unusable(promoted_goal, disp
     assert items[0]["claimed_by"] == "agent-a"
     assert fields["standing_decision_authority"]["active_count"] == 0
     assert fields["standing_decision_authority"]["entries"][0]["outcome"] == "reject"
-    assert fields["agent_todos"]["monitor_writeback"]["supported"] is False
+    assert "monitor_writeback" not in fields["agent_todos"]  # Native observation owns writeback.
     if display == "missing":
         assert not state.exists()  # A read must not recreate the display.
     else:

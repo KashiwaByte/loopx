@@ -119,6 +119,25 @@ Directly editing a projection is not a state transition.
 
 ## Markdown Ownership Boundary
 
+New bootstrap and project-registration documents quote each Objective line and
+escape HTML metacharacters. Fences, comments, headings, and Todo markers in the
+objective remain content rather than document structure. Frontmatter string
+encoding and readback share JSON semantics, including escaped Unicode line
+separators; only complete delimiter lines terminate frontmatter. Objective
+readback composes the existing section reader and decodes generated quotation.
+Registration compares metadata values and exact remaining narrative, accepting
+legacy Objective presentation without rewriting it; changed content still conflicts.
+
+This is the permanent Python presentation/legacy-input adapter described by the
+[TypeScript RFC](../../architecture/rfcs/typescript-control-plane-migration-v0.md#next-delivery-sequence)
+and [shared-authority RFC](../../architecture/rfcs/shared-goal-authority-state-provider-v0.md#next-delivery-and-parallel-provider-work).
+It adds no business rule, RPC, provider, or authority write. Post-cutover Todo
+consumers still read canonical state when Markdown is absent or malformed;
+rendering never imports Objective examples into that state. Before cutover,
+the existing legacy writer remains subject to its normal fence. Objective is
+independent Goal narrative, outside the Todo store and Todo-section recovery.
+Existing malformed documents are not automatically repaired.
+
 Markdown is not one undifferentiated database row. Agents generate and maintain
 both its structured sections and narrative through LoopX. The distinction is
 canonical ownership, not human versus Agent authorship: after promotion,
@@ -200,11 +219,14 @@ freshness guarantee.
 Each section includes a compact `loopx:todo-section-projection-v0` marker with
 the canonical provider revision and a SHA-256 digest of the complete canonical
 records for that role. The marker is lineage evidence, not a write API.
-The command proves that the rendered records came from the exact provider head
-observed at read time. It does not claim that the revision remains the current
-head after that read; a later canonical mutation makes the Markdown projection
-stale until the journal-backed delivery replays. Consumers must always read the
-provider, never the Markdown marker, when they need current authority state.
+The command proves that the rendered records came from an exact provider head.
+Execution now also reads authority **after** durable file readback: `delivered`
+and `current` require the rendered revision to match that observed head. This
+strengthens the previous read-time provenance contract; a successful file write
+alone no longer acknowledges delivery when an overlapping commit is observed.
+`observed_provider_revision` names the confirmation point, not a lock on future
+commits. Later mutations can still make the display stale. Consumers must always
+read the provider, never the Markdown marker, for current authority state.
 
 Rollback is intentionally asymmetric. Before promotion, the existing shadow
 rollback quarantines the candidate provider lineage and Markdown remains
@@ -235,6 +257,47 @@ from facts; old wire `effective` hints are accepted but cannot override them.
 有效租约，未过期但持有人失去资格时返回原因，不自动续租、转移或清理。
 读取不提供写授权；release 的 key/version 门禁与幂等、CAS 规则保持不变。
 
+### Refresh recovery and authoritative diagnostics
+
+After promotion, a successful non-preview `refresh-state` now attempts Todo
+projection delivery, including recovery of a previously committed same-Turn
+writeback. CLI and Turn use the same path. Legacy refresh and preview remain
+non-repairing; rejected admission does not acquire a display-write opportunity.
+A provider or display failure after the refresh commit is `projection_delivery=pending`,
+not a failed or repeated business write. JSON and Markdown responses disclose
+that distinction. Retry the original Turn, or use `todo project-markdown` with a
+fresh provider revision; do not repeat Todo completion or quota spend.
+
+The planner retains its complete canonical snapshot for delivery rather than
+immediately reading it again. The renderer still confirms authority after
+durable file readback. TS returns a typed `next_action=retry|finish`; only
+latest-head intent may retry an overlap, and no fourth attempt is admitted.
+Pinned explicit projection preserves its requested revision. These are internal,
+co-deployed request fields, not persisted request bytes or new receipt versions.
+Existing receipts and provider formats are unchanged.
+
+The refresh record's missing-work diagnosis also uses the same canonical Todo
+summary. Stale Markdown cannot fabricate a missing-task warning or hide a truly
+empty canonical group. Markdown remains the source of independent narrative.
+Delivery can catch up to a newer provider revision without rewriting the earlier
+refresh record or pretending its original planning snapshot was newer.
+
+Recovery adds real rendering, file durability and confirmation work to committed
+promoted refreshes. It is not a free read or a claim of lower latency. The normal
+path shares the planning read and adds one confirmation read; same-Turn replay
+loads the current head before repairing. Missing display recovers only Todo
+sections, with the existing private-validation digest and source-ownership
+checks. It cannot reconstruct independent Goal narrative or bypass an
+unavailable private validation declaration. No timer, new outbox, persistent ACK,
+provider default or active-Goal migration is introduced.
+
+中文：已晋升 Goal 的非预览 `refresh-state` 和同 Turn 重试现在会恢复 Todo 显示。
+业务成功、显示 pending 分别报告；只重试显示，不重新完成 Todo 或扣费。规划、缺失工作
+诊断与投影起点复用完整 canonical 快照，权威空集合不回退到旧 Markdown；耐久写入后
+仍读取 provider 确认，由 TS 统一决定是否追赶以及三次上限。Legacy、预览与拒绝请求
+不获得新的显示写入。这个默认行为变化只影响已晋升 Goal，增加了渲染和耐久确认成本；
+不改变默认 provider。缺失文件仅恢复 Todo 区域，不能恢复独立 Goal 叙述。
+
 ## Migration Path
 
 The projector accepts complete legacy records and native `TodoDomainRecord`
@@ -251,19 +314,53 @@ one provider transaction. After that commit, the Python compatibility adapter
 renders the latest head under the Markdown lock and durably reads it back. A
 renderer/write failure leaves typed `pending` delivery
 evidence without reversing or hiding the canonical commit. A later successful
-mutation or `todo project-markdown --execute` replays the current head
-idempotently. This is projection recovery, not a second authority path.
+mutation, committed `refresh-state` (including same-Turn replay), or
+`todo project-markdown --execute` replays the current head idempotently. This is projection recovery, not a second authority path.
 The ordinary state writer and projection writer share durable atomic publication.
 Missing-display recovery uses create-only publication and cannot overwrite a
 concurrently restored document. When bytes already match, execution still syncs
 the file and parent directory before reporting `current`: a previous failure
 may have occurred after rename but before directory durability. A failed barrier
 keeps delivery `pending` and does not acknowledge or repeat the business mutation.
-Preview remains read-only.
+Preview remains read-only and does not request a delivery confirmation.
+
+Unpinned mutation settlement makes at most three delivery attempts under the
+existing display lock, reusing a newer complete read for the next attempt. A
+pinned `project-markdown --provider-revision` checks its basis before writing and
+never silently retargets another revision. An overlap after its write returns
+`pending`, the rendered and observed revisions, `delivery_attempts`, and
+`retry_business_mutation=false`. Persistent churn also returns pending rather
+than looping indefinitely. A confirmation outage preserves the successful
+business commit and remains retryable through the existing projection path.
+Archived Monitor material generations use the same numeric decoder as active
+reads and capture. Textual metadata such as `material_change_generation=12`
+round-trips to the canonical integer; zero remains present and mismatched values
+still fail parity. This fixes full-document recovery rejected by retained archived
+Monitors without rewriting their authority records.
+
+No new queue, persistent ACK, background worker, authority write or provider
+default is introduced. Ordinary list/exact reads keep their response shape;
+only the internal projection readback request opts into confirmation metadata.
+
+The TypeScript read owner validates complete canonical data and compares the
+host's durable readback revision with the same loaded head. Python retains
+Markdown ownership, physical durability and rendering. The TypeScript confirmation
+owns latest-head versus pinned intent and the three-attempt retry decision. A missing
+confirmation from a downlevel runtime cannot be treated as delivery success.
+The normal successful execution adds one provider read; each caught-up attempt
+reuses the already returned full snapshot. This is a freshness cost, not a
+latency improvement or atomic transaction across the database and filesystem.
 
 中文：普通状态与投影共用原子落盘；缺失展示通过仅创建方式发布，避免覆盖并发恢复。
-字节相同的执行重试也重新完成文件和目录耐久化，之后才报告 `current`；失败继续
-保留“业务已提交、展示 pending”，不确认投影交付、不重执行业务。预览不写入。
+字节相同的执行重试也重新完成文件和目录耐久化。现在还必须在落盘后重新读取 authority，
+由 TS 核对版本，才能确认 `current/delivered`。这加强了旧的“读取时来源正确”合同；
+确认只对应一次观察点，不承诺之后永不变旧。未固定版本的交付最多尝试三次，复用较新
+完整快照；显式 `--provider-revision` 不自动换目标。持续并发或确认失败保留业务提交，
+展示返回 pending，重试只恢复展示，不重复业务。缺失文件的第二次追赶使用普通原子
+替换，不能继续误用仅创建写入。预览不写入，也不确认交付。未新增队列、持久 ACK、
+后台任务或默认 provider；普通读取形状不变，正常交付增加一次真实 provider 读取。
+归档 Monitor 的代数元数据复用现有整数解码，修复字符串与整数比较造成的整份恢复失败；
+零值仍保留，语义不一致仍拒绝，不改写 canonical 记录。
 
 Supported non-Monitor Agent updates include action/domain/repository and required
 write scopes, required/target capabilities and Explore node references. These

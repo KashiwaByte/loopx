@@ -1,10 +1,10 @@
 """Typed LoopX Turn transaction planning and receipt validation."""
 
 from __future__ import annotations
+from .turn_contract_generated import LoopXTurnResultKind  # compatibility re-export
 
 import json
 from collections.abc import Mapping
-from enum import Enum
 from hashlib import sha256
 from typing import Any
 
@@ -24,20 +24,6 @@ LOOPX_TURN_RECEIPT_VALIDATION_SCHEMA_VERSION = "loopx_turn_receipt_validation_v0
 LOOPX_TURN_EXECUTION_SCHEMA_VERSION = "loopx_turn_execution_v0"
 TRANSACTION_PHASES = TURN_TRANSACTION_PHASES
 
-
-class LoopXTurnResultKind(str, Enum):
-    VALIDATED_PROGRESS = "validated_progress"
-    VALIDATED_COMPLETION = "validated_completion"
-    REPAIR_REQUIRED = "repair_required"
-    REPLAN_REQUIRED = "replan_required"
-    USER_ACTION_REQUIRED = "user_action_required"
-    WAIT = "wait"
-    ITERATION_FAILED = "iteration_failed"
-    HOST_FAILURE = "host_failure"
-    VALIDATION_FAILED = "validation_failed"
-    WRITEBACK_FAILED = "writeback_failed"
-    QUOTA_SPEND_FAILED = "quota_spend_failed"
-    TERMINAL_CLOSEOUT_FAILED = "terminal_closeout_failed"
 
 
 MATERIAL_RESULT_KINDS = {
@@ -140,6 +126,7 @@ def build_loopx_turn_transaction_plan(
     session_action: str,
     scheduler_owner: str = "none",
     turn_instance_id: str | None = None,
+    goal_ref: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     normalized_instance_id = normalize_turn_instance_id(turn_instance_id)
     identity = {
@@ -151,6 +138,8 @@ def build_loopx_turn_transaction_plan(
     }
     if normalized_instance_id is not None:
         identity["turn_instance_id"] = normalized_instance_id
+    if goal_ref is not None:
+        identity["goal_ref"] = dict(goal_ref)
     turn_key = _canonical_hash(identity)
     settlement_identity = SettlementIdentity(
         goal_id=str(lineage.get("goal_id") or ""),
@@ -212,6 +201,8 @@ def build_loopx_turn_transaction_plan(
         plan["settlement_plan"] = settlement_plan.as_dict()
     if normalized_instance_id is not None:
         plan["turn_instance_id"] = normalized_instance_id
+    if goal_ref is not None:
+        plan["goal_ref"] = dict(goal_ref)
     return plan
 
 

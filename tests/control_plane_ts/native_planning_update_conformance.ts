@@ -18,6 +18,58 @@ async function head(store: AuthorityStore) {
 }
 
 export function registerNativePlanningUpdateConformance(provider: string, factory: AuthorityStoreConformanceFactory) {
+  test(`${provider}: reviewed edits fence new work and recover immutable history on the full graph`, async t => {
+    const {store, contender} = await factory(t);
+    const fixture = productionScaleCoordinationFixture("reviewed-planning");
+    const projection = structuredClone(fixture.projection);
+    projection.handoff_mode = "soft_claim";
+    // Keep unrelated leases and the full dependency graph. This target's
+    // execution lineage is intentionally absent, so it permits metadata delegation.
+    projection.leases = (projection.leases as JsonObject[]).filter(l => l.todo_id !== fixture.completion_todo_id);
+    assert.equal((await store.commitAuthority({operation_id: "seed", expected_provider_revision: null,
+      next_projection: projection, events: [], receipts: []})).status, "applied");
+    const before = await head(store);
+    const request = {goal_id: "reviewed-planning", todo_id: fixture.completion_todo_id,
+      expected_role: "agent", actor_agent_id: "agent-b", registered_agents: fixture.registered_agents,
+      operation_id: "reviewed-edit", patch: {note: "Owner reviewed correction"}, clear_fields: [],
+      expected_provider_revision: before.provider_revision, authority_reason: "Bounded correction",
+      lifecycle_grants: [{agent_id: "agent-b", actions: ["update"], requires_reason: true}],
+      dry_run: false, now: new Date("2026-09-07T06:00:00Z")};
+    for (const [label, change, code] of [
+      ["ungranted", {lifecycle_grants: []}, "update_owner_mismatch"],
+      ["reasonless", {authority_reason: null}, "delegation_reason_required"],
+      ["wrong-action", {lifecycle_grants: [{agent_id: "agent-b", actions: ["reassign"], requires_reason: true}]}, "delegation_action_not_granted"],
+    ] as const) {
+      const rejected = await executeCoordinationTodoUpdate(store, {...request, ...change, operation_id: label});
+      assert.equal(rejected.reason_code, code, JSON.stringify(rejected));
+      assert.deepEqual(await head(store), before);
+      assert.equal((await store.readReceipt(label)).status, "missing");
+    }
+    let sourceChecks = 0;
+    const rejected = await executeCoordinationTodoUpdate(store, request, async () => ++sourceChecks === 1);
+    assert.equal(rejected.reason_code, "authority_source_changed");
+    assert.deepEqual(await head(store), before);
+    const applied = await executeCoordinationTodoUpdate(store, request);
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    const original = await store.readReceipt(request.operation_id);
+    const after = await head(store);
+    assert.deepEqual(after.head.leases, before.head.leases);
+    assert.deepEqual((after.head.todos as JsonObject[]).filter(r => r.todo_id !== request.todo_id),
+      (before.head.todos as JsonObject[]).filter(r => r.todo_id !== request.todo_id));
+    assert.equal((await executeCoordinationTodoUpdate(contender, {...request,
+      operation_id: "unreviewed-new-edit"})).reason_code, "provider_revision_mismatch");
+    assert.equal((await executeCoordinationTodoUpdate(contender, {...request, operation_id: "later-edit",
+      expected_provider_revision: after.provider_revision, patch: {note: "Later accepted correction"}})).status, "applied");
+    const latest = await head(store);
+    const replay = await executeCoordinationTodoUpdate(store, {...request, lifecycle_grants: []},
+      async () => { throw new Error("historical receipt must precede current source admission"); });
+    assert.equal(replay.status, "replayed");
+    assert.deepEqual(await head(store), latest);
+    assert.deepEqual(await store.readReceipt(request.operation_id), original);
+    assert.equal((await executeCoordinationTodoUpdate(store, {...request, authority_reason: "Changed justification"})).reason_code,
+      "coordination_operation_identity_mismatch");
+  });
+
   for (const native of [false, true]) {
     test(`${provider}: planning transaction uses complete ${native ? "native" : "legacy"} records and keeps wait generation`, async t => {
       const {store, contender} = await factory(t);

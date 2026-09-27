@@ -80,3 +80,60 @@ def test_published_data_and_bilingual_tables_share_scope(exporters):
     for localized in copy.values():
         assert {row[0] for row in localized["armRows"]} == allowed
         assert set(localized["executiveReads"]) == allowed
+
+
+def test_lhtb_published_data_and_bilingual_copy_share_scope():
+    study = STUDY.parent / "LHTB" / "studies" / "five-arm-gpt56sol-max"
+    data = json.loads((study / "data.json").read_text())
+    all_arms = {
+        "plain",
+        "native_goal",
+        "ssh_goal",
+        "legacy_heartbeat",
+        "new_heartbeat",
+    }
+    main_comparison_arms = {"plain", "native_goal", "new_heartbeat"}
+    assert set(data["arms"]) == all_arms
+    assert len(data["tasks"]) == len({row["task"] for row in data["tasks"]}) == 46
+    assert all(set(row) == all_arms | {"task"} for row in data["tasks"])
+
+    for arm, summary in data["arms"].items():
+        rewards = [row[arm] for row in data["tasks"]]
+        assert summary["mean_reward"] == pytest.approx(sum(rewards) / 46, rel=0, abs=1e-12)
+        assert summary["pass_095"] == sum(reward >= 0.95 for reward in rewards)
+
+    site = STUDY.parents[1] / "apps/presentation/site/src"
+    localized_copy = json.loads((site / "lhtb-copy.json").read_text())
+    assert set(localized_copy) == {"en", "zh"}
+    for localized in localized_copy.values():
+        assert set(localized["armLabels"]) == all_arms
+        assert set(localized["armKinds"]) == all_arms
+        assert {row[0] for row in localized["mechanismRows"]} == main_comparison_arms
+
+    assert localized_copy["en"]["resultTitle"] == "Higher mean reward than Plain and native Goal."
+    assert "7, 7, and 4 tasks" in localized_copy["en"]["resultBody"]
+    assert localized_copy["zh"]["resultTitle"] == "均分高于 Plain 和原生 Goal。"
+    assert "7、7、4 题" in localized_copy["zh"]["resultBody"]
+
+
+def test_lhtb_task_groups_partition_the_published_study_and_have_prompt_links():
+    study = STUDY.parent / "LHTB" / "studies" / "five-arm-gpt56sol-max"
+    data = json.loads((study / "data.json").read_text())
+    analysis = json.loads((study / "task-groups.json").read_text())
+    groups = analysis["groups"]
+    members = [task for tasks in groups.values() for task in tasks]
+    assert len(members) == len(set(members)) == len(data["tasks"])
+    assert set(members) == {row["task"] for row in data["tasks"]}
+    assert all(groups.values())
+    assert set(analysis["prompt_aliases"]) <= set(members)
+    revision = analysis["prompt_revision"]
+    assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision)
+    assert analysis["prompt_base_url"] == f"https://github.com/zli12321/LHTB/blob/{revision}/tasks/"
+    assert all("/" not in folder and folder not in {".", ".."}
+               for folder in analysis["prompt_aliases"].values())
+
+    site = STUDY.parents[1] / "apps/presentation/site/src"
+    for localized in json.loads((site / "lhtb-copy.json").read_text()).values():
+        assert set(localized["groupLabels"]) == set(localized["groupNotes"]) == set(groups)
+        for task, _ in localized["gainCases"] + localized["lossCases"]:
+            assert task in members

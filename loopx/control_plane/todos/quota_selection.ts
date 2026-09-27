@@ -1,16 +1,17 @@
+import {countTodoWork} from "./summary_lanes.ts";
 import type { JsonObject } from "../effect_program.ts";
 import { EffectRuntimeRequestError } from "../effect_runtime_errors.ts";
 import { requireJsonObject, requireBoolean, requireInteger, requireStringArray,
   optionalNonEmptyString } from "../runtime_decode.ts";
 import { projectTodoResumePlanning } from "./resume_planning.ts";
-import { gateAddressesAgent } from "./gate_scope.ts";
+import { gateAddressesAgent, actionAddressesAgent, claimAllowsAgent } from "./agent_scope.ts";
 import { missingRequiredCapabilities } from "../agents/capability_gate.ts";
 
 interface Row {
   payload: JsonObject; display: JsonObject; claim: string | null;
   bound: string | null; blocks: string | null; excluded: readonly string[];
   global: boolean; gate: boolean; removed: boolean; actionable: boolean;
-  due: boolean; taskClass: string; priority: number; index: number;
+  due: boolean; watchOnly: boolean; taskClass: string; priority: number; index: number;
   profileRank: number; missing: readonly string[]; rawClaimed: boolean;
 }
 
@@ -24,7 +25,8 @@ function decodeRow(value: unknown, available?: readonly string[]): Row {
     claim: optional("claim"), bound: optional("bound"), blocks: optional("blocks"),
     excluded: requireStringArray(raw.excluded, "excluded"), global: boolean("global"),
     gate: boolean("gate"), removed: boolean("removed"), actionable: boolean("actionable"),
-    due: boolean("due"), taskClass: optional("task_class") ?? "advancement_task",
+    due: boolean("due"), watchOnly: raw.watch_only === undefined ? false : boolean("watch_only"),
+    taskClass: optional("task_class") ?? "advancement_task",
     priority: integer("priority"), index: integer("index"), profileRank: integer("profile_rank"),
     missing: available === undefined ? requireStringArray(raw.missing, "missing") :
       missingRequiredCapabilities(requireStringArray(raw.required, "required"), requireStringArray(raw.targets, "targets"), available),
@@ -43,12 +45,8 @@ const bucket = (row: Row, agent: string) => row.claim === agent ? 0 : row.claim 
 function gateApplies(row: Row, agent: string | null): boolean {
   return !agent || gateAddressesAgent(row, agent);
 }
-function actionApplies(row: Row, agent: string | null): boolean {
-  const bound = row.bound ?? row.claim;
-  return !agent || !bound || bound === agent;
-}
 function executableBy(row: Row, agent: string | null): boolean {
-  return !agent || (!row.removed && !row.excluded.includes(agent) && bucket(row, agent) !== 2);
+  return !agent || (!row.removed && claimAllowsAgent(row, agent));
 }
 
 /** Presentation-only claimant coverage; never changes eligible work or counts. */
@@ -137,8 +135,8 @@ export function projectQuotaSelection(value: unknown): JsonObject {
   const gates = userMode ? source.filter(row => row.gate) : source;
   const blocking = userMode ? gates.filter(row => gateApplies(row, agent)) : gates;
   const otherGates = userMode ? gates.filter(row => !gateApplies(row, agent)) : [];
-  const actions = userMode ? source.filter(row => !row.gate && actionApplies(row, agent)) : [];
-  const otherActions = userMode ? source.filter(row => !row.gate && !actionApplies(row, agent)) : [];
+  const actions = userMode ? source.filter(row => !row.gate && actionAddressesAgent(row, agent)) : [];
+  const otherActions = userMode ? source.filter(row => !row.gate && !actionAddressesAgent(row, agent)) : [];
   // Explicit User gate scope has already decided blocking. Claim/exclusion
   // governs Agent execution, not permission to disregard that human gate.
   const open = userMode ? blocking : blocking.filter(row => executableBy(row, agent));
@@ -147,7 +145,9 @@ export function projectQuotaSelection(value: unknown): JsonObject {
   const scope = agent && !userMode ? claimScope(blocking, open, agent, profile, diagnostic) : null;
   const monitors = open.filter(row => row.actionable && row.taskClass === "continuous_monitor");
   const due = supported ? monitors.filter(row => row.due && executableBy(row, agent)) : [];
-  const activeVisible = (row: Row) => userMode ? (row.gate ? gateApplies(row, agent) : actionApplies(row, agent)) : executableBy(row, agent);
+  const admittedDue = due.filter(row => !row.missing.length);
+  const watchOnlyMonitors = monitors.filter(row => row.watchOnly);
+  const activeVisible = (row: Row) => userMode ? (row.gate ? gateApplies(row, agent) : actionAddressesAgent(row, agent)) : executableBy(row, agent);
   const gateFilter = otherGates.length ? {
     schema_version: "agent_scoped_user_gate_filter_v0", agent_id: agent,
     policy: "user todos scoped to another agent by blocks_agent or claimed_by remain visible but do not block this agent's quota lane",
@@ -158,13 +158,21 @@ export function projectQuotaSelection(value: unknown): JsonObject {
     policy: "user actions bound to another agent remain diagnostic-only and must not enter this agent's reminder channel",
     current_agent_user_action_open_count: actions.length, other_agent_bound_user_action_open_count: otherActions.length,
   } : null;
-  return {lanes: {
+  const displayed = userMode ? [...open, ...actions] : open;
+  const sourceComplete = request.source_open_count === source.length &&
+    (request.source_complete === undefined || requireBoolean(request.source_complete, "source_complete"));
+  const countOpen = !agent && !userMode && Number.isSafeInteger(request.source_open_count)
+    ? Math.max(Number(request.source_open_count), displayed.length) : displayed.length;
+  return {work_counts: countTodoWork(displayed, countOpen, sourceComplete, agent && !userMode ? agent : null), lanes: {
     all_open_items: payloads(source), blocking_open_items: payloads(blocking),
     user_action_open_items: payloads(actions), other_agent_bound_user_action_items: payloads(otherActions),
     user_action_agent_scope_filter: actionFilter, other_agent_scoped_items: payloads(otherGates),
     agent_scope_filter: gateFilter, open_items: payloads(open), claim_scope: scope,
     executable_items: payloads(open.filter(row => row.actionable && row.taskClass === "advancement_task")),
-    monitor_items: payloads(monitors), monitor_due_items: payloads(due.filter(row => !row.missing.length)),
+    monitor_items: payloads(monitors), monitor_due_items: payloads(admittedDue),
+    watch_only_monitor_items: payloads(watchOnlyMonitors),
+    watch_only_monitor_due_items: payloads(admittedDue.filter(row => row.watchOnly)),
+    non_watch_only_monitor_due_items: payloads(admittedDue.filter(row => !row.watchOnly)),
     monitor_capability_blocked_due_items: due.filter(row => row.missing.length).map(row => ({...row.display, missing_capabilities: [...row.missing]})),
     claimed_open_items: payloads(blocking.filter(row => row.rawClaimed)),
     display_open_items: payloads(userMode ? [...open, ...actions] : open),

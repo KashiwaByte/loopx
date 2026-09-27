@@ -22,8 +22,11 @@ from loopx_finance_value_discovery.replay import (  # noqa: E402
 )
 from loopx_finance_value_discovery.source_coverage import (  # noqa: E402
     MAX_PAGES,
+    MAX_PERIOD_METRICS,
     MAX_ROWS,
     MAX_ROWS_PER_PAGE,
+    validate_source_period_metrics,
+    validate_spot_market_identity,
 )
 
 
@@ -414,3 +417,421 @@ def test_offsets_compare_as_instants_and_date_only_cutoff_is_midnight():
     payload["contract"]["evaluation_as_of"] = "2026-01-02"
     with pytest.raises(ValueError, match="observation_clock"):
         result(payload)
+
+
+def _period_metric(metric_id: str = "synthetic-fee-value") -> dict[str, object]:
+    return {
+        "metric_id": metric_id,
+        "label": "Synthetic fee value",
+        "event_namespace": "synthetic.period.metric",
+        "event_id": "event-2026w01",
+        "event_at": "2026-01-07T23:00:00Z",
+        "instrument_id": "SYNTH-USD",
+        "scope_id": "synthetic-scope",
+        "period_start": "2026-01-01",
+        "period_end": "2026-01-07",
+        "source_state": "ok",
+        "value": 125.0,
+        "unit": "USD",
+        "metric_basis": "period_estimate",
+        "metric_semantics": "generic",
+        "value_origin": "derived",
+        "value_precision": "exact",
+        "observation_authority": "derived_exact",
+        "sign_basis": "not_signed",
+        "fee_inclusion": "not_applicable",
+        "account_scope": "not_applicable",
+        "account_value_role": "not_applicable",
+        "includes_isolated_margin": False,
+        "expected_components": ["core", "secondary"],
+        "observed_components": ["core", "secondary"],
+        "double_counted_components": [],
+        "numerator_scope": ["core", "secondary"],
+        "denominator_scope": [],
+        "lineage_id": "upstream-fee-period-2026w01",
+        "source_ref": "source:synthetic-fee-period",
+        "methodology_state": "verified",
+        "anomaly_state": "clear",
+    }
+
+
+def test_period_metric_distinguishes_complete_partial_missing_and_zero() -> None:
+    complete = validate_source_period_metrics([_period_metric()])[0]
+    assert complete["coverage_state"] == "complete"
+    assert complete["value"] == 125.0
+    assert complete["ready_eligible"] is False
+
+    partial_input = _period_metric()
+    partial_input["observed_components"] = ["core"]
+    partial_input["numerator_scope"] = ["core"]
+    partial = validate_source_period_metrics([partial_input])[0]
+    assert partial["coverage_state"] == "partial"
+    assert partial["missing_components"] == ["secondary"]
+    assert partial["value"] == 125.0
+
+    missing_input = _period_metric()
+    missing_input["value"] = None
+    missing_input["observed_components"] = []
+    missing_input["numerator_scope"] = []
+    missing = validate_source_period_metrics([missing_input])[0]
+    assert missing["coverage_state"] == "missing"
+    assert missing["value"] is None
+
+    zero_input = _period_metric()
+    zero_input["value"] = 0
+    zero = validate_source_period_metrics([zero_input])[0]
+    assert zero["coverage_state"] == "complete"
+    assert zero["value"] == 0.0
+
+
+def test_period_metric_uses_explicit_authority_for_lineage_deduplication() -> None:
+    primary = _period_metric("z-fill-vwap")
+    primary["metric_semantics"] = "entry_price"
+    primary["observation_authority"] = "fill_vwap"
+    primary["double_counted_components"] = ["secondary"]
+    primary["numerator_scope"] = ["core"]
+    duplicate = deepcopy(primary)
+    duplicate.update(
+        metric_id="a-rounded-position-entry",
+        value_origin="source_reported",
+        value_precision="rounded",
+        observation_authority="rounded_position_entry",
+    )
+
+    projected = validate_source_period_metrics([duplicate, primary])
+    by_id = {item["metric_id"]: item for item in projected}
+    assert by_id["z-fill-vwap"]["lineage_state"] == "primary"
+    assert by_id["z-fill-vwap"]["independent_evidence"] is True
+    assert by_id["a-rounded-position-entry"]["lineage_state"] == ("duplicate_upstream")
+    assert by_id["a-rounded-position-entry"]["duplicate_of"] == "z-fill-vwap"
+    assert "duplicate_upstream" in by_id["a-rounded-position-entry"]["gap_reasons"]
+    assert by_id["z-fill-vwap"]["double_counted_components"] == ["secondary"]
+
+    next_period = _period_metric("next-period")
+    next_period["period_start"] = "2026-01-08"
+    next_period["period_end"] = "2026-01-14"
+    assert (
+        validate_source_period_metrics([primary, next_period])[1][
+            "independent_evidence"
+        ]
+        is True
+    )
+
+
+def test_period_metric_composite_identity_separates_reused_event_ids() -> None:
+    first = _period_metric("first-asset")
+    second = deepcopy(first)
+    second.update(metric_id="second-asset", instrument_id="OTHER-USD")
+    third = deepcopy(first)
+    third.update(metric_id="next-hour", event_at="2026-01-08T00:00:00Z")
+
+    projected = validate_source_period_metrics([first, second, third])
+    assert all(item["independent_evidence"] for item in projected)
+    assert projected[0]["event_identity"] == {
+        "namespace": "synthetic.period.metric",
+        "source_event_id": "event-2026w01",
+        "event_at": "2026-01-07T23:00:00Z",
+        "instrument_id": "SYNTH-USD",
+        "scope_id": "synthetic-scope",
+    }
+
+
+def test_period_metric_prefers_usable_fallback_over_unavailable_authority() -> None:
+    unavailable_fill = _period_metric("fill-vwap-unavailable")
+    unavailable_fill.update(
+        metric_semantics="entry_price",
+        observation_authority="fill_vwap",
+        source_state="error",
+        value=None,
+        observed_components=[],
+        numerator_scope=[],
+    )
+    rounded = _period_metric("rounded-position-available")
+    rounded.update(
+        metric_semantics="entry_price",
+        value_origin="source_reported",
+        value_precision="rounded",
+        observation_authority="rounded_position_entry",
+    )
+
+    by_id = {
+        item["metric_id"]: item
+        for item in validate_source_period_metrics([unavailable_fill, rounded])
+    }
+    assert by_id["rounded-position-available"]["lineage_state"] == "primary"
+    assert by_id["fill-vwap-unavailable"]["duplicate_of"] == (
+        "rounded-position-available"
+    )
+
+
+def test_period_metric_holds_conflicting_exact_values_but_not_rounded_fallback() -> (
+    None
+):
+    primary = _period_metric("exact-primary")
+    conflicting = deepcopy(primary)
+    conflicting.update(metric_id="exact-conflict", value=126.0)
+    projected = validate_source_period_metrics([primary, conflicting])
+    assert all("lineage_value_conflict" in item["gap_reasons"] for item in projected)
+
+    rounded = deepcopy(conflicting)
+    rounded.update(
+        metric_id="rounded-fallback",
+        value_origin="source_reported",
+        value_precision="rounded",
+        observation_authority="source_reported_rounded",
+    )
+    projected = validate_source_period_metrics([primary, rounded])
+    assert all(
+        "lineage_value_conflict" not in item["gap_reasons"] for item in projected
+    )
+
+
+def test_period_metric_preserves_basis_precision_methodology_and_anomaly_holds() -> (
+    None
+):
+    metric = _period_metric()
+    metric.update(
+        metric_basis="annualized_estimate",
+        value_origin="source_reported",
+        value_precision="rounded",
+        observation_authority="source_reported_rounded",
+        denominator_scope=["conflicting-public-denominator"],
+        methodology_state="conflicting",
+        anomaly_state="unverified",
+    )
+    projected = validate_source_period_metrics([metric])[0]
+    assert projected["metric_basis"] == "annualized_estimate"
+    assert projected["value_precision"] == "rounded"
+    assert projected["methodology_state"] == "conflicting"
+    assert projected["anomaly_state"] == "unverified"
+    assert projected["gap_reasons"] == [
+        "methodology:conflicting",
+        "anomaly:unverified",
+        "rounded_value",
+    ]
+    assert projected["admission_reason"] == ("source_period_metric_is_evidence_only")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda item: item.update(observed_components=["unknown"]),
+            "observed_components must be expected",
+        ),
+        (
+            lambda item: item.update(
+                double_counted_components=["core"], numerator_scope=["core"]
+            ),
+            "must exclude double-counted",
+        ),
+        (
+            lambda item: item.update(source_state="error"),
+            "source_error cannot carry",
+        ),
+        (
+            lambda item: item.update(period_start="2026-01-08"),
+            "must not be after",
+        ),
+        (
+            lambda item: item.update(value=float("nan")),
+            "must be finite",
+        ),
+        (
+            lambda item: item.update(
+                metric_semantics="cash_delta", sign_basis="funding_cost"
+            ),
+            "sign_basis must be account_cash_change",
+        ),
+        (
+            lambda item: item.update(
+                metric_semantics="fill_fee", sign_basis="fee_cost"
+            ),
+            "fee_inclusion must be builder_included",
+        ),
+        (
+            lambda item: item.update(
+                metric_semantics="account_nav",
+                account_scope="product",
+                account_value_role="nav_owner",
+                includes_isolated_margin=True,
+            ),
+            "account scope/role conflicts",
+        ),
+    ],
+)
+def test_period_metric_rejects_inconsistent_source_semantics(mutation, message) -> None:
+    metric = _period_metric()
+    mutation(metric)
+    with pytest.raises(ValueError, match=message):
+        validate_source_period_metrics([metric])
+
+
+def test_period_metric_recomputes_caller_asserted_derived_fields_and_bounds_rows() -> (
+    None
+):
+    metric = _period_metric()
+    metric.update(
+        ready_eligible=True,
+        coverage_state="complete",
+        independent_evidence=True,
+    )
+    projected = validate_source_period_metrics([metric])[0]
+    assert projected["ready_eligible"] is False
+    assert projected["admission_reason"] == ("source_period_metric_is_evidence_only")
+
+    oversized_metrics = [
+        _period_metric(f"metric-{index}") for index in range(MAX_PERIOD_METRICS + 1)
+    ]
+    with pytest.raises(ValueError, match="at most"):
+        validate_source_period_metrics(oversized_metrics)
+
+
+def test_period_metric_projects_signed_fee_and_unified_account_semantics() -> None:
+    fill_fee = _period_metric("fill-fee")
+    fill_fee.update(
+        metric_semantics="fill_fee",
+        sign_basis="fee_cost",
+        fee_inclusion="builder_included",
+    )
+    nav = _period_metric("unified-nav")
+    nav.update(
+        metric_semantics="account_nav",
+        account_scope="unified_account",
+        account_value_role="nav_owner",
+        includes_isolated_margin=True,
+    )
+    withdrawable = _period_metric("venue-withdrawable")
+    withdrawable.update(
+        value=0,
+        metric_semantics="withdrawable",
+        account_scope="venue",
+        account_value_role="withdrawable",
+    )
+
+    by_id = {
+        item["metric_id"]: item
+        for item in validate_source_period_metrics([fill_fee, nav, withdrawable])
+    }
+    assert by_id["fill-fee"]["fee_inclusion"] == "builder_included"
+    assert by_id["unified-nav"]["account_nav_treatment"] == "authoritative_total"
+    assert by_id["venue-withdrawable"]["value"] == 0.0
+    assert by_id["venue-withdrawable"]["account_nav_treatment"] == (
+        "venue_liquidity_only"
+    )
+
+
+def test_period_metric_keeps_currency_and_account_component_scopes_distinct() -> None:
+    usd = _period_metric("account-usd")
+    usd.update(
+        metric_semantics="account_component",
+        account_scope="product",
+        account_value_role="composition",
+        includes_isolated_margin=True,
+    )
+    usdc = deepcopy(usd)
+    usdc.update(metric_id="external-usdc", unit="USDC")
+
+    projected = validate_source_period_metrics([usd, usdc])
+    assert all(item["independent_evidence"] for item in projected)
+    assert projected[0]["account_nav_treatment"] == "composition_only"
+    assert {item["unit"] for item in projected} == {"USD", "USDC"}
+
+
+def _spot_market_identity() -> dict[str, object]:
+    return {
+        "pairs": [
+            {
+                "name": "PAIR-B",
+                "asset_indexes": [7, 0],
+                "is_canonical": False,
+                "source_ref": "source:synthetic-pair-b",
+            },
+            {
+                "name": "PAIR-A",
+                "asset_indexes": [2, 0],
+                "is_canonical": True,
+                "source_ref": "source:synthetic-pair-a",
+            },
+        ],
+        "tokens": [
+            {"index": 0, "symbol": "USDC", "source_ref": "source:synthetic-usdc"},
+            {"index": 2, "symbol": "AAA", "source_ref": "source:synthetic-aaa"},
+            {"index": 7, "symbol": "BBB", "source_ref": "source:synthetic-bbb"},
+        ],
+        "contexts": [
+            {
+                "coin": "PAIR-A",
+                "observed_at": "2026-01-15T12:00:00Z",
+                "mark_price": 2.5,
+                "source_ref": "source:synthetic-context-a",
+            },
+            {
+                "coin": "PAIR-B",
+                "observed_at": "2026-01-15T12:00:00Z",
+                "mark_price": 7.5,
+                "source_ref": "source:synthetic-context-b",
+            },
+        ],
+    }
+
+
+def test_spot_identity_joins_by_names_and_explicit_token_indexes() -> None:
+    projected = validate_spot_market_identity(_spot_market_identity())
+    markets = projected["markets"]
+    assert [market["pair_name"] for market in markets] == ["PAIR-B", "PAIR-A"]
+    assert markets[0]["context_coin"] == "PAIR-B"
+    assert markets[0]["base_asset"] == {"index": 7, "symbol": "BBB"}
+    assert markets[0]["quote_asset"] == {"index": 0, "symbol": "USDC"}
+    assert markets[0]["mark_price"] == 7.5
+    assert markets[0]["canonicality"] == "noncanonical_name"
+    assert markets[0]["backing_inference"] == "not_inferred"
+    assert validate_spot_market_identity(projected) == projected
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda payload: payload["contexts"].pop(),
+            "exact pair.name/context.coin identity",
+        ),
+        (
+            lambda payload: payload["contexts"].append(
+                {
+                    "coin": "PERP-ARRAY-ROW",
+                    "observed_at": "2026-01-15T12:00:00Z",
+                    "mark_price": 1,
+                    "source_ref": "source:synthetic-unmatched",
+                }
+            ),
+            "unmatched",
+        ),
+        (
+            lambda payload: payload["tokens"].append(
+                {
+                    "index": 7,
+                    "symbol": "DUP",
+                    "source_ref": "source:synthetic-duplicate",
+                }
+            ),
+            "index values must be unique",
+        ),
+        (
+            lambda payload: payload["pairs"][0].update(asset_indexes=[99, 0]),
+            "missing from tokens",
+        ),
+        (
+            lambda payload: payload["contexts"][0].update(mark_price=0),
+            "mark_price must be positive or null",
+        ),
+    ],
+)
+def test_spot_identity_rejects_positional_or_ambiguous_joins(
+    mutation,
+    message,
+) -> None:
+    payload = _spot_market_identity()
+    mutation(payload)
+    with pytest.raises(ValueError, match=message):
+        validate_spot_market_identity(payload)

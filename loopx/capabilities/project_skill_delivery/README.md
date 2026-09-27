@@ -98,6 +98,11 @@ workflow instructions must be available before a project installs a local
 copy. Their existing task, project, and permission checks still apply.
 `loopx-material` and `loopx-change-quality` remain `project` workflows.
 
+`skills/loopx-pr-merge` is deliberately unmarked. The merge-decision workflow is
+repo-kept: a host adopts it by reading the repository copy, and it has no global
+or project delivery path, so the default install cannot add it to a machine that
+never merges LoopX pull requests.
+
 Prefer the global copy for ordinary use. Install a project copy for an isolated
 host profile or an intentional project override; this operation never removes
 or rewrites a global skill. Hosts may discover both copies, so do not install a

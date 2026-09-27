@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from ...rollout_event_log import append_rollout_event, build_rollout_event, rollout_event_log_path
-from .settlement import QuotaSettlementReadback, settlement_result_payload
+from .settlement import QuotaSettlementReadback, attach_settlement_progress, settlement_result_payload
 
 
 def finish_external_delivery_refresh(
@@ -61,6 +61,8 @@ def refresh_recovery_payload(
         "refresh_recovery": recovery, "settlement_identity": identity.as_dict(),
         "settlement_result": settlement_result_payload(readback.delivery),
     }
+    if not dry_run:
+        attach_settlement_progress(payload, readback, registry_path=registry_path, runtime_root=runtime_root)
     if decision == "reject":
         payload["error"] = (
             f"{recovery['reason']}: committed writeback is unchanged; "

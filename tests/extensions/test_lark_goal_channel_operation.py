@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import threading
 from typing import Any
 
@@ -12,12 +13,18 @@ import pytest
 
 from loopx.chat_action_store import ActionConflictError, ChatActionStore
 from loopx.chat_actions import ChatActionService
-from loopx.cli_commands.goal_channel import _prepare_goal_channel_operation
+from loopx.cli_commands.goal_channel_operation import _prepare_goal_channel_operation
 from loopx.extensions.lark.goal_channel_contracts import (
     GOAL_CHANNEL_BINDING_SCHEMA_VERSION,
     write_goal_channel_binding,
 )
+from loopx.extensions.lark.goal_channel_message_delivery import (
+    GoalChannelDeliveryStageError,
+    message_card_matches,
+    normalized_card_text,
+)
 from loopx.extensions.lark.goal_channel_operation import (
+    OperationExecutorDriftError,
     build_goal_channel_operation_card,
     build_goal_channel_operation_result_card,
     deliver_goal_channel_operation_card,
@@ -172,7 +179,79 @@ def _prepare(store: ChatActionStore, registry_path: Path) -> dict[str, Any]:
     )
 
 
-def _runner(calls: list[list[str]], sent_cards: dict[str, dict[str, Any]]):
+def _normalized_card_v2(card: Mapping[str, Any]) -> str:
+    header = card["header"]
+    lines = [
+        (
+            f'<card title="{header["title"]["content"]}" '
+            f'subtitle="{header["subtitle"]["content"]}">'
+        )
+    ]
+    lines.extend(f"「{item['text']['content']}」" for item in header["text_tag_list"])
+    for element in card["body"]["elements"]:
+        columns = element["columns"]
+        buttons = [
+            column["elements"][0]["text"]["content"]
+            for column in columns
+            if column["elements"][0]["tag"] == "button"
+        ]
+        if buttons:
+            lines.append(" ".join(f"[{label}]" for label in buttons))
+            continue
+        lines.extend(column["elements"][0]["content"] for column in columns)
+    lines.append("</card>")
+    return "\n".join(lines)
+
+
+def test_normalized_action_card_cannot_prove_historical_action_identity() -> None:
+    card = {
+        "schema": "2.0",
+        "header": {
+            "title": {"content": "Simulated trade request"},
+            "subtitle": {"content": "Synthetic fixture · no venue call"},
+            "text_tag_list": [],
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "column_set",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"content": "Confirm"},
+                                    "behaviors": [
+                                        {
+                                            "type": "callback",
+                                            "value": {
+                                                "operation_id": (
+                                                    "proposal-normalized-binding"
+                                                )
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+    normalized = {"content": normalized_card_text(card)}
+
+    assert message_card_matches(normalized, card)
+    assert not message_card_matches(normalized, card, allow_normalized=False)
+
+
+def _runner(
+    calls: list[list[str]],
+    sent_cards: dict[str, dict[str, Any]],
+    *,
+    normalized_card_v2_readback: bool = False,
+):
     def run(
         args: list[str], _cwd: Path | None, _timeout: float | None
     ) -> dict[str, Any]:
@@ -219,7 +298,11 @@ def _runner(calls: list[list[str]], sent_cards: dict[str, dict[str, Any]]):
                         "chat_id": CHAT_ID,
                         "sender": {"sender_type": "app", "id": APP_ID},
                         "deleted": False,
-                        "body": {"content": json.dumps(card)},
+                        **(
+                            {"content": _normalized_card_v2(card)}
+                            if normalized_card_v2_readback
+                            else {"body": {"content": json.dumps(card)}}
+                        ),
                     }
                     for message_id, card in sent_cards.items()
                 ],
@@ -238,7 +321,41 @@ def _runner(calls: list[list[str]], sent_cards: dict[str, dict[str, Any]]):
                             "message_id": message_id,
                             "chat_id": CHAT_ID,
                             "sender": {"sender_type": "app", "id": APP_ID},
-                            "body": {"content": json.dumps(sent_cards[message_id])},
+                            **(
+                                {"content": _normalized_card_v2(sent_cards[message_id])}
+                                if normalized_card_v2_readback
+                                else {
+                                    "body": {
+                                        "content": json.dumps(sent_cards[message_id])
+                                    }
+                                }
+                            ),
+                        }
+                    ]
+                },
+            }
+        elif (
+            "api" in args
+            and "GET" in args
+            and any("/open-apis/im/v1/messages/" in item for item in args)
+        ):
+            endpoint = next(
+                item for item in args if "/open-apis/im/v1/messages/" in item
+            )
+            message_id = endpoint.rsplit("/", 1)[-1]
+            payload = {
+                "ok": True,
+                "data": {
+                    "items": [
+                        {
+                            "message_id": message_id,
+                            "chat_id": CHAT_ID,
+                            "sender": {"sender_type": "app", "id": APP_ID},
+                            "body": {
+                                "content": json.dumps(
+                                    _lark_card_v2_user_content(sent_cards[message_id])
+                                )
+                            },
                         }
                     ]
                 },
@@ -279,6 +396,71 @@ def _event(proposal: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
         "form_value": "",
         "card_content": json.dumps(card),
     }
+
+
+def test_callback_timestamp_normalizes_milliseconds_and_microseconds() -> None:
+    expected = "2023-11-14T22:13:20.123000Z"
+
+    assert goal_channel_operation._callback_timestamp("1700000000123") == expected
+    assert goal_channel_operation._callback_timestamp("1700000000123000") == expected
+
+    for invalid in (
+        "1700000000",
+        "17000000001230",
+        "17000000001230000",
+        "not-a-timestamp",
+    ):
+        with pytest.raises(ValueError, match="timestamp is invalid"):
+            goal_channel_operation._callback_timestamp(invalid)
+
+
+def _lark_card_v2_callback_fallback(card: Mapping[str, Any]) -> dict[str, Any]:
+    header = card["header"]
+    return {
+        "title": (f"{header['title']['content']}\n{header['subtitle']['content']}"),
+        "elements": [
+            [
+                {"tag": "img", "image_key": "img_v3_public_fixture"},
+                {"tag": "text", "text": "Upgrade the client to view this card"},
+                {"tag": "text", "text": ""},
+            ]
+        ],
+    }
+
+
+def _lark_card_v2_user_content(card: Mapping[str, Any]) -> dict[str, Any]:
+    """Approximate the Card 2.0 projection returned by user_card_content."""
+
+    normalized = json.loads(json.dumps(card))
+    normalized["config"] = {
+        "enable_forward_interaction": False,
+        "streaming_mode": False,
+        "width_mode": "default",
+    }
+    normalized["header"].pop("icon")
+    sequence = 0
+
+    def visit(value: object) -> None:
+        nonlocal sequence
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("tag") in {"column_set", "column", "markdown", "button"}:
+            sequence += 1
+            value["element_id"] = f"provider_element_{sequence}"
+        if value.get("tag") == "column_set":
+            value["horizontal_align"] = "left"
+        if value.get("tag") == "button":
+            value.pop("behaviors", None)
+            value.pop("confirm", None)
+        for child in value.values():
+            visit(child)
+
+    visit(normalized["body"])
+    return normalized
 
 
 def test_card_is_one_bounded_non_forwardable_confirmation_projection(
@@ -359,8 +541,9 @@ def test_lark_cards_consume_one_shared_ts_frame_each(
         for method, params in calls
     )
     assert confirmation["header"]["title"]["content"] == "Simulated trade request"
-    assert "confirm" not in (
-        confirmation["body"]["elements"][3]["columns"][0]["elements"][0]
+    assert (
+        "confirm"
+        not in (confirmation["body"]["elements"][3]["columns"][0]["elements"][0])
     )
     assert result["header"]["text_tag_list"][0]["text"]["content"] == "模拟完成"
     # Lark Card 2.0 rejects `corner_radius` on a column with error 200621,
@@ -470,6 +653,9 @@ def test_cli_preparation_previews_without_write_then_persists_canonical_proposal
         idempotency_key="cli-operation-fixture",
         request_path=request_path,
         execute=False,
+        executor_binding_resolver=lambda _parameters, _runtime: {
+            "revision": "simulator-v0"
+        },
     )
     assert preview["status"] == "preview_ready"
     assert store.list() == []
@@ -483,6 +669,9 @@ def test_cli_preparation_previews_without_write_then_persists_canonical_proposal
         idempotency_key="cli-operation-fixture",
         request_path=request_path,
         execute=True,
+        executor_binding_resolver=lambda _parameters, _runtime: {
+            "revision": "simulator-v0"
+        },
     )
     assert applied["status"] == "awaiting_confirmation"
     assert applied["details"]["durable_proposal_written"] is True
@@ -619,6 +808,288 @@ def test_delivery_callback_simulation_and_replay_share_one_claim(
     assert store.load(proposal_id)["operation"]["result_delivery"]["transport"] == (
         "callback_update"
     )
+
+
+def test_microsecond_callback_completes_simulation_and_result_delivery(
+    tmp_path: Path,
+) -> None:
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare(store, registry)
+    calls: list[list[str]] = []
+    sent_cards: dict[str, dict[str, Any]] = {}
+    runner = _runner(calls, sent_cards)
+
+    deliver_goal_channel_operation_card(
+        proposal_id=proposal["proposal_id"],
+        action_store_root=store.root,
+        runtime_root=runtime,
+        binding_path=binding,
+        target_path=target,
+        execute=True,
+        runner=runner,
+        executor_binding_resolver=lambda _parameters, _runtime: {
+            "revision": "simulator-v0"
+        },
+    )
+    durable = store.load(proposal["proposal_id"])
+    assert durable is not None
+    card = sent_cards[durable["operation"]["delivery"]["message_id"]]
+    event = {
+        **_event(durable, card),
+        "timestamp": str(int(datetime.now(timezone.utc).timestamp() * 1_000_000)),
+    }
+
+    def executor(claimed: dict[str, Any]) -> dict[str, Any]:
+        operation = claimed["operation"]
+        return {
+            "schema_version": "loopx_operation_outcome_v0",
+            "outcome": "simulated_filled",
+            "projection_verified": True,
+            "operation_id": operation["operation_id"],
+            "payload_digest": operation["payload_digest"],
+            "claim_id": operation["claim"]["claim_id"],
+            "executor_revision": operation["executor_revision"],
+            "summary": "Simulation completed without an external venue write.",
+            "simulation": True,
+            "external_write_performed": False,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    receipt = handle_goal_channel_operation_callback(
+        event,
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=executor,
+    )
+
+    assert receipt["outcome"] == "simulated_filled"
+    assert receipt["card_update_verified"] is True
+    operation = store.load(proposal["proposal_id"])["operation"]
+    assert operation["lifecycle_state"] == "outcome_observed"
+    assert operation["result_delivery"]["transport"] == "callback_update"
+
+
+def test_card_v2_normalized_readback_and_callback_fallback_complete_simulation(
+    tmp_path: Path,
+) -> None:
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare(store, registry)
+    calls: list[list[str]] = []
+    sent_cards: dict[str, dict[str, Any]] = {}
+    runner = _runner(calls, sent_cards, normalized_card_v2_readback=True)
+
+    delivered = deliver_goal_channel_operation_card(
+        proposal_id=proposal["proposal_id"],
+        action_store_root=store.root,
+        runtime_root=runtime,
+        binding_path=binding,
+        target_path=target,
+        execute=True,
+        runner=runner,
+        executor_binding_resolver=lambda _parameters, _runtime: {
+            "revision": "simulator-v0"
+        },
+    )
+
+    assert delivered["status"] == "awaiting_confirmation"
+    durable = store.load(proposal["proposal_id"])
+    assert durable is not None
+    message_id = durable["operation"]["delivery"]["message_id"]
+    card = sent_cards[message_id]
+    event = {
+        **_event(durable, card),
+        "card_content": json.dumps(_lark_card_v2_callback_fallback(card)),
+    }
+    execution_count = 0
+
+    def executor(claimed: dict[str, Any]) -> dict[str, Any]:
+        nonlocal execution_count
+        execution_count += 1
+        operation = claimed["operation"]
+        return {
+            "schema_version": "loopx_operation_outcome_v0",
+            "outcome": "simulated_filled",
+            "projection_verified": True,
+            "operation_id": operation["operation_id"],
+            "payload_digest": operation["payload_digest"],
+            "claim_id": operation["claim"]["claim_id"],
+            "executor_revision": operation["executor_revision"],
+            "summary": "Simulation completed without an external venue write.",
+            "simulation": True,
+            "external_write_performed": False,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    receipt = handle_goal_channel_operation_callback(
+        event,
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=executor,
+    )
+    replay = handle_goal_channel_operation_callback(
+        event,
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=executor,
+    )
+
+    assert receipt["outcome"] == "simulated_filled"
+    assert replay["outcome"] == "simulated_filled"
+    assert replay["external_write_performed"] is False
+    assert execution_count == 1
+    assert receipt["card_update_verified"] is True
+    assert (
+        store.load(proposal["proposal_id"])["operation"]["result_delivery"]["transport"]
+        == "callback_update"
+    )
+
+
+@pytest.mark.parametrize("callback_shape", ["provider_json", "userdsl", "empty"])
+def test_provider_normalized_card_v2_callback_and_replay_complete_simulation(
+    tmp_path: Path,
+    callback_shape: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare(store, registry)
+    calls: list[list[str]] = []
+    sent_cards: dict[str, dict[str, Any]] = {}
+    runner = _runner(calls, sent_cards, normalized_card_v2_readback=True)
+
+    delivered = deliver_goal_channel_operation_card(
+        proposal_id=proposal["proposal_id"],
+        action_store_root=store.root,
+        runtime_root=runtime,
+        binding_path=binding,
+        target_path=target,
+        execute=True,
+        runner=runner,
+        executor_binding_resolver=lambda _parameters, _runtime: {
+            "revision": "simulator-v0"
+        },
+    )
+    assert delivered["status"] == "awaiting_confirmation"
+    durable = store.load(proposal["proposal_id"])
+    assert durable is not None
+    card = sent_cards[durable["operation"]["delivery"]["message_id"]]
+    assert durable["operation"]["delivery"]["submitted_card"] == card
+    callback_content = {
+        "provider_json": json.dumps(_lark_card_v2_user_content(card)),
+        "userdsl": _normalized_card_v2(card),
+        "empty": "",
+    }[callback_shape]
+    event = {**_event(durable, card), "card_content": callback_content}
+
+    def fail_rebuild(_proposal: Mapping[str, Any]) -> dict[str, Any]:
+        raise AssertionError("callback must use the immutable delivery snapshot")
+
+    monkeypatch.setattr(
+        goal_channel_operation,
+        "_submitted_confirmation_card",
+        fail_rebuild,
+    )
+    execution_count = 0
+
+    def executor(claimed: dict[str, Any]) -> dict[str, Any]:
+        nonlocal execution_count
+        execution_count += 1
+        operation = claimed["operation"]
+        return {
+            "schema_version": "loopx_operation_outcome_v0",
+            "outcome": "simulated_filled",
+            "projection_verified": True,
+            "operation_id": operation["operation_id"],
+            "payload_digest": operation["payload_digest"],
+            "claim_id": operation["claim"]["claim_id"],
+            "executor_revision": operation["executor_revision"],
+            "summary": "Simulation completed without an external venue write.",
+            "simulation": True,
+            "external_write_performed": False,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    first = handle_goal_channel_operation_callback(
+        event,
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=executor,
+    )
+    replay = handle_goal_channel_operation_callback(
+        event,
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=executor,
+    )
+
+    assert first["outcome"] == replay["outcome"] == "simulated_filled"
+    assert first["card_update_verified"] is True
+    assert replay["external_write_performed"] is False
+    assert execution_count == 1
+    if callback_shape == "empty":
+        assert any(
+            "GET" in call and any("/open-apis/im/v1/messages/" in item for item in call)
+            for call in calls
+        )
+
+
+def test_card_v2_callback_fallback_rejects_projection_drift(tmp_path: Path) -> None:
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare(store, registry)
+    calls: list[list[str]] = []
+    sent_cards: dict[str, dict[str, Any]] = {}
+    runner = _runner(calls, sent_cards, normalized_card_v2_readback=True)
+    deliver_goal_channel_operation_card(
+        proposal_id=proposal["proposal_id"],
+        action_store_root=store.root,
+        runtime_root=runtime,
+        binding_path=binding,
+        target_path=target,
+        execute=True,
+        runner=runner,
+        executor_binding_resolver=lambda _parameters, _runtime: {
+            "revision": "simulator-v0"
+        },
+    )
+    durable = store.load(proposal["proposal_id"])
+    assert durable is not None
+    card = sent_cards[durable["operation"]["delivery"]["message_id"]]
+    fallback = _lark_card_v2_callback_fallback(card)
+    fallback["title"] = "A different operation\nA different request"
+
+    with pytest.raises(ActionConflictError, match="card content drifted"):
+        handle_goal_channel_operation_callback(
+            {
+                **_event(durable, card),
+                "card_content": json.dumps(fallback),
+            },
+            runtime_root=runtime,
+            action_store_root=store.root,
+            profile_app_id=APP_ID,
+            cli_bin="lark-cli",
+            profile="operation-bot",
+            runner=runner,
+            executor=lambda _proposal: {},
+        )
 
 
 def test_concurrent_callback_replay_dispatches_the_claim_once(tmp_path: Path) -> None:
@@ -909,3 +1380,274 @@ def test_forwarded_or_unauthorized_card_cannot_claim(tmp_path: Path) -> None:
             runner=runner,
             executor=lambda _proposal: {},
         )
+
+
+def test_prepare_rejects_stale_executor_revision_before_any_persistence(
+    tmp_path: Path,
+) -> None:
+    """A stale revision is blocked in preview and execute without any write."""
+
+    store, registry, runtime, _binding, _target = _fixture(tmp_path)
+    request_path = tmp_path / "operation.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "loopx_operation_request_v0",
+                "domain": "finance",
+                "operation_kind": "finance.order.simulate",
+                "operation_schema": "finance_order_intent_v0",
+                "payload_ref": "finance-order:stale-fixture",
+                "payload": {"asset": "SYNTH"},
+                "payload_digest": _digest({"asset": "SYNTH"}),
+                "projection": {
+                    "schema_version": "loopx_operation_projection_v0",
+                    "title": "Simulated trade request",
+                    "subtitle": "Synthetic fixture",
+                    "focus": "BUY 1 SYNTH @ 10 TEST",
+                    "fields": [{"label": "Order", "value": "Limit · GTC"}],
+                    "warning": "Simulation only.",
+                    "simulated": True,
+                },
+                "destination_account_ref": "account:simulation",
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+                "authorized_principals": [f"lark:{OPERATOR_ID}"],
+                "executor": {
+                    "extension_id": "loopx-finance-execution",
+                    "protocol": "finance_operation_executor_v0",
+                    "permission": "finance.operation.simulate",
+                    "revision": "requested-v1",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    for execute in (False, True):
+        with pytest.raises(OperationExecutorDriftError) as exc_info:
+            _prepare_goal_channel_operation(
+                registry_path=registry,
+                runtime_root=runtime,
+                goal_id=GOAL_ID,
+                agent_id=AGENT_ID,
+                summary="Review one simulated order",
+                idempotency_key=f"stale-operation-{execute}",
+                request_path=request_path,
+                execute=execute,
+                executor_binding_resolver=lambda _parameters, _runtime: {
+                    "revision": "active-v9"
+                },
+            )
+        assert exc_info.value.blocker == "executor_revision_drift"
+        assert exc_info.value.failure_stage == "resolve_executor_binding"
+        assert exc_info.value.details == {
+            "requested_executor_revision": "requested-v1",
+            "active_executor_revision": "active-v9",
+        }
+        assert exc_info.value.external_write_performed is False
+
+    durable = json.loads((store.root / "actions.json").read_text())
+    assert durable["proposals"] == {}
+    assert durable["idempotency"] == {}
+
+
+def test_prepare_rejects_unresolvable_executor_without_private_leak(
+    tmp_path: Path,
+) -> None:
+    """Resolution failures project a typed blocker without private text."""
+
+    store, registry, runtime, _binding, _target = _fixture(tmp_path)
+    request_path = tmp_path / "operation.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "loopx_operation_request_v0",
+                "domain": "finance",
+                "operation_kind": "finance.order.simulate",
+                "operation_schema": "finance_order_intent_v0",
+                "payload_ref": "finance-order:unavailable-fixture",
+                "payload": {"asset": "SYNTH"},
+                "payload_digest": _digest({"asset": "SYNTH"}),
+                "projection": {
+                    "schema_version": "loopx_operation_projection_v0",
+                    "title": "Simulated trade request",
+                    "subtitle": "Synthetic fixture",
+                    "focus": "BUY 1 SYNTH @ 10 TEST",
+                    "fields": [{"label": "Order", "value": "Limit · GTC"}],
+                    "warning": "Simulation only.",
+                    "simulated": True,
+                },
+                "destination_account_ref": "account:simulation",
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+                "authorized_principals": [f"lark:{OPERATOR_ID}"],
+                "executor": {
+                    "extension_id": "loopx-finance-execution",
+                    "protocol": "finance_operation_executor_v0",
+                    "permission": "finance.operation.simulate",
+                    "revision": "simulator-v0",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def broken_resolver(_parameters: object, _runtime: object) -> object:
+        raise ValueError("private resolver detail: /home/operator/secret-path")
+
+    with pytest.raises(GoalChannelDeliveryStageError) as exc_info:
+        _prepare_goal_channel_operation(
+            registry_path=registry,
+            runtime_root=runtime,
+            goal_id=GOAL_ID,
+            agent_id=AGENT_ID,
+            summary="Review one simulated order",
+            idempotency_key="unavailable-operation",
+            request_path=request_path,
+            execute=True,
+            executor_binding_resolver=broken_resolver,
+        )
+
+    assert str(exc_info.value) == "operation executor binding is unavailable"
+    assert exc_info.value.blocker == "executor_unavailable"
+    assert "secret-path" not in str(exc_info.value)
+    durable = json.loads((store.root / "actions.json").read_text())
+    assert durable["proposals"] == {}
+    assert durable["idempotency"] == {}
+
+
+def test_delivery_projects_typed_stage_blockers(tmp_path: Path) -> None:
+    """Stage failures keep their typed blocker and stage at the deliver seam."""
+
+    def _failed_delivery(
+        case: str,
+        fail_args: tuple[str, ...],
+        *,
+        outcome: dict[str, Any] | None = None,
+        raises: Exception | None = None,
+    ) -> tuple[GoalChannelDeliveryStageError, list[list[str]]]:
+        case_root = tmp_path / case
+        case_root.mkdir()
+        store, registry, runtime, binding, target = _fixture(case_root)
+        proposal = _prepare(store, registry)
+        calls: list[list[str]] = []
+        base = _runner(calls, {})
+
+        def runner(
+            args: list[str], cwd: Path | None, timeout: float | None
+        ) -> dict[str, Any]:
+            if all(fragment in args for fragment in fail_args):
+                calls.append(list(args))
+                if raises is not None:
+                    raise raises
+                if outcome is not None:
+                    return dict(outcome)
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "provider rejected",
+                }
+            return base(args, cwd, timeout)
+
+        with pytest.raises(GoalChannelDeliveryStageError) as exc_info:
+            deliver_goal_channel_operation_card(
+                proposal_id=proposal["proposal_id"],
+                action_store_root=store.root,
+                runtime_root=runtime,
+                binding_path=binding,
+                target_path=target,
+                execute=True,
+                runner=runner,
+                executor_binding_resolver=lambda _parameters, _runtime: {
+                    "revision": "simulator-v0"
+                },
+            )
+        return exc_info.value, calls
+
+    blocked, identity_calls = _failed_delivery("identity", ("auth", "status"))
+    assert blocked.blocker == "sender_identity_unverified"
+    assert blocked.failure_stage == "verify_sender_identity"
+    assert blocked.external_write_performed is False
+    assert not any("+messages-send" in call for call in identity_calls)
+
+    blocked, dedupe_calls = _failed_delivery("dedupe", ("+chat-messages-list",))
+    assert blocked.blocker == "dedupe_history_read_failed"
+    assert blocked.failure_stage == "read_dedupe_history"
+    assert blocked.external_write_performed is False
+    assert not any("+messages-send" in call for call in dedupe_calls)
+
+    blocked, send_calls = _failed_delivery("send", ("+messages-send",))
+    assert blocked.blocker == "provider_send_rejected"
+    assert blocked.failure_stage == "send_operation_card"
+    assert blocked.external_write_performed is False
+
+    # A provider answer is the only thing that can be projected as a verdict.
+    # Without one the card may already be live, so the send stage must report an
+    # unknown outcome rather than a clean no-write.
+    for case, outcome, raises in (
+        ("send-no-body", {"returncode": 1, "stdout": "", "stderr": ""}, None),
+        (
+            "send-timeout",
+            None,
+            subprocess.TimeoutExpired(cmd="lark-cli", timeout=30),
+        ),
+    ):
+        blocked, send_calls = _failed_delivery(
+            case, ("+messages-send",), outcome=outcome, raises=raises
+        )
+        assert blocked.blocker == "delivery_outcome_unknown", (case, blocked)
+        assert blocked.failure_stage == "send_operation_card", (case, blocked)
+        assert blocked.external_write_performed is None, (case, blocked)
+        assert any("+messages-send" in call for call in send_calls), case
+
+    # A command that never started cannot have written anything, and says so
+    # with its own blocker instead of being reported as a provider rejection.
+    blocked, send_calls = _failed_delivery(
+        "send-unavailable",
+        ("+messages-send",),
+        raises=FileNotFoundError("lark-cli"),
+    )
+    assert blocked.blocker == "provider_unavailable", blocked
+    assert blocked.failure_stage == "send_operation_card", blocked
+    assert blocked.external_write_performed is False, blocked
+
+
+def test_receipt_treats_post_send_failure_as_unknown_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after the provider write must not project a clean receipt."""
+
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare(store, registry)
+    calls: list[list[str]] = []
+
+    def failing_record(
+        self: ChatActionStore, *args: object, **kwargs: object
+    ) -> object:
+        raise OSError("synthetic receipt write failure")
+
+    monkeypatch.setattr(ChatActionStore, "record_operation_delivery", failing_record)
+
+    with pytest.raises(GoalChannelDeliveryStageError) as exc_info:
+        deliver_goal_channel_operation_card(
+            proposal_id=proposal["proposal_id"],
+            action_store_root=store.root,
+            runtime_root=runtime,
+            binding_path=binding,
+            target_path=target,
+            execute=True,
+            runner=_runner(calls, {}),
+            executor_binding_resolver=lambda _parameters, _runtime: {
+                "revision": "simulator-v0"
+            },
+        )
+
+    # The readback already proved the card is live, so this stage keeps its own
+    # blocker instead of diluting the "provider outcome unknown" signal.
+    assert exc_info.value.blocker == "delivery_receipt_write_failed"
+    assert exc_info.value.failure_stage == "record_delivery_receipt"
+    assert exc_info.value.external_write_performed is None
+    assert any("+messages-send" in call for call in calls)

@@ -1,3 +1,5 @@
+import {planTodoPriority} from "../todos/priority.ts";
+import {AUTHORITY_SOURCE_CHANGED, uncheckedAuthoritySource, type AuthoritySourceCheck} from "./authority_source.ts";
 import type { JsonObject } from "../effect_program.ts";
 import {CoordinationCommandReceipt} from "./command_receipt.ts";
 import type { AuthorityStore } from "./authority_store.ts";
@@ -129,13 +131,18 @@ function createCandidate(
   input: CoordinationTodoCreateInput,
   readModelSchema: unknown,
 ): JsonObject {
-  const domainCreated = canonicalTodoDomainRecord({
+  const priority = Object.hasOwn(input.todo, "priority")
+    ? planTodoPriority({}, {text: input.todo.text, priority: input.todo.priority}) : {};
+  const candidate: JsonObject = {
     ...input.todo,
+    ...priority,
     schema_version: TODO_DOMAIN_ITEM_SCHEMA,
     created_by: input.actor_agent_id,
     last_actor_agent_id: input.actor_agent_id,
     updated_at: input.now.toISOString().replace(/\.\d{3}Z$/u, "Z"),
-  }, "created Todo");
+  };
+  if (priority.priority === null) { delete candidate.priority; delete candidate.title; }
+  const domainCreated = canonicalTodoDomainRecord(candidate, "created Todo");
   return materializeTodoRecordForSchema(domainCreated, readModelSchema, "created Todo");
 }
 
@@ -146,17 +153,19 @@ export function planCoordinationTodoCreate(
   rawInput: CoordinationTodoCreateInput,
   todos: ReadonlyMap<string, JsonObject>,
   readModelSchema: unknown,
+  identity: "role_text" | "operation_lane" = "role_text",
 ): CoordinationTodoCreateResult {
   const input = normalizeCreateInput(rawInput);
-  const duplicate = [...todos.values()].find((todo) =>
+  const candidate = createCandidate(input, readModelSchema);
+  const duplicate = identity === "role_text" ? [...todos.values()].find((todo) =>
     todo.role === input.todo.role && todo.archive_state === "active" &&
-    todo.status !== "done" && todo.status !== "deferred" && todo.text === input.todo.text);
-  if (duplicate !== undefined) return semanticDuplicateResult(input.todo, duplicate, null, null);
+    todo.status !== "done" && todo.status !== "deferred" && todo.text === candidate.text) : undefined;
+  if (identity === "role_text" && duplicate !== undefined) return semanticDuplicateResult(candidate, duplicate, null, null);
   if (todos.has(String(input.todo.todo_id))) {
     return failure("todo_already_exists", "Todo id already exists in canonical authority", {todo_id: input.todo.todo_id});
   }
   return {schema_version: COORDINATION_TODO_CREATE_RESULT_SCHEMA, status: "planned",
-    changed: true, todo_id: input.todo.todo_id, todo: createCandidate(input, readModelSchema)};
+    changed: true, todo_id: input.todo.todo_id, todo: candidate};
 }
 
 async function commitCreate(
@@ -189,6 +198,7 @@ async function commitCreate(
 export async function executeCoordinationTodoCreate(
   store: AuthorityStore,
   rawInput: CoordinationTodoCreateInput,
+  authoritySourcesCurrent: AuthoritySourceCheck = uncheckedAuthoritySource,
 ): Promise<CoordinationTodoCreateResult> {
   let input: CoordinationTodoCreateInput;
   try {
@@ -206,10 +216,14 @@ export async function executeCoordinationTodoCreate(
     actor_agent_id: input.actor_agent_id,
     dry_run: input.dry_run,
   });
-  const existing = await createReceipt(input, requestSha).read(store);
+  const receipt = createReceipt(input, requestSha);
+  const existing = await receipt.read(store);
   if (existing !== null) return existing;
 
-  const head = await store.loadAuthority();
+  if (!await authoritySourcesCurrent()) return failure(AUTHORITY_SOURCE_CHANGED.code, AUTHORITY_SOURCE_CHANGED.reason);
+  const observation = await receipt.observe(store);
+  if (observation.kind === "receipt") return observation.result;
+  const head = observation.authority;
   if (head.status !== "loaded") {
     return {schema_version: COORDINATION_TODO_CREATE_RESULT_SCHEMA, ...head};
   }
@@ -226,6 +240,7 @@ export async function executeCoordinationTodoCreate(
   const todoId = requireAuthorityStoreId(input.todo.todo_id, "todo id");
   const readModel = canonicalAuthorityObject(head.head.todo_read_model, "Todo read model");
   const plan = planCoordinationTodoCreate(input, projection.todos, readModel.schema_version);
+  if (!await authoritySourcesCurrent()) return failure(AUTHORITY_SOURCE_CHANGED.code, AUTHORITY_SOURCE_CHANGED.reason);
   if (plan.status !== "planned") return {...plan, provider_revision: head.provider_revision, cursor: head.cursor};
   const created = canonicalAuthorityObject(plan.todo, "created Todo");
   if (input.dry_run) {

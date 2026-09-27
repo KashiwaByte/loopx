@@ -264,6 +264,23 @@ def _recommendation(*parts: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def build_action_selection_recovery_recommendation(
+    *, reason: str,
+) -> dict[str, Any]:
+    """Project closed heartbeat guidance after a typed selection refusal."""
+
+    return _recommendation(
+        {
+            "source": "action_selection_recovery",
+            "recommended_mode": "quota_skip",
+            "notify": "DONT_NOTIFY",
+            "spend_policy": "no quota spend until an eligible Todo is selected",
+            "reason": reason,
+            "agent_must_attempt": False,
+        }
+    )
+
+
 def _stall_self_repair_rule(
     facts: _HeartbeatRecommendationFacts,
 ) -> dict[str, Any] | None:

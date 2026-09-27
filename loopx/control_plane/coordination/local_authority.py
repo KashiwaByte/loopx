@@ -13,23 +13,25 @@ from typing import Any
 from uuid import uuid4
 
 from ...agent_registry import registered_agent_ids_from_registry
+from .authority_source_capture import authority_registry_source
 from ..runtime.time import now_local_iso as now_local
-from ..effect_runtime import effect_runtime_result
+from ..effect_runtime import (
+    CANONICAL_AUTHORITY_WRITE_TIMEOUT_SECONDS,
+    effect_runtime_result,
+)
 from .coordination_state_contract import (
     TODO_CANONICAL_READ_RECORD_SCHEMA_VERSION,
     TODO_DOMAIN_READ_RECORD_SCHEMA_VERSION,
     TODO_DOMAIN_ITEM_SCHEMA_VERSION,
     TODO_ITEM_SCHEMA_VERSION,
 )
-from .coordination_state_contract_generated import (
-    LOCAL_COORDINATION_TODO_LIST_REQUEST_SCHEMA,
-)
+from .canonical_snapshot import read_canonical_snapshot
 from .legacy_writer_fence import legacy_coordination_writer_fence_path
 
 
-LOCAL_COORDINATION_TODO_LIST_METHOD = "coordination.local_authority.todo_list"
-LOCAL_COORDINATION_TODO_CLAIM_REQUEST_SCHEMA = (
-    "loopx_local_coordination_todo_claim_request_v0"
+LOCAL_COORDINATION_TODO_LIST_TIMEOUT_SECONDS = 15.0
+LOCAL_COORDINATION_TODO_CLAIM_WITNESSED_REQUEST_SCHEMA = (
+    "loopx_local_coordination_todo_claim_request_v1"
 )
 LOCAL_COORDINATION_TODO_CLAIM_METHOD = "coordination.local_authority.todo_claim"
 
@@ -103,19 +105,20 @@ def claim_canonical_todo_if_promoted(
 
     if not local_authority_is_promoted(runtime_root=runtime_root, goal_id=goal_id):
         return None
+    with authority_registry_source(registry_path) as registry_source:
+        registered = registered_agent_ids_from_registry(registry_path, goal_id)
     result = effect_runtime_result(
         LOCAL_COORDINATION_TODO_CLAIM_METHOD,
         {
-            "schema_version": LOCAL_COORDINATION_TODO_CLAIM_REQUEST_SCHEMA,
+            "schema_version": LOCAL_COORDINATION_TODO_CLAIM_WITNESSED_REQUEST_SCHEMA,
             "runtime_root": str(runtime_root.expanduser().resolve(strict=False)),
             "goal_id": goal_id,
             "todo_id": todo_id,
             "role": role,
             "claimed_by": claimed_by,
             "actor_agent_id": actor_agent_id,
-            "registered_agents": registered_agent_ids_from_registry(
-                registry_path, goal_id
-            ),
+            "registered_agents": registered,
+            "registry_source": registry_source,
             "operation_id": (
                 operation_id
                 if operation_id is not None
@@ -133,6 +136,7 @@ def claim_canonical_todo_if_promoted(
             "observed_at": now_local(),
             "dry_run": dry_run,
         },
+        timeout=CANONICAL_AUTHORITY_WRITE_TIMEOUT_SECONDS,
     )
     if not isinstance(result, Mapping):
         raise LocalCoordinationAuthorityUnavailable(
@@ -182,6 +186,7 @@ def claim_canonical_todo_if_promoted(
 
 def read_canonical_todos_if_promoted(
     *, runtime_root: Path, goal_id: str, include_leases: bool = False,
+    projection_readback: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return canonical Todos after cutover, or ``None`` before cutover.
 
@@ -193,14 +198,12 @@ def read_canonical_todos_if_promoted(
     if not local_authority_is_promoted(runtime_root=runtime_root, goal_id=goal_id):
         return None
 
-    result = effect_runtime_result(
-        LOCAL_COORDINATION_TODO_LIST_METHOD,
-        {
-            "schema_version": LOCAL_COORDINATION_TODO_LIST_REQUEST_SCHEMA,
-            "runtime_root": str(runtime_root.expanduser().resolve(strict=False)),
-            "goal_id": goal_id,
-            **({"include_leases": True} if include_leases else {}),
-        },
+    result = read_canonical_snapshot(
+        rpc=effect_runtime_result,
+        runtime_root=str(runtime_root.expanduser().resolve(strict=False)),
+        goal_id=goal_id, include_leases=include_leases,
+        projection_readback=projection_readback,
+        timeout=LOCAL_COORDINATION_TODO_LIST_TIMEOUT_SECONDS,
     )
     if not isinstance(result, Mapping):
         raise LocalCoordinationAuthorityUnavailable(
@@ -243,6 +246,18 @@ def read_canonical_todos_if_promoted(
             "canonical Todo/lease snapshot is incomplete", code="local_authority_snapshot_incomplete",
             payload=payload,
         )
+    if projection_readback is not None:
+        confirmation = payload.get("projection_readback")
+        if (not isinstance(confirmation, Mapping)
+            or confirmation.get("provider_revision") != projection_readback["provider_revision"]
+            or confirmation.get("observed_provider_revision") != payload.get("provider_revision")
+            or confirmation.get("status") not in {"pending", "delivered", "current"}
+            or confirmation.get("next_action") not in {"retry", "finish"}
+            or (confirmation.get("next_action") == "retry" and confirmation.get("status") != "pending")):
+            raise LocalCoordinationAuthorityUnavailable(
+                "canonical projection confirmation is missing or invalid",
+                code="local_authority_projection_confirmation_invalid", payload=payload,
+            )
     return payload
 
 
@@ -258,7 +273,9 @@ def read_canonical_todo_fields_if_promoted(
     """
     canonical = read_canonical_todos_if_promoted(runtime_root=runtime_root, goal_id=goal_id)
     return (
-        canonical_todo_summary_fields(canonical["todos"], rollout_events=rollout_events)
+        canonical_todo_summary_fields(canonical["todos"], rollout_events=rollout_events,
+            goal_acceptance_contract=canonical.get("goal_acceptance_contract"),
+            goal_acceptance_work_guards=canonical.get("goal_acceptance_work_guards"))
         if canonical is not None else None
     )
 
@@ -267,6 +284,9 @@ def canonical_todo_summary_fields(
     todos: list[dict[str, Any]],
     *,
     rollout_events: list[dict[str, Any]] | None = None,
+    available_capabilities: Any = None,
+    goal_acceptance_contract: dict[str, Any] | None = None,
+    goal_acceptance_work_guards: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Adapt canonical records into the existing Todo summary read model."""
 
@@ -284,23 +304,13 @@ def canonical_todo_summary_fields(
         for item in todos
         if item.get("archive_state") == "archive"
     }
-    # Native provider records have no Markdown address. Allocate display
-    # positions from stable provider order; never read legacy Markdown here.
-    todos = [
-        {
-            **item,
-            "schema_version": TODO_ITEM_SCHEMA_VERSION,
-            "source_section": (
-                "Completed Work Archive"
-                if item["archive_state"] == "archive"
-                else TODO_SECTION_HEADINGS[item["role"]]
-            ),
-            "index": index,
-        }
-        if item.get("schema_version") == TODO_DOMAIN_ITEM_SCHEMA_VERSION
-        else item
-        for index, item in enumerate(todos, 1)
-    ]
+    todos = canonical_todo_items(todos)
+    # These are native authority decisions, not persisted Todo fields. Keep the
+    # records visible while every summary/selection uses the same work guard.
+    if goal_acceptance_contract and goal_acceptance_contract.get("enabled") is True:
+        guards = goal_acceptance_work_guards or {}
+        todos = [{**item, "goal_acceptance_guard": guards[item["todo_id"]]}
+            if item.get("todo_id") in guards else item for item in todos]
     fields: dict[str, Any] = {}
     for role in ("user", "agent"):
         items = [
@@ -316,10 +326,13 @@ def canonical_todo_summary_fields(
             include_empty_source=True,
             resume_source_items=todos,
             rollout_events=rollout_events,
+            available_capabilities=available_capabilities,
             item_limit=None,
         )
         if summary:
             if role == "agent":
+                if goal_acceptance_contract and goal_acceptance_contract.get("enabled") is True:
+                    summary["goal_acceptance_contract"] = goal_acceptance_contract
                 archived_done = count_advancement_todos(
                     [
                         item
@@ -338,3 +351,36 @@ def canonical_todo_summary_fields(
             if standing_authority:
                 fields["standing_decision_authority"] = standing_authority
     return fields
+
+
+def canonical_todo_items(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt every canonical Todo, including retained archive history."""
+
+    from ..todos.active_state_editing import TODO_SECTION_HEADINGS
+
+    # Native provider records have no Markdown address. Allocate display
+    # positions from stable provider order; never read legacy Markdown here.
+    return [
+        {
+            **item,
+            **(
+                {"schema_version": TODO_ITEM_SCHEMA_VERSION}
+                if item.get("schema_version") == TODO_DOMAIN_ITEM_SCHEMA_VERSION
+                else {}
+            ),
+            "source_section": "Completed Work Archive",
+            "index": index,
+        }
+        if item.get("archive_state") == "archive"
+        else (
+            {
+                **item,
+                "schema_version": TODO_ITEM_SCHEMA_VERSION,
+                "source_section": TODO_SECTION_HEADINGS[item["role"]],
+                "index": index,
+            }
+            if item.get("schema_version") == TODO_DOMAIN_ITEM_SCHEMA_VERSION
+            else item
+        )
+        for index, item in enumerate(todos, 1)
+    ]

@@ -25,6 +25,7 @@ from .candidate_review import (
     TARGET_CLASS_IDS,
     review_reward_memory_candidate,
 )
+from .experience_quality import procedural_experience_digest
 from .registry import IDENTITY_SCOPE_FIELDS, normalize_reward_memory_corpus
 
 
@@ -276,6 +277,7 @@ def _policy_guard(
     return {
         "passed": not reasons,
         "reason_codes": sorted(set(reasons)),
+        "experience_quality": dict(guard.get("experience_quality") or {}),
         "semantic_reasoning_preserved": True,
         "rule": (
             "standing_policy_checks_exact_owner_class_source_actor_scope_and_"
@@ -337,6 +339,7 @@ def ingest_reward_memory_candidate(
         "policy_id": policy["policy_id"],
         "surface_ids": surfaces,
         "guard": guard,
+        "experience_quality": dict(guard.get("experience_quality") or {}),
         "deduplicated": False,
         "exact_readback_verified": False,
         "memory_available_for_recall": False,
@@ -496,10 +499,103 @@ def ingest_reward_memory_candidate(
         and item.content_digest == expected_digest
         for item in recall.items
     )
+    qualified = (guard.get("experience_quality") or {}).get("passed") is True
+    destination_required = candidate.get("target_class") == "procedural_experience"
+    destination_verified = not destination_required
+    destination_recall = None
+    experience_digest = None
+    if exact and destination_required:
+        experience = candidate.get("experience")
+        assert isinstance(experience, Mapping)
+        experience_digest = procedural_experience_digest(experience)
+        applicability = list(experience.get("applicability") or [])
+        future_behavior = experience.get("future_behavior")
+        assert isinstance(future_behavior, Mapping)
+        destination_request = build_reward_memory_recall_request(
+            normalized_corpus,
+            {
+                "workspace_ref": scope["workspace_ref"],
+                "project_ref": scope["project_ref"],
+                **identity_scope,
+                "surface_id": surface_id,
+                "revision_ref": scope.get("revision_ref"),
+                "mode": "function_boundary",
+                "query_kind": "business_recall",
+                "queries": [
+                    {
+                        "query": " ".join(
+                            [
+                                str(applicability[0]),
+                                str(future_behavior["trigger"]),
+                                str(future_behavior["action"]),
+                            ]
+                        ),
+                        "query_summary": (
+                            "Verify semantic recall at the configured destination "
+                            "surface."
+                        ),
+                    }
+                ],
+                "limit": 3,
+                "observed_at": observed_at,
+                "freshness_context": _freshness_context(
+                    normalized_corpus,
+                    scope.get("revision_ref"),
+                ),
+                "conflict_state": "clear",
+                "raw_content_captured": False,
+            },
+            read_authority_checkpoint={
+                "verified": True,
+                "corpus_id": normalized_corpus["corpus_id"],
+                "workspace_ref": scope["workspace_ref"],
+                "project_ref": scope["project_ref"],
+                **identity_scope,
+                "surface_id": surface_id,
+                "read_authority": normalized_corpus["read_authority"],
+                "source_ref": policy["authority_source_ref"],
+            },
+        )
+        destination_recall = execute_reward_memory_recall(
+            destination_request,
+            provider_binding=binding,
+            provider=configured_provider,
+        )
+        destination_verified = any(
+            item.candidate_ref == candidate_ref
+            and item.experience_digest == experience_digest
+            for item in destination_recall.items
+        )
+    available = exact and qualified and destination_verified
+    status = (
+        "activated"
+        if available
+        else "readback_unverified"
+        if not exact
+        else "recall_unverified"
+    )
+    reason_codes = (
+        []
+        if available
+        else ["exact_provider_readback_unverified"]
+        if not exact
+        else ["destination_business_recall_unverified"]
+    )
     return synced | {
-        "status": "activated" if exact else "readback_unverified",
+        "status": status,
         "readback": recall.public_packet,
         "exact_readback_verified": exact,
-        "memory_available_for_recall": exact,
-        "reason_codes": [] if exact else ["exact_provider_readback_unverified"],
+        "destination_recall": {
+            "required": destination_required,
+            "verified": destination_verified,
+            "query_kind": "business_recall" if destination_required else None,
+            "experience_digest": experience_digest,
+            "receipt": (
+                destination_recall.public_packet
+                if destination_recall is not None
+                else None
+            ),
+        },
+        "memory_available_for_recall": available,
+        "reason_codes": reason_codes,
     }

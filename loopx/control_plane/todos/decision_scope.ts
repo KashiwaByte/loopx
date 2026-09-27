@@ -2,7 +2,7 @@
  * A consistent dependency is not approval, a lease, or a mutation receipt. */
 import type {JsonObject} from "../effect_program.ts";
 import {requireJsonObject, optionalNonEmptyString, requireBoolean, requireInteger} from "../runtime_decode.ts";
-import {gateAddressesAgent} from "./gate_scope.ts";
+import {gateAddressesAgent} from "./agent_scope.ts";
 import {
   TODO_DECISION_SCOPE_GRANULARITY_SET,
   TODO_DECISION_SCOPE_KEY_PATTERN,

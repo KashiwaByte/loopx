@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-import hashlib
-import json
 from pathlib import Path
 from typing import Any
 
 from ..effect_runtime import EffectRuntimeRejected, effect_runtime_result
+from ...history import decode_registry_snapshot
 from ...registry import registry_goals
 from .activation import GoalActivationState, goal_activation_state
-from .activation_service import _source_and_target
+from .activation_service import (
+    GoalActivationAuthorityRoute,
+    GoalActivationAuthorityRouteMode,
+    GoalActivationSourceStatus,
+    _source_and_target,
+    goal_activation_source_fingerprint,
+)
 
 
 GOAL_ACTION_PROJECTION_REQUEST_SCHEMA_VERSION = (
-    "loopx_goal_action_projection_request_v2"
+    "loopx_goal_action_projection_request_v3"
 )
 GOAL_ACTION_CATALOG_SCHEMA_VERSION = "loopx_goal_action_catalog_v1"
 
@@ -32,6 +37,45 @@ def _goal(payload: Mapping[str, Any], goal_id: str) -> Mapping[str, Any]:
     return goal
 
 
+def _identity_fact(goal: Mapping[str, Any]) -> dict[str, Any]:
+    fact = {"goal_id": goal.get("id")}
+    if "goal_instance_id" in goal:
+        fact["goal_instance_id"] = goal.get("goal_instance_id")
+    return fact
+
+
+def _identity_observation(
+    *,
+    route: GoalActivationAuthorityRoute,
+    requested_goal: Mapping[str, Any],
+    source_goal: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    binding_owner = (
+        "source_registry"
+        if route.mode is GoalActivationAuthorityRouteMode.REQUESTED_TO_GLOBAL
+        else "global_projection"
+    )
+    if route.source_status is GoalActivationSourceStatus.AVAILABLE:
+        if source_goal is None:
+            raise RuntimeError("available Goal source route has no Goal")
+        authority: dict[str, Any] = {
+            "kind": "present",
+            "goal": _identity_fact(source_goal),
+        }
+    elif route.source_status is GoalActivationSourceStatus.GOAL_MISSING:
+        authority = {"kind": "absent"}
+    else:
+        authority = {
+            "kind": "unavailable",
+            "reason": route.source_status.value,
+        }
+    return {
+        "binding_owner": binding_owner,
+        "authority": authority,
+        "binding": _identity_fact(requested_goal),
+    }
+
+
 def build_goal_action_catalog(
     *,
     registry_path: Path,
@@ -44,7 +88,11 @@ def build_goal_action_catalog(
     if not normalized_goal_id:
         raise ValueError("goal id is required")
     requested_registry = Path(registry_path).expanduser().resolve()
-    requested_payload = json.loads(requested_registry.read_text(encoding="utf-8"))
+    requested_bytes = requested_registry.read_bytes()
+    requested_payload = decode_registry_snapshot(
+        requested_registry,
+        requested_bytes,
+    )
     requested_goal = _goal(requested_payload, normalized_goal_id)
     current_state = goal_activation_state(requested_goal)
     target_state = (
@@ -59,9 +107,22 @@ def build_goal_action_catalog(
         runtime_root_override=runtime_root_override,
     )
     source_bytes = authority_route.source_registry.read_bytes()
-    source_payload = json.loads(source_bytes)
-    source_state = goal_activation_state(_goal(source_payload, normalized_goal_id))
-    fingerprint = hashlib.sha256(source_bytes).hexdigest()
+    source_payload = decode_registry_snapshot(
+        authority_route.source_registry,
+        source_bytes,
+    )
+    action_goal = _goal(source_payload, normalized_goal_id)
+    source_state = goal_activation_state(action_goal)
+    source_goal = (
+        action_goal
+        if authority_route.source_status is GoalActivationSourceStatus.AVAILABLE
+        else None
+    )
+    fingerprint = goal_activation_source_fingerprint(
+        goal_id=normalized_goal_id,
+        source_registry=authority_route.source_registry,
+        source_bytes=source_bytes,
+    )
     try:
         result = effect_runtime_result(
             "goal.operator_actions.project",
@@ -72,6 +133,11 @@ def build_goal_action_catalog(
                 "runtime_root_locator": authority_route.sync_runtime_root,
                 "activation_state": source_state.value,
                 "state_fingerprint": fingerprint,
+                "identity_observation": _identity_observation(
+                    route=authority_route,
+                    requested_goal=requested_goal,
+                    source_goal=source_goal,
+                ),
             },
         )
     except EffectRuntimeRejected as exc:

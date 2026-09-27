@@ -1,4 +1,4 @@
-.TH LOOPX 1 "" "LoopX 1.0.3" "User Commands"
+.TH LOOPX 1 "" "LoopX 1.2.1" "User Commands"
 .SH NAME
 loopx \- control-plane helper for long-running agent work
 .SH SYNOPSIS
@@ -34,6 +34,9 @@ Check install, PATH, release snapshot, skills, and import health.
 .TP
 \fBloopx first\-run\-report\fR
 Print a local first\-run receipt and an optional public feedback issue link.
+.TP
+\fBloopx usage\-ping [status|enable|disable]\fR
+Show or change the default\-on basic usage statistics and its exact payload.
 .TP
 \fBloopx slash\-commands \-\-install\fR
 Refresh host slash\-command prompt and skill files.
@@ -198,6 +201,9 @@ Run contract and public/private boundary checks.
 \fBloopx change\-quality \-\-help\fR
 Qualify one exact final diff against an enabled project policy and receipt contract.
 .TP
+\fBloopx goal\-acceptance\fR
+Configure, inspect or verify a versioned Goal acceptance basis.
+.TP
 \fBloopx integration\-branch \-\-help\fR
 Detect reviewed source\-branch drift and rebuild one local integration branch.
 .TP
@@ -216,6 +222,9 @@ Safely retire explicitly named orphaned global goal routes.
 \fBloopx register\-agent\fR
 Register an automation agent.
 .TP
+\fBloopx agent\-directory\fR
+Produce the local, goal\-scoped peer agent directory this host can hand work to.
+.TP
 \fBloopx lark\-kanban\fR
 Project LoopX state into a Feishu/Lark Base board.
 .TP
@@ -230,6 +239,9 @@ Inspect and manage doctor\-verified subprocess extension activations.
 .TP
 \fBloopx connector\fR
 List, register, rank, and record usage for public connector providers.
+.TP
+\fBloopx external\-evidence\fR
+Plan, admit, and retire provenance\-bound external evidence.
 .TP
 \fBloopx issue\-fix\fR
 Build public\-safe issue or PR fix workflow packets.

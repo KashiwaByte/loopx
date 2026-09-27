@@ -476,6 +476,22 @@ test("turn-start read commands retain explicit routes with a bounded byte budget
   }
 });
 
+test("turn-start reads can opt into a bounded prompt budget without changing defaults", () => {
+  const registration = turnStartRegistration();
+  const read = registration.required_read;
+  assert.deepEqual(validateTurnStartHookRegistration(registration).required_read, read);
+  const budgeted = { ...read, prompt_budget_bytes: 1_536 };
+  assert.deepEqual(validateTurnStartHookRegistration({ ...registration, required_read: budgeted }).required_read, budgeted);
+  for (const value of [0, -1, 2_049, 1.5, true, "1536", null]) {
+    assert.throws(() => validateTurnStartHookRegistration({ ...registration,
+      required_read: { ...read, prompt_budget_bytes: value },
+    }), /prompt budget/);
+  }
+  assert.throws(() => validateTurnStartHookRegistration({ ...registration,
+    required_read: { ...read, prompt_budget_bytes: 64 },
+  }), /exceeds its declared prompt budget/);
+});
+
 test("turn-start observations require Agent reading without returning private content", () => {
   const observed = validateTurnStartHookInvocation({
     registration: turnStartRegistration(),

@@ -8,13 +8,18 @@ import zlib
 from typing import Any
 
 from ..effect_runtime import effect_runtime_result
-from .contract import normalize_todo_claimed_by, normalize_todo_excluded_agents
+# Refs #4447: the todo contract owns this vocabulary; import it instead of
+# restating the literal in every module that classifies a Todo.
+from .contract import (
+    TODO_TASK_CLASS_ADVANCEMENT,
+    normalize_todo_claimed_by,
+    normalize_todo_excluded_agents,
+)
 from .todo_semantics import todo_item_task_class
 
 
 TODO_FRONTIER_REVISION_SCHEMA_VERSION = "todo_frontier_revision_v0"
 TODO_FRONTIER_REVISION_INDEX_SCHEMA_VERSION = "todo_frontier_revision_index_v0"
-TODO_TASK_CLASS_ADVANCEMENT = "advancement_task"
 
 FRONTIER_REVISION_FIELDS = (
     "todo_id",

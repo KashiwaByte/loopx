@@ -14,12 +14,20 @@ from loopx.control_plane.testing.canary_harness import run_json_cli
 from loopx.todos import list_goal_todos
 
 
-def _canonical(tmp_path, native=False, provider="file"):
+def _canonical(tmp_path, native=False, provider="file", lease=None):
     registry, runtime, state = _write_fixture(tmp_path)
     monitor = _add_monitor(registry, text="Observe a public target", target_key="public-watch",
         next_due_at="2000-01-01T00:00:00Z")
     items = list_goal_todos(registry_path=registry, goal_id=GOAL_ID, role="agent")["todos"]
-    projection = build_todo_runtime_shadow_projection(goal_id=GOAL_ID, todos=items, leases=[], handoff_mode="soft_claim")
+    leases = []
+    if lease is not None:
+        for item in items:
+            if item["todo_id"] == monitor["todo_id"]:
+                item["claimed_by"] = AGENT_ID
+        leases = [{"schema_version": "task_lease_v0", "goal_id": GOAL_ID,
+            "todo_id": monitor["todo_id"], "owner": AGENT_ID, "write_scopes": [], **lease}]
+    projection = build_todo_runtime_shadow_projection(goal_id=GOAL_ID, todos=items, leases=leases,
+        handoff_mode="hard_lease" if lease is not None else "soft_claim")
     if native:
         from loopx.control_plane.coordination.coordination_state_contract import TODO_DOMAIN_RECORD_FIELDS
         from loopx.control_plane.coordination.local_authority_shadow_projection import canonical_bytes

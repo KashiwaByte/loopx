@@ -1,10 +1,11 @@
 /** Disposable SQLite qualification. No live goal or caller-supplied runtime. */
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
-import {spawnSync} from "node:child_process";
+import {spawn, spawnSync} from "node:child_process";
 import {existsSync, mkdtempSync, readFileSync, readdirSync, rmSync,
   statfsSync, statSync, writeFileSync} from "node:fs";
 import {cpus, platform, release, tmpdir, totalmem} from "node:os";
+import {DatabaseSync} from "node:sqlite";
 import {delimiter, dirname, join, relative, sep} from "node:path";
 import {performance} from "node:perf_hooks";
 import {fileURLToPath} from "node:url";
@@ -16,13 +17,14 @@ import {selectLocalSqliteAuthority} from "../../loopx/control_plane/coordination
 import {engageLegacyCoordinationWriterFence} from "../../loopx/control_plane/coordination/legacy_writer_fence.ts";
 import {canonicalAuthoritySha256} from "../../loopx/control_plane/coordination/authority_store_codec.ts";
 import {authorityProjectionFixture} from "../../tests/control_plane_ts/authority_projection_fixture.ts";
-import {capacityLedger, latency, type CapacityAxis, type QualificationRow} from "./sqlite-capacity-report.ts";
+import {CAPACITY_PROFILES, capacityLedger, latency, type CapacityAxis, type CapacityProfileId,
+  type QualificationRow} from "./sqlite-capacity-report.ts";
 
 const {values: options} = parseArgs({options: {
   profile: {type: "string", default: "rehearsal"}, output: {type: "string"},
   python: {type: "string", default: "python3"}, cli: {type: "boolean", default: false},
 }});
-const goal = "sqlite-capacity", formal = options.profile === "matched-64k";
+const goal = "sqlite-capacity";
 const script = fileURLToPath(import.meta.url), repository = fileURLToPath(new URL("../../", import.meta.url));
 const sqlite = (() => {
   try { return sqliteAuthorityRuntime(); }
@@ -37,34 +39,45 @@ const sqlite = (() => {
   }
 })(); // Fail before creating a qualification database.
 
-assert(["rehearsal", "matched-64k"].includes(options.profile), "profile must be rehearsal or matched-64k");
+assert(options.profile in CAPACITY_PROFILES, `profile must be one of ${Object.keys(CAPACITY_PROFILES).join(", ")}`);
+const profileId = options.profile as CapacityProfileId;
+const profile = CAPACITY_PROFILES[profileId];
+const formal = profile.formal;
 const report: Record<string, unknown> = {
   schema_version: "loopx_sqlite_capacity_report_v1", profile: options.profile,
   runtime: sqlite.info, source: sourceIdentity(),
   host: {platform: platform(), release: release(), arch: process.arch,
     logical_cpus: cpus().length, cpu_model: cpus()[0]?.model ?? "unknown", memory_bytes: totalmem(),
     storage_medium: "not_captured"},
-  workload: {projection_json_bytes: 65536, event_receipt_max_bytes: 4096,
+  workload: {projection_json_bytes: profile.payload, event_receipt_max_bytes: 4096,
     fill_read_write_ratio: "5:1", read_mix: "three head, oldest receipt, deterministic middle receipt",
     records: "one native synthetic Todo; fixed padding isolates history growth; not the full domain profile",
     sampling: "last 1000 commits (or entire smaller rehearsal); nearest-rank quantiles",
+    traffic_window: "8 warmup commits, then one bounded window (1000 formal / 100 rehearsal) with a held read mark that blocks WAL resets; exact frames from WAL file growth",
+    lock_probe: "a probe process holds the write lock for 200 ms per sample (12 formal / 3 rehearsal); the end-to-end store commit wait is reported",
     cold_cli: options.cli ? "new Python process and newly started managed Effect runtime per sample; shutdown outside timing" : "not_requested",
     cold_node: "new Node process and import plus first load; OS file cache is not dropped",
     warm: "same process, actual provider opens and closes each connection"},
   durability: {journal_mode: "WAL", synchronous: "FULL", altered_for_measurement: false},
-  budgets: {per_axis_fill_seconds: 2400, database_bytes: 16 * 1024 ** 3, minimum_free_bytes: 5 * 1024 ** 3},
-  metric_limits: {logical_storage_writes: "missing", cumulative_wal_traffic: "missing",
+  budgets: {per_axis_fill_seconds: 2400, per_axis_fill_seconds_scaling: "operational guard, floored at 2400 s and scaled by commits and payload bytes beyond the 64 KiB 100k workload",
+    database_bytes: 16 * 1024 ** 3, minimum_free_bytes: 5 * 1024 ** 3},
+  metric_limits: {
+    logical_storage_writes: "measured per commit as serialized bytes handed to SQLite (commits row delta+events+receipts, full-projection head rewrite, amortized checkpoint row); page, index and compaction overhead excluded",
+    cumulative_wal_traffic: "measured over one bounded commit window per axis with a held read mark that blocks WAL resets; whole-run WAL totals remain unmeasured",
+    lock_wait: "app-observed end-to-end commit wait while a probe process holds the write lock; includes connection open, excludes busy-handler internals (not exposed by node:sqlite)",
     pure_busy_wait: "missing", physical_device_writes: "missing",
     rss_scope: "Node parent sampled per axis; resourceUsage peak is process-lifetime across both axes; CLI child RSS is not measured",
     application_byte_scope: "fixed-history fill requests only; excludes CLI requests and storage/checkpoint work"},
   full_d2_qualified: false,
 };
 const axes: CapacityAxis[] = [];
-for (const count of formal ? [10000, 100000] : [100, 1000]) {
+for (const count of profile.counts) {
   const axis = await measureAxis(count); axes.push(axis);
   if (axis.status === "failed") break;
 }
-const ledger = capacityLedger(axes, formal);
+// The ledger validates the measured axes against the same profile the runner
+// used, before its dedicated coverage row can disappear.
+const ledger = capacityLedger(axes, profileId);
 const sourceStable = (report.source as Record<string, unknown>).source_tree_sha256 === sourceIdentity().source_tree_sha256;
 if (!sourceStable) ledger.push({id: "source_stability", status: "failed", scope: "source changed while the profile was running"});
 Object.assign(report, {axes, ledger, source_stable: sourceStable, status: axes.some(axis => axis.status === "failed") ||
@@ -95,20 +108,39 @@ async function measureAxis(count: number): Promise<CapacityAxis> {
   const projection = authorityProjectionFixture(goal, [{todo_id: "todo_capacity", role: "agent", status: "open",
     done: false, text: "Capacity 000000", archive_state: "active", claimed_by: "agent-a", task_class: "advancement_task"}],
   [], "native", {handoff_mode: "soft_claim", capacity_padding: ""});
-  const padding = 65536 - Buffer.byteLength(JSON.stringify(projection));
+  const padding = profile.payload - Buffer.byteLength(JSON.stringify(projection));
   assert(padding >= 0); projection.capacity_padding = "p".repeat(padding);
-  assert.equal(Buffer.byteLength(JSON.stringify(projection)), 65536);
+  assert.equal(Buffer.byteLength(JSON.stringify(projection)), profile.payload);
+  const payloadBytes = profile.payload;
   const root = mkdtempSync(join(tmpdir(), "loopx-sqlite-capacity-"));
   const runtime = join(root, "runtime"), state = join(root, "state.md"), registry = join(root, "registry.json");
   const directory = join(runtime, "authority", "sqlite-v0");
   const store = new SqliteAuthorityStore(directory, goal);
-  const axis: CapacityAxis = {target_commits: count, completed_commits: 0, projection_json_bytes: 65536,
+  const axis: CapacityAxis = {target_commits: count, completed_commits: 0, projection_json_bytes: profile.payload,
     sample_window: Math.min(1000, count), status: "failed", warm: null, cold_node: null, cold_cli: null,
     application_request_json_bytes: 0, files_at_target: null, sampled_peak_rss_bytes: process.memoryUsage().rss,
+    bounded_profile: null, history_audit: null, wal_traffic_window: null, logical_writes: null, lock_wait: null,
     resource_peak_rss_bytes: 0, fill_seconds: 0, cli_commits: 0, cleanup_verified: false};
   const commits: number[] = [], heads: number[] = [], receipts: number[] = [];
   const timed = async <T>(fn: () => Promise<T>, samples?: number[]): Promise<T> => {
     const start = performance.now(), result = await fn(); samples?.push(performance.now() - start); return result;
+  };
+  // Instrumentation commits (traffic window, lock probe) extend the same
+  // matched workload past the fill target; they are counted separately so the
+  // ledger's target-state rows keep their meaning.
+  let revision: string | null = null;
+  let extraCommits = 0, instrumentOrdinal = count + 1;
+  const commitProbe = async (operationId: string): Promise<number> => {
+    const ordinal = instrumentOrdinal++;
+    const input: AuthorityStoreCommit = {expected_provider_revision: revision, operation_id: operationId,
+      next_projection: projection,
+      events: [{kind: "synthetic", ordinal, data: "e".repeat(1800)}],
+      receipts: [{operation_id: operationId, ordinal, data: "r".repeat(1800)}]};
+    const started = performance.now();
+    const result = await store.commitAuthority(input);
+    if (result.status !== "applied") throw new Error(`instrumentation commit rejected: ${operationId}`);
+    revision = result.provider_revision; extraCommits++;
+    return performance.now() - started;
   };
   const environment = {...process.env, PATH: dirname(process.execPath) + delimiter + (process.env.PATH ?? ""),
     NODE_OPTIONS: "--experimental-sqlite", TMPDIR: root, TMP: root, TEMP: root};
@@ -140,7 +172,6 @@ async function measureAxis(count: number): Promise<CapacityAxis> {
       repo: root, state_file: "state.md", status: "active", domain: "synthetic-storage-qualification",
       adapter: {kind: "read_only_project_map_v0", status: "connected-read-only"},
       coordination: {registered_agents: ["agent-a"]}}]}));
-    let revision: string | null = null;
     phase = "matched_fill";
     const start = performance.now();
     for (let i = 1; i <= count; i++) {
@@ -166,7 +197,11 @@ async function measureAxis(count: number): Promise<CapacityAxis> {
       if (i % 100 === 0) {
         axis.sampled_peak_rss_bytes = Math.max(axis.sampled_peak_rss_bytes, process.memoryUsage().rss);
         const fs = statfsSync(root);
-        assert(performance.now() - start < 2400000, "axis wall budget exhausted");
+        // The fill wall budget is an operational guard over the work performed
+        // (commits x payload bytes), never a qualification budget; the RFC
+        // p95/growth budgets below are unaffected by this floor.
+        const wallBudgetMs = Math.max(2400000, 2400000 * count / 100000 * payloadBytes / 65536);
+        assert(performance.now() - start < wallBudgetMs, "axis wall budget exhausted");
         assert(statSync(store.path).size < 16 * 1024 ** 3, "database budget exhausted");
         assert(fs.bavail * fs.bsize > 5 * 1024 ** 3, "disk reserve exhausted");
       }
@@ -184,6 +219,129 @@ async function measureAxis(count: number): Promise<CapacityAxis> {
     axis.warm = {commit: latency(commits), head: latency(heads), receipt: latency(receipts), scan_100: latency(scans)};
     const bytes = (path: string) => existsSync(path) ? statSync(path).size : 0;
     axis.files_at_target = {database_bytes: bytes(store.path), wal_bytes: bytes(store.path + "-wal"), shm_bytes: bytes(store.path + "-shm")};
+    phase = "bounded_profile";
+    // Retained state and recovery bound of the filled history. The linear
+    // archive audit is only launched where its cost is affordable: it reads
+    // every retained transaction, so the formal 100k axis leaves it to a
+    // separately authorized run.
+    const profile = await store.boundedProfile();
+    if (profile.status !== "available") throw new Error("bounded profile unavailable");
+    axis.bounded_profile = profile;
+    if (!formal) {
+      const audit = await store.verifyAuthorityHistory();
+      axis.history_audit = audit.status === "verified"
+        ? {status: audit.status, commits: audit.commits, checkpoints: audit.checkpoints}
+        : {status: audit.status, commits: 0, checkpoints: 0};
+      assert.equal(audit.status, "verified");
+    }
+    phase = "logical_writes";
+    // Logical write volume comes from the filled database itself, so the
+    // numbers stay separated from WAL traffic and final file size.
+    {
+      const db = new DatabaseSync(store.path);
+      try {
+        const head = db.prepare("SELECT length(CAST(projection AS BLOB)) AS bytes FROM head WHERE singleton = 1")
+          .get() as {bytes: number};
+        const commitRow = db.prepare(`SELECT count(*) AS n,
+          avg(length(CAST(delta AS BLOB)) + length(CAST(events AS BLOB)) + length(CAST(receipts AS BLOB))) AS mean
+          FROM (SELECT delta, events, receipts FROM commits ORDER BY cursor DESC LIMIT 1000)`).get() as
+          {n: number; mean: number};
+        const checkpointRow = db.prepare(
+          "SELECT count(*) AS n, avg(length(CAST(projection AS BLOB))) AS mean FROM checkpoints").get() as
+          {n: number; mean: number};
+        assert(commitRow.n > 0 && head.bytes > 0 && Number.isFinite(commitRow.mean));
+        const interval = checkpointRow.n > 0 ? axis.completed_commits / checkpointRow.n : Number.POSITIVE_INFINITY;
+        const perCommit = commitRow.mean + head.bytes +
+          (Number.isFinite(interval) ? checkpointRow.mean / interval : 0);
+        axis.logical_writes = {commits_rows_sampled: commitRow.n,
+          commits_row_bytes_mean: Math.round(commitRow.mean), checkpoints: checkpointRow.n,
+          checkpoint_row_bytes_mean: Math.round(checkpointRow.mean), head_projection_bytes: head.bytes,
+          per_commit_logical_bytes: Math.round(perCommit),
+          cumulative_logical_bytes: Math.round(perCommit * axis.completed_commits),
+          formula: "per commit = commits row (delta+events+receipts) + full-projection head rewrite + checkpoint row amortized over its interval"};
+      } finally { db.close(); }
+    }
+    phase = "wal_traffic_window";
+    // WAL traffic is measured over one bounded window with read marks pinned
+    // so no checkpoint can reset the WAL: the file only appends and frame
+    // growth is exact. Two observers are needed because a store connection
+    // checkpoints and resets the WAL on every close: the first observer
+    // blocks that reset while one align commit leaves frames behind, then the
+    // second observer pins a read mark inside the now non-empty WAL, where a
+    // reset is impossible. The window measures per-commit traffic at this
+    // history depth; it is not a whole-run total.
+    {
+      const windowWarmup = 8, windowCommits = formal ? 1000 : 100;
+      const pin = (observer: DatabaseSync) => {
+        observer.exec("BEGIN");
+        assert.equal((observer.prepare("SELECT count(*) AS n FROM commits").get() as {n: number}).n,
+          axis.completed_commits + extraCommits);
+      };
+      const reset = (observer: DatabaseSync) => {
+        try { observer.exec("ROLLBACK"); } catch { /* the transaction already ended */ }
+        observer.close();
+      };
+      const blocker = new DatabaseSync(store.path);
+      const marker = new DatabaseSync(store.path);
+      try {
+        blocker.exec("PRAGMA busy_timeout = 5000");
+        for (let i = 1; i <= windowWarmup; i++) await commitProbe(`wal-warmup-${count}-${i}`);
+        const pageSize = (blocker.prepare("PRAGMA page_size").get() as {page_size: number}).page_size;
+        pin(blocker);
+        await commitProbe(`wal-align-${count}`);
+        pin(marker);
+        const walPath = store.path + "-wal";
+        const startSize = statSync(walPath).size, startHeader = Buffer.from(readFileSync(walPath).subarray(0, 32));
+        assert(startSize > 32, "WAL must hold the align commit when the read mark is pinned");
+        for (let i = 1; i <= windowCommits; i++) await commitProbe(`wal-window-${count}-${i}`);
+        const endSize = statSync(walPath).size, endHeader = Buffer.from(readFileSync(walPath).subarray(0, 32));
+        const frameBytes = 24 + pageSize, growth = endSize - startSize;
+        if (!startHeader.equals(endHeader) || growth <= 0 || growth % frameBytes !== 0) {
+          axis.wal_traffic_window = {status: "invalid", reason: startHeader.equals(endHeader)
+            ? "WAL growth is empty, negative or not frame aligned" : "WAL header changed; a reset happened despite the held read marks"};
+        } else {
+          const frames = growth / frameBytes;
+          axis.wal_traffic_window = {status: "measured", warmup_commits: windowWarmup,
+            window_commits: windowCommits, page_size_bytes: pageSize, frame_bytes: frameBytes,
+            wal_bytes: growth, frames, wal_bytes_per_commit: growth / windowCommits};
+        }
+      } finally {
+        try { reset(blocker); } catch { /* cleanup only */ }
+        try { reset(marker); } catch { /* cleanup only */ }
+      }
+    }
+    phase = "lock_wait";
+    // The node:sqlite driver exposes no busy-handler timing, so the probe
+    // measures the application-observed wait: a separate process holds the
+    // write lock for a controlled interval while one store commit runs.
+    {
+      const heldMs = 200, lockSamples = formal ? 12 : 3;
+      const probe = `const {DatabaseSync} = require("node:sqlite");
+        const db = new DatabaseSync(process.argv[1]);
+        db.exec("PRAGMA busy_timeout = 3000");
+        db.exec("BEGIN IMMEDIATE");
+        process.stdout.write("READY\\n");
+        setTimeout(() => { db.close(); process.exit(0); }, Number(process.argv[2]));`;
+      const waits: number[] = [];
+      for (let i = 1; i <= lockSamples; i++) {
+        const child = spawn(process.execPath, ["--no-warnings", "--experimental-sqlite", "-e", probe,
+          store.path, String(heldMs)], {stdio: ["ignore", "pipe", "inherit"]});
+        const {stdout} = child;
+        assert(stdout, "lock probe stdout must be piped");
+        const ready = new Promise<void>((resolveReady, rejectReady) => {
+          const guard = setTimeout(() => rejectReady(new Error("lock probe did not hold the write lock in time")), 10000);
+          stdout.once("data", () => { clearTimeout(guard); resolveReady(); });
+          child.once("exit", () => { clearTimeout(guard);
+            rejectReady(new Error("lock probe process exited before holding the write lock")); });
+        });
+        await ready;
+        waits.push(await commitProbe(`lock-probe-${count}-${i}`));
+        await new Promise<void>(resolveExit => child.once("exit", () => resolveExit()));
+      }
+      assert(axis.warm?.commit, "lock wait needs the uncontended commit baseline");
+      axis.lock_wait = {status: "measured", samples: lockSamples, held_write_lock_ms: heldMs,
+        uncontended_commit_p50_ms: axis.warm.commit.p50_ms, observed_wait: latency(waits)};
+    }
     phase = "cold_node";
     const cold: number[] = [], samples = formal ? 20 : 3;
     for (let i = 0; i < samples; i++) {
@@ -219,7 +377,7 @@ async function measureAxis(count: number): Promise<CapacityAxis> {
       }
       axis.cold_cli = {mutation: latency(mutation), status: latency(status), quota: latency(quota)};
       const final = await store.loadAuthority(); assert.equal(final.status, "loaded");
-      if (final.status === "loaded") assert.equal(final.cursor, String(count + samples));
+      if (final.status === "loaded") assert.equal(final.cursor, String(count + extraCommits + samples));
     }
     axis.status = "passed";
   } catch (error) {

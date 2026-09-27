@@ -16,17 +16,100 @@
   "current_lease_count": 64,
   "retired_lease_count": 160,
   "standing_user_decision_count": 4,
+  "rejected_standing_decision_count": 2,
   "scoped_without_outcome_count": 12,
   "linked_decision_count": 12,
   "completion_target_index": 160,
   "supersede_target_index": 161,
+  "history": {
+    "commit_count": 192,
+    "parity_commit_count": 12,
+    "scan_page_size": 7,
+    "expected_scan_pages": 28,
+    "observation_source": "continuous_monitor",
+    "projection_scope": {"agent_todos": 24, "user_todos": 8, "leases": 8}
+  },
   "provider_matrix": {
     "default": "file",
     "local_profiles": ["file", "sqlite"],
     "service_profiles": ["postgresql"],
     "service_requires_factory": true
   },
+  "lease_lifecycle": {
+    "owner": "agent-a",
+    "receiver": "agent-b",
+    "execution_key": "lifecycle-a",
+    "receiver_execution_key": "lifecycle-b",
+    "version": 3,
+    "lease_epoch": 7,
+    "now": "2026-09-13T10:05:00Z"
+  },
+  "lease_acquisition": {
+    "execution_key": "acquire-a", "next_execution_key": "acquire-b",
+    "write_scopes": ["lease-admission/**"], "ttl_seconds": 600,
+    "conflict_todo_id": "todo_zz_acquire_scope",
+    "conflict_write_scopes": ["lease-admission/shared/**"]
+  },
+  "priority_cases": [
+    {
+      "item": {
+        "priority": "P4",
+        "text": "[P0] Stale display"
+      },
+      "priority": "P4",
+      "rank": 4
+    },
+    {
+      "item": {
+        "text": "Investigate P0 parser behavior"
+      },
+      "priority": null,
+      "rank": 50
+    },
+    {
+      "item": {
+        "text": "[P2-review] Review the parser"
+      },
+      "priority": "P2",
+      "rank": 2
+    },
+    {
+      "item": {
+        "priority": null,
+        "text": "[P0] Stale display"
+      },
+      "priority": null,
+      "rank": 50
+    },
+    {
+      "item": {
+        "priority": "P1junk",
+        "text": "Invalid historical label"
+      },
+      "priority": null,
+      "rank": 50
+    }
+  ],
   "semantic_cases": {
+    "terminal_source": {
+      "observed_at": "2026-09-21T00:00:00Z",
+      "after_expiry": "2028-01-01T00:00:00Z",
+      "changed_source_rejection": "provider_revision_mismatch",
+      "missing_source_rejection": "completion_validation_source_required"
+    },
+    "user_completion": {
+      "scope_key": "publish_artifact",
+      "other_blocker_id": "todo_zz_remaining_user_decision"
+    },
+    "succession": {
+      "inferred_source": "todo_succession_inferred_source",
+      "archived_target": "todo_succession_archived_target",
+      "missing_source": "todo_succession_missing_source",
+      "self_source": "todo_succession_self_source",
+      "handoff_source": "todo_succession_handoff_source",
+      "explicit_target": "todo_succession_explicit_target",
+      "closed_source": "todo_succession_closed_source"
+    },
     "title_only_monitor": {
       "todo_id": "todo_fixture_title_monitor",
       "role": "agent",

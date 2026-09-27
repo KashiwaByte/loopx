@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from enum import StrEnum
@@ -16,6 +17,7 @@ from ...todos import (
     list_goal_todos,
     update_goal_todo,
 )
+from ..coordination.coordination_state_contract_generated import COORDINATION_STATE_CONTRACT
 from ..runtime.public_safety import validate_public_safe_value
 from ..todos.contract import (
     TODO_STATUS_DONE,
@@ -38,6 +40,36 @@ _RECEIPT_FIELDS = {
     "status",
     "target_key",
 }
+# Receipts are persisted in the settlement journal, so the field set stays
+# closed and a new field is admitted only as an explicitly bounded addition
+# that an older receipt may still omit. `lane_todo_ids` is the readback of a
+# team plan: every lane Todo the settlement ensured, not just the first one.
+# `lane_settlements` keeps the lane->Todo->acceptance relationship the owner
+# confirmed, so a committed plan can still be read as "which lane was meant to
+# end on what" after the prose answer is gone.
+_OPTIONAL_RECEIPT_FIELDS = {
+    "lane_todo_ids",
+    "intent_basis",
+    "lane_settlements",
+    "gap_count",
+    "lane_failure",
+    "gap_lanes",
+}
+_LANE_TODO_ID_LIMIT = 8
+_LANE_TODO_ID = re.compile(r"^todo_[A-Za-z0-9]{1,40}$")
+_INTENT_BASIS = re.compile(r"^sha256:[0-9a-f]{64}$")
+_LANE_SETTLEMENT_FIELDS = {
+    "lane_id",
+    "agent_id",
+    "priority",
+    "disposition",
+    "todo_id",
+    "acceptance",
+}
+_LANE_SETTLEMENT_DISPOSITIONS = ("created", "reused")
+# A lane write this settlement could not complete. The vocabulary stays typed so
+# a reader can act on the failure without parsing prose.
+_LANE_FAILURE_REASON_CODES = ("lane_write_failed",)
 
 
 TransitionCheckpoint = Callable[[list[dict[str, Any]]], None]
@@ -50,9 +82,12 @@ class GovernedTransitionSettlementPhase(StrEnum):
     POST_SETTLEMENT = "post_settlement"
 
 
+STEWARD_TEAM_PLAN_PREVIEW_KIND = "steward_team_plan_preview"
+
 _SETTLEMENT_PHASE_BY_PROPOSAL_KIND = {
     "continuous_monitor_upsert": GovernedTransitionSettlementPhase.PRE_SETTLEMENT,
     "continuous_monitor_complete": GovernedTransitionSettlementPhase.POST_SETTLEMENT,
+    STEWARD_TEAM_PLAN_PREVIEW_KIND: GovernedTransitionSettlementPhase.PRE_SETTLEMENT,
 }
 
 
@@ -83,7 +118,11 @@ def validate_governed_transition_receipts(
     proposal_ids: set[str] = set()
     for index, raw in enumerate(value):
         receipt = _mapping(raw, f"governed transition receipt[{index}]")
-        if set(receipt) != _RECEIPT_FIELDS:
+        # An older receipt may omit the bounded readback field; nothing else may
+        # be added, so a receipt can never carry a field it did not mean to.
+        if not _RECEIPT_FIELDS <= set(receipt) <= (
+            _RECEIPT_FIELDS | _OPTIONAL_RECEIPT_FIELDS
+        ):
             raise ValueError("governed transition proposal receipt fields are invalid")
         if receipt.get("schema_version") != GOVERNED_TRANSITION_RECEIPT_SCHEMA_VERSION:
             raise ValueError("governed transition proposal receipt schema is invalid")
@@ -94,29 +133,145 @@ def validate_governed_transition_receipts(
         if receipt.get("kind") not in {
             "continuous_monitor_upsert",
             "continuous_monitor_complete",
+            STEWARD_TEAM_PLAN_PREVIEW_KIND,
         }:
             raise ValueError("governed transition proposal receipt kind is invalid")
         if receipt.get("status") != "committed":
             raise ValueError("governed transition proposal receipt status is invalid")
-        for field in (
-            "proposal_digest",
-            "monitor_key",
-            "action",
-            "todo_id",
-        ):
+        for field in ("proposal_digest", "action", "todo_id"):
             if not isinstance(receipt.get(field), str) or not receipt[field]:
                 raise ValueError(
                     f"governed transition proposal receipt {field} is invalid"
                 )
+        # A monitor transition is identified by its monitor key, so that key is
+        # required there. A team plan is not a monitor and must not invent one,
+        # so its key is explicitly absent rather than an empty string.
+        monitor_key = receipt.get("monitor_key")
+        if receipt.get("kind") == STEWARD_TEAM_PLAN_PREVIEW_KIND:
+            if monitor_key is not None:
+                raise ValueError(
+                    "governed transition proposal receipt monitor_key is invalid"
+                )
+        elif not isinstance(monitor_key, str) or not monitor_key:
+            raise ValueError(
+                "governed transition proposal receipt monitor_key is invalid"
+            )
         if receipt.get("target_key") is not None and not isinstance(
             receipt.get("target_key"), str
         ):
             raise ValueError(
                 "governed transition proposal receipt target_key is invalid"
             )
+        lane_todo_ids = receipt.get("lane_todo_ids")
+        if lane_todo_ids is not None and (
+            not isinstance(lane_todo_ids, list)
+            or not 1 <= len(lane_todo_ids) <= _LANE_TODO_ID_LIMIT
+            or len(set(lane_todo_ids)) != len(lane_todo_ids)
+            or any(
+                not isinstance(item, str) or not _LANE_TODO_ID.fullmatch(item)
+                for item in lane_todo_ids
+            )
+        ):
+            raise ValueError(
+                "governed transition proposal receipt lane_todo_ids is invalid"
+            )
+        intent_basis = receipt.get("intent_basis")
+        if intent_basis is not None and (
+            not isinstance(intent_basis, str)
+            or not _INTENT_BASIS.fullmatch(intent_basis)
+        ):
+            raise ValueError(
+                "governed transition proposal receipt intent_basis is invalid"
+            )
+        lane_settlements = receipt.get("lane_settlements")
+        if lane_settlements is not None:
+            normalize_lane_settlements(lane_settlements)
+        gap_count = receipt.get("gap_count")
+        if gap_count is not None and (
+            isinstance(gap_count, bool)
+            or not isinstance(gap_count, int)
+            or not 1 <= gap_count <= STEWARD_TEAM_PLAN_LANE_LIMIT
+        ):
+            raise ValueError("governed transition proposal receipt gap_count is invalid")
+        gap_lanes = receipt.get("gap_lanes")
+        if gap_lanes is not None:
+            if not isinstance(gap_lanes, list) or len(gap_lanes) != gap_count:
+                raise ValueError("governed transition gap_lanes count is invalid")
+            seen_gaps: set[str] = set()
+            for gap in gap_lanes:
+                if (not isinstance(gap, dict)
+                    or set(gap) != {"lane_id", "agent_id", "reason_code"}
+                    or not all(isinstance(value, str) and value for value in gap.values())
+                    or gap["lane_id"] in seen_gaps
+                    or gap["reason_code"] not in STEWARD_TEAM_PLAN_GAP_REASONS + STEWARD_TEAM_PLAN_HOST_GAP_REASONS):
+                    raise ValueError("governed transition gap_lanes is invalid")
+                seen_gaps.add(gap["lane_id"])
+        lane_failure = receipt.get("lane_failure")
+        if lane_failure is not None:
+            failure = _mapping(lane_failure, "governed transition lane failure")
+            if set(failure) != {"lane_id", "reason_code"} or str(
+                failure["reason_code"]
+            ) not in _LANE_FAILURE_REASON_CODES:
+                raise ValueError(
+                    "governed transition proposal receipt lane_failure is invalid"
+                )
         validate_public_safe_value(receipt, path=f"transition_receipts[{index}]")
         receipts.append(receipt)
     return receipts
+
+
+def normalize_lane_settlements(value: object) -> list[dict[str, str]]:
+    """Read the lane->Todo->acceptance relationship one plan settlement made.
+
+    A confirmed plan carries a lane's acceptance signal as well as the work it
+    starts. The Todo owner stores the work, so the acceptance a lane was meant
+    to end on is retained beside the Todo identity it became, in the order the
+    plan declared its lanes. A lane that was not materialized is absent: the
+    settlement reports what exists now, not what was hoped for.
+    """
+
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= STEWARD_TEAM_PLAN_LANE_LIMIT
+    ):
+        raise ValueError("governed transition lane settlements are invalid")
+    settlements: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        item = _mapping(raw, f"lane_settlement[{index}]")
+        if set(item) != _LANE_SETTLEMENT_FIELDS:
+            raise ValueError("governed transition lane settlement fields are invalid")
+        lane_id = str(item["lane_id"])
+        if not lane_id or lane_id in seen:
+            raise ValueError("governed transition lane settlement identity is invalid")
+        seen.add(lane_id)
+        disposition = str(item["disposition"])
+        if disposition not in _LANE_SETTLEMENT_DISPOSITIONS:
+            raise ValueError(
+                "governed transition lane settlement disposition is invalid"
+            )
+        todo_id = str(item["todo_id"])
+        if not _LANE_TODO_ID.fullmatch(todo_id):
+            raise ValueError("governed transition lane settlement todo_id is invalid")
+        priority = str(item["priority"])
+        if priority not in STEWARD_TEAM_PLAN_PRIORITIES:
+            raise ValueError(
+                "governed transition lane settlement priority is invalid"
+            )
+        settlements.append(
+            {
+                "lane_id": lane_id,
+                "agent_id": _plan_text(item["agent_id"], "lane settlement agent_id"),
+                "priority": priority,
+                "disposition": disposition,
+                "todo_id": todo_id,
+                "acceptance": _plan_text(
+                    item["acceptance"], "lane settlement acceptance"
+                ),
+            }
+        )
+    validate_public_safe_value(settlements, path="lane_settlements")
+    return settlements
 
 
 def _monitor_for_key(
@@ -216,6 +371,86 @@ def _upsert_monitor(
     }
 
 
+def _intent_basis_for(
+    *,
+    goal_id: str,
+    goal: Mapping[str, Any],
+    registry_path: Path,
+    preview: Mapping[str, Any],
+) -> str | None:
+    """Read the canonical source basis one work-graph edit is applied against.
+
+    The source basis is a Goal-level fact, so any of the Goal's Agents reads the
+    same one; a ready lane is preferred because that is where the work will live.
+    A Goal whose basis cannot be read omits the field rather than inventing one.
+    """
+
+    lanes = preview.get("lanes") or []
+    basis_agent = next(
+        (
+            str(lane.get("agent_id"))
+            for lane in lanes
+            if lane.get("staffing") == "ready"
+        ),
+        str(lanes[0].get("agent_id")) if lanes else "",
+    )
+    if not basis_agent:
+        return None
+    try:
+        from ...control_plane.goals.shared_goal_alignment import (
+            project_shared_goal_alignment,
+        )
+
+        alignment = project_shared_goal_alignment(
+            goal_id=goal_id,
+            agent_id=basis_agent,
+            project=Path(str(goal.get("repo") or ".")).expanduser(),
+            registry_path=Path(registry_path),
+        )
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return None
+    basis = (alignment.get("source_basis") or {}).get("source_basis_digest")
+    return str(basis) if basis else None
+
+
+def steward_team_plan_intent_basis(
+    *,
+    goal_id: str,
+    goal: Mapping[str, Any],
+    registry_path: Path,
+    plan: Mapping[str, Any],
+) -> str | None:
+    """The canonical source basis a team plan's lanes would be created against.
+
+    A confirmation surface needs this fact *before* the owner confirms, not
+    only in the receipt afterwards: it is the intent the plan is reviewed
+    against, so a plan confirmed against one basis may not be applied against
+    another. The reader is the same one the settlement records, exposed here so
+    the preview can bind it instead of re-deriving a second basis.
+    """
+
+    return _intent_basis_for(
+        goal_id=goal_id,
+        goal=goal,
+        registry_path=Path(registry_path),
+        preview=plan,
+    )
+
+
+def _apply_team_plan(
+    *, registry_path: Path, goal_id: str, agent_id: str,
+    proposal: Mapping[str, Any],
+) -> dict[str, Any]:
+    from .team_plan_adapter import apply_team_plan
+    from ..effect_runtime import EffectRuntimeRejected
+
+    try:
+        return apply_team_plan(registry_path=registry_path, goal_id=goal_id,
+                               agent_id=agent_id, proposal=proposal)
+    except EffectRuntimeRejected as error:
+        raise ValueError(str(error)) from None
+
+
 def _complete_monitor(
     *,
     registry_path: Path,
@@ -302,6 +537,13 @@ def settle_governed_transition_proposals(
                 agent_id=agent_id,
                 proposal=proposal,
             )
+        elif kind == STEWARD_TEAM_PLAN_PREVIEW_KIND:
+            result = _apply_team_plan(
+                registry_path=Path(registry_path),
+                goal_id=goal_id,
+                agent_id=agent_id,
+                proposal=proposal,
+            )
         elif kind == "continuous_monitor_complete":
             result = _complete_monitor(
                 registry_path=Path(registry_path).expanduser(),
@@ -317,14 +559,100 @@ def settle_governed_transition_proposals(
             "proposal_id": proposal_id,
             "proposal_digest": proposal_digest,
             "kind": kind,
-            "monitor_key": str(proposal["monitor_key"]),
+            "monitor_key": (
+                str(proposal["monitor_key"])
+                if proposal.get("monitor_key") is not None
+                else None
+            ),
             "action": str(result["action"]),
             "todo_id": str(result["todo_id"]),
             "status": "committed",
             "target_key": result.get("target_key"),
         }
+        lane_todo_ids = result.get("lane_todo_ids")
+        if lane_todo_ids:
+            # The apply ensured every ready lane's first Todo; a receipt that
+            # named only the first one could not be read as "what exists now".
+            receipt["lane_todo_ids"] = [str(item) for item in lane_todo_ids]
+        lane_settlements = result.get("lane_settlements")
+        if lane_settlements:
+            # Retain the relationship, not only the identities: which lane the
+            # owner confirmed, what it was meant to end on, and the Todo it
+            # became.
+            receipt["lane_settlements"] = normalize_lane_settlements(
+                [dict(item) for item in lane_settlements]
+            )
+        gap_count = result.get("gap_count")
+        if gap_count:
+            # A settlement that staffed some lanes and left others a gap is a
+            # partial application, and the reader has to be able to tell
+            # without re-deriving the plan.
+            receipt["gap_count"] = int(gap_count)
+        if result.get("gap_lanes"):
+            receipt["gap_lanes"] = result["gap_lanes"]
+        lane_failure = result.get("lane_failure")
+        if lane_failure:
+            # The lanes that exist are named beside the lane that could not be
+            # written, so a retry reconciles against real identities instead of
+            # re-deriving what the failed attempt managed to commit.
+            receipt["lane_failure"] = {
+                "lane_id": str(lane_failure["lane_id"]),
+                "reason_code": str(lane_failure["reason_code"]),
+            }
+        if result.get("intent_basis"):
+            # The work-graph edit this receipt records is traceable to the
+            # canonical basis it was applied against, so a lane Todo can be tied
+            # back to the intent revision it was meant to advance.
+            receipt["intent_basis"] = str(result["intent_basis"])
         validate_public_safe_value(receipt, path="transition_receipt")
         receipts.append(receipt)
         by_proposal_id[proposal_id] = receipt
         checkpoint(receipts)
     return receipts
+
+
+STEWARD_TEAM_PLAN_PREVIEW_SCHEMA_VERSION = "steward_team_plan_preview_v0"
+STEWARD_TEAM_PLAN_LANE_LIMIT = 8
+STEWARD_TEAM_PLAN_PRIORITIES = tuple(COORDINATION_STATE_CONTRACT["todo_priority"]["values"])
+_GOAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$")
+# The reasons a plan may declare for a lane it cannot staff itself.
+STEWARD_TEAM_PLAN_GAP_REASONS = (
+    "agent_not_registered",
+    "capability_not_granted",
+    "audience_not_authorized",
+)
+# The reasons this host reports for a lane *it* cannot staff. They are the
+# host's own verdict about the same lane fact, so they stay a separate
+# vocabulary: a plan may not claim one of these to describe its own lane, and a
+# reader can tell an owner-declared gap from a staffability verdict Core made.
+STEWARD_TEAM_PLAN_UNSUPPORTED_ACTION_KIND = "action_kind_not_supported"
+STEWARD_TEAM_PLAN_HOST_GAP_REASONS = (STEWARD_TEAM_PLAN_UNSUPPORTED_ACTION_KIND,)
+
+
+def _plan_text(value: object, label: str) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        raise ValueError(f"{label} must be a non-empty string")
+    if len(text) > 600:
+        raise ValueError(f"{label} exceeds the public-safe preview length")
+    validate_public_safe_value({"value": text}, path=label)
+    return text
+
+
+def validate_steward_team_plan_preview(
+    payload: object, *, registered_agent_ids: Sequence[str],
+    supported_action_kinds: Sequence[str],
+) -> dict[str, Any]:
+    """Public-safety adapter; the typed work-items owner admits the preview."""
+    from ..effect_runtime import EffectRuntimeRejected, effect_runtime_result
+
+    validate_public_safe_value(payload, path="steward_team_plan_preview")
+    try:
+        result = effect_runtime_result("work_items.team_plan.preview", {
+            "plan": payload, "registered_agents": list(registered_agent_ids),
+            "supported_action_kinds": list(supported_action_kinds),
+        })
+    except EffectRuntimeRejected as error:
+        raise ValueError(str(error)) from None
+    validate_public_safe_value(result, path="steward_team_plan_preview")
+    return dict(result)

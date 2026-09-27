@@ -45,6 +45,7 @@ from .contract import (
     TODO_STATUS_OPEN,
     format_todo_metadata_line,
     normalize_todo_id,
+    normalize_todo_generation,
     normalize_todo_status,
     require_todo_decision_scope,
     todo_marker_for_status,
@@ -287,6 +288,13 @@ def _parsed_archive_records(markdown: str) -> list[dict[str, Any]]:
             raise TodoSectionProjectionError(
                 f"archived Todo {item.get('todo_id')!r} omits its source role"
             )
+        # Metadata is textual; canonical capture and active reads normalize this
+        # counter. Archive readback must use the same codec, not compare "12" to 12.
+        if "material_change_generation" in item:
+            generation = normalize_todo_generation(item["material_change_generation"])
+            if generation is None:
+                raise TodoSectionProjectionError("invalid archived Monitor material generation")
+            item["material_change_generation"] = generation
         priority, title = todo_priority_parts(str(item.get("text") or ""))
         if priority:
             item.update(priority=priority, title=normalize_todo_text(title))
@@ -328,6 +336,13 @@ def _projection_record(
         # readback. Normalize that display representation, never the provider
         # record or its digest, before comparing the same semantic scope.
         projected["decision_scope"] = require_todo_decision_scope(projected["decision_scope"])
+    # Native authors may retain only the full text. The permanent Markdown
+    # reader derives its title/priority; compare that same display view without
+    # inventing persisted domain fields or masking an explicit disagreement.
+    priority, title = todo_priority_parts(str(projected.get("text") or ""))
+    if priority:
+        projected.setdefault("priority", priority)
+        projected.setdefault("title", normalize_todo_text(title))
     return projected
 
 
@@ -337,6 +352,12 @@ _DERIVED_READ_MODEL_FIELDS = {
     "resume_condition",
     "resume_ready",
     "handoff_note",
+    # Revision receipts are canonical-provider audit state.  The readable
+    # Markdown projection intentionally carries only the private validation
+    # declaration needed to execute the current validator, so these fields
+    # cannot participate in Markdown parse/render parity.
+    "completion_validation_revision",
+    "completion_validation_revision_history",
 }
 
 
@@ -404,16 +425,28 @@ def render_canonical_todo_sections(
     except ValueError as error:
         raise TodoSectionProjectionError(str(error)) from error
     private_source = _private_validation_metadata(source_document)
+    canonical_validation_digests = {
+        str(record.get("todo_id") or ""): record.get("completion_validation_sha256")
+        for record in canonical
+        if record.get("completion_validation_required") is True
+    }
     for todo_id, declaration in (private_validation_declarations or {}).items():
         external = _private_validation_entry(declaration)
         existing = private_source.get(todo_id)
-        if existing is not None and (
-            completion_validation_declaration_sha256(existing[0])
-            != completion_validation_declaration_sha256(external[0])
-        ):
-            raise TodoSectionProjectionError(
-                f"Todo {todo_id!r} has divergent private validation declarations"
-            )
+        external_digest = completion_validation_declaration_sha256(external[0])
+        if existing is not None:
+            existing_digest = completion_validation_declaration_sha256(existing[0])
+            if existing_digest != external_digest:
+                # A successful CAS revision updates provider authority and the
+                # private declaration sidecar before the readable Markdown can
+                # be regenerated.  In that bounded state the old Markdown is
+                # expected to disagree.  Only the declaration selected by the
+                # canonical record may replace it; every other divergence is
+                # still rejected closed.
+                if canonical_validation_digests.get(todo_id) != external_digest:
+                    raise TodoSectionProjectionError(
+                        f"Todo {todo_id!r} has divergent private validation declarations"
+                    )
         private_source[todo_id] = external
     private_validation: dict[str, Mapping[str, object]] = {}
     for record in canonical:

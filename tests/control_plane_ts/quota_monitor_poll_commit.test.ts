@@ -9,8 +9,11 @@ import test from "node:test";
 import {
   evaluateQuotaMonitorPollCommit,
   QUOTA_MONITOR_POLL_COMMIT_REQUEST_SCHEMA,
+  QUOTA_LEASED_MONITOR_POLL_COMMIT_REQUEST_SCHEMA,
 } from "../../loopx/control_plane/quota/monitor_poll_commit.ts";
 import { EffectRuntimeRequestError } from "../../loopx/control_plane/effect_runtime_errors.ts";
+import { resolveTestPython } from "../../scripts/test-python.mjs";
+import { monitorPollRequestHash } from "../../loopx/control_plane/coordination/todo_monitor_poll.ts";
 
 const goalId = "monitor-native-goal";
 
@@ -268,6 +271,15 @@ test("commit owns the repairable run artifacts and exact-effect replay", async (
   const written = await evaluateQuotaMonitorPollCommit(params);
   assert.equal(written.status, "written");
   assert.equal(written.payload.appended, true);
+  assert.deepEqual(written.payload.turn_continuation, {
+    schema_version: "quota_turn_continuation_v0",
+    settlement_binding_matches_observation: null,
+    current_turn_settled: false,
+    same_turn_independent_settlement_allowed: false,
+    next_turn_required: false,
+    next_action: "obtain a typed settlement binding before claiming this Turn settled",
+    reason: "the committed monitor-poll has no exact Todo settlement binding",
+  });
   const jsonPath = String(written.payload.json_path);
   const markdownPath = String(written.payload.markdown_path);
   const indexPath = String(written.payload.index_path);
@@ -611,7 +623,7 @@ test("successor normalization preserves the legacy pending observation fingerpri
   // The shipped v0 identity recipe hashes wire observation, not its normalized route.
   const legacyEnvelope = Object.fromEntries(["schema_version", "effect_id", "runtime_root", "goal_id",
     "source", "turn_instance_id", "observation"].map(key => [key, params[key]]));
-  const oracle = spawnSync("python", ["-c", "import hashlib,json,sys; print('sha256:'+hashlib.sha256(json.dumps(json.load(sys.stdin),ensure_ascii=False,sort_keys=True).encode()).hexdigest())"],
+  const oracle = spawnSync(resolveTestPython(), ["-c", "import hashlib,json,sys; print('sha256:'+hashlib.sha256(json.dumps(json.load(sys.stdin),ensure_ascii=False,sort_keys=True).encode()).hexdigest())"],
     {input: JSON.stringify(legacyEnvelope), encoding: "utf8"});
   assert.equal(oracle.status, 0, oracle.stderr);
   const first = await evaluateQuotaMonitorPollCommit(params);
@@ -800,7 +812,7 @@ test("retry repairs a truncated owned index tail and rejects artifact drift", as
   );
 });
 
-test("provider retry fails before writeback when its preflight index fence is stale", async (t) => {
+test("pending provider effect settles after an unrelated append-only index commit", async (t) => {
   const runtimeRoot = await tempRuntime(t);
   const pending = request({
     phase: "preflight",
@@ -826,6 +838,52 @@ test("provider retry fails before writeback when its preflight index fence is st
     "written",
   );
 
+  const retry = await evaluateQuotaMonitorPollCommit(pending);
+  assert.equal(retry.status, "provider_required");
+  const receipt = {
+    schema_version: "monitor_poll_todo_writeback_v0",
+    monitor_effect_id: "quota-monitor-poll:pending-provider",
+    dry_run: false,
+    goal_id: goalId,
+    todo_id: "todo_public_monitor",
+    target_key: null,
+    result_hash: "unchanged-42",
+    material_change: false,
+    material_change_generation: 0,
+    consecutive_no_change: 1,
+    last_checked_at: pending.generated_at,
+    next_due_at: null,
+    cadence: null,
+    todo_update: {ok: true},
+    next_todos: [],
+    successor_receipts: [],
+  };
+  const settled = await evaluateQuotaMonitorPollCommit({
+    ...pending, phase: "commit", provider_receipt: receipt,
+  });
+  assert.equal(settled.status, "written");
+  assert.equal((await evaluateQuotaMonitorPollCommit({
+    ...pending, phase: "commit", provider_receipt: receipt,
+  })).status, "replayed");
+  const indexPath = join(runtimeRoot, "goals", goalId, "runs", "index.jsonl");
+  assert.equal((await readFile(indexPath, "utf8")).trim().split("\n").length, 2);
+});
+
+test("pending provider effect still rejects changed preflight index history", async (t) => {
+  const runtimeRoot = await tempRuntime(t);
+  const prior = request({phase: "commit", runtime_root: runtimeRoot, execute: true,
+    effect_id: "quota-monitor-poll:prior-history"});
+  const initial = await evaluateQuotaMonitorPollCommit(prior);
+  assert.equal(initial.status, "written");
+  const pending = request({phase: "preflight", runtime_root: runtimeRoot, execute: true,
+    expected_index_digest: initial.index_digest,
+    effect_id: "quota-monitor-poll:pending-history",
+    observation: observation({todo_id: "todo_public_monitor", result_hash: "unchanged-42"})});
+  assert.equal((await evaluateQuotaMonitorPollCommit(pending)).status, "provider_required");
+  const indexPath = join(runtimeRoot, "goals", goalId, "runs", "index.jsonl");
+  const original = await readFile(indexPath, "utf8");
+  assert.match(original, /quota-monitor-poll:prior-history/);
+  await writeFile(indexPath, original.replaceAll("quota-monitor-poll:prior-history", "quota-monitor-poll:alter-history"));
   const retry = await evaluateQuotaMonitorPollCommit(pending);
   assert.equal(retry.status, "conflict");
   assert.equal(retry.reason_code, "index_digest_conflict");
@@ -870,4 +928,134 @@ test("durable replay rejects receipt path escape and lost pre-existing index his
     () => evaluateQuotaMonitorPollCommit(params),
     /artifact paths do not match the transaction scope/,
   );
+});
+
+test("leased Monitor pending settlement binds the original proof and rejects missing or substituted receipts", async t => {
+  const runtime = await tempRuntime(t);
+  const proof = {idempotency_key: "monitor-execution", expected_version: 3};
+  const params = request({schema_version: QUOTA_LEASED_MONITOR_POLL_COMMIT_REQUEST_SCHEMA,
+    phase: "preflight", runtime_root: runtime, execute: true, effect_id: "leased-poll",
+    observation: observation({todo_id: "todo_public_monitor", result_hash: "observed-a", lease_proof: proof})});
+  await assert.rejects(evaluateQuotaMonitorPollCommit({...params,
+    schema_version: QUOTA_MONITOR_POLL_COMMIT_REQUEST_SCHEMA}), /requires request v1/);
+  const preflight = await evaluateQuotaMonitorPollCommit(params);
+  assert.equal(preflight.status, "provider_required");
+  assert.deepEqual(preflight.provider_plan?.lease_proof, proof);
+  assert.equal(preflight.provider_plan?.schema_version, "monitor_poll_todo_provider_plan_v1");
+  const receipt = {schema_version: "monitor_poll_todo_writeback_v0", monitor_effect_id: "leased-poll",
+    goal_id: goalId, todo_id: "todo_public_monitor", dry_run: false, target_key: null,
+    result_hash: "observed-a", material_change: false, material_change_generation: 0,
+    consecutive_no_change: 1, last_checked_at: params.generated_at, next_due_at: null, cadence: null,
+    todo_update: {ok: true}, next_todos: [], successor_receipts: [], lease_proof: proof};
+  for (const invalid of [undefined, {...proof, expected_version: 4}, {...proof, idempotency_key: "another"}]) {
+    await assert.rejects(evaluateQuotaMonitorPollCommit({...params, phase: "commit",
+      provider_receipt: {...receipt, lease_proof: invalid}}), /lease_proof/);
+  }
+  const changedDecision = decision({effective_action: "normal_delivery", heartbeat_recommendation: {},
+    recommended_action: "Work on the new successor", reason: "Monitor is no longer due"});
+  const retry = {...params, decision: changedDecision, generated_at: "2099-01-01T00:00:00Z"};
+  const replay = await evaluateQuotaMonitorPollCommit(retry);
+  assert.deepEqual(replay.provider_plan, preflight.provider_plan);
+  const written = await evaluateQuotaMonitorPollCommit({...retry, phase: "commit", provider_receipt: receipt});
+  assert.equal(written.status, "written");
+  assert.equal(written.record?.recommended_action, "Watch the public release queue.");
+  assert.equal(((written.record?.monitor_event as Record<string, unknown>).before as Record<string, unknown>).effective_action,
+    "monitor_quiet_skip");
+  assert.deepEqual((written.payload.todo_writeback as Record<string, unknown>).lease_proof, proof);
+  assert.equal((await evaluateQuotaMonitorPollCommit({...params, phase: "commit", provider_receipt: receipt})).status, "replayed");
+  const changed = await evaluateQuotaMonitorPollCommit({...params,
+    observation: observation({todo_id: "todo_public_monitor", result_hash: "observed-a", lease_proof: {...proof, expected_version: 4}})});
+  assert.equal(changed.status, "conflict");
+});
+
+test("only an exact provider no-effect rejection releases a pending Monitor reservation", async t => {
+  const runtime = await tempRuntime(t);
+  const params = request({phase: "preflight", runtime_root: runtime, execute: true,
+    effect_id: "lease-retry-after-rejection",
+    observation: observation({todo_id: "todo_public_monitor", result_hash: "observed-a"})});
+  const first = await evaluateQuotaMonitorPollCommit(params);
+  const plan = first.provider_plan!;
+  const receiptPath = join(runtime, "goals", goalId, "runs", ".transactions", "quota-monitor-poll",
+    `${createHash("sha256").update(String(params.effect_id)).digest("hex").slice(0, 24)}.json`);
+  const pendingBytes = await readFile(receiptPath, "utf8");
+  const rejection = {schema_version: "loopx_coordination_monitor_poll_result_v0", status: "failed",
+    changed: false, reason_code: "monitor_poll_rejected", source_authority: "file_v0",
+    decision_read_from_provider: true, legacy_fallback_used: false,
+    no_effect: {schema_version: "monitor_poll_no_effect_v0", goal_id: goalId,
+      operation_id: params.effect_id,
+      request_sha256: monitorPollRequestHash({goal_id: goalId,
+        actor_agent_id: plan.agent_id as string, dry_run: false,
+        observation: {todo_id: plan.todo_id, target_key: plan.target_key, result_hash: plan.result_hash,
+          material_change: plan.material_change, generated_at: plan.generated_at, cadence: plan.cadence,
+          next_due_at: plan.next_due_at, reason_summary: plan.reason_summary},
+        intent: {next_agent_todo: plan.next_agent_todo, next_action_kind: plan.next_action_kind,
+          next_task_repository: plan.next_task_repository,
+          next_required_capabilities: plan.next_required_capabilities,
+          next_continuation_policy: plan.next_continuation_policy, next_target_key: plan.next_target_key,
+          next_claimed_by: plan.next_claimed_by, next_user_todo: plan.next_user_todo,
+          next_user_task_class: plan.next_user_task_class}})}};
+  const release = {...params, phase: "provider_rejected", provider_receipt: rejection};
+  for (const unproven of [null, {...rejection, no_effect: null},
+    {...rejection, no_effect: {...rejection.no_effect, request_sha256: "wrong"}},
+    {...rejection, source_authority: "legacy"}, {...rejection, reason_code: "provider_timeout"}]) {
+    await assert.rejects(evaluateQuotaMonitorPollCommit({...release, provider_receipt: unproven}));
+    assert.equal(await readFile(receiptPath, "utf8"), pendingBytes);
+  }
+  const aborted = await evaluateQuotaMonitorPollCommit(release);
+  assert.equal(aborted.status, "aborted");
+  await assert.rejects(readFile(receiptPath), {code: "ENOENT"});
+  const proof = {idempotency_key: "monitor-execution", expected_version: 3};
+  const corrected = await evaluateQuotaMonitorPollCommit({...params,
+    schema_version: QUOTA_LEASED_MONITOR_POLL_COMMIT_REQUEST_SCHEMA,
+    observation: observation({todo_id: "todo_public_monitor", result_hash: "observed-a", lease_proof: proof})});
+  assert.equal(corrected.status, "provider_required");
+  assert.deepEqual(corrected.provider_plan?.lease_proof, proof);
+  assert.equal((await evaluateQuotaMonitorPollCommit(release)).status, "conflict");
+});
+
+test("pending admission is scoped, mandatory in v1, and preserves bounded v0 recovery", async t => {
+  const runtime = await tempRuntime(t);
+  const effect = "pending-admission-compatibility";
+  const params = request({phase: "preflight", runtime_root: runtime, execute: true, effect_id: effect,
+    observation: observation({todo_id: "todo_public_monitor", result_hash: "observed-a"})});
+  const preflight = await evaluateQuotaMonitorPollCommit(params);
+  const path = join(runtime, "goals", goalId, "runs", ".transactions", "quota-monitor-poll",
+    `${createHash("sha256").update(effect).digest("hex").slice(0, 24)}.json`);
+  const pending = JSON.parse(await readFile(path, "utf8"));
+  for (const admitted of [null, {...pending.admitted_decision, goal_id: "another-goal"},
+    {...pending.admitted_decision, agent_id: "another-agent"},
+    {...pending.admitted_decision, effective_action: "normal_delivery", heartbeat_recommendation: {}}]) {
+    const bytes = JSON.stringify({...pending, admitted_decision: admitted});
+    await writeFile(path, bytes);
+    await assert.rejects(evaluateQuotaMonitorPollCommit(params), EffectRuntimeRequestError);
+    assert.equal(await readFile(path, "utf8"), bytes);
+  }
+  const legacy = {...pending, schema_version: "quota_monitor_poll_commit_receipt_v0"};
+  delete legacy.admitted_decision;
+  await writeFile(path, JSON.stringify(legacy));
+  assert.deepEqual((await evaluateQuotaMonitorPollCommit(params)).provider_plan, preflight.provider_plan);
+  await assert.rejects(evaluateQuotaMonitorPollCommit({...params,
+    decision: decision({effective_action: "normal_delivery", heartbeat_recommendation: {}})}),
+  (error: unknown) => error instanceof EffectRuntimeRequestError && error.code === "legacy_monitor_admission_unavailable");
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")), legacy);
+  const receipt = {schema_version: "monitor_poll_todo_writeback_v0", monitor_effect_id: effect,
+    goal_id: goalId, todo_id: "todo_public_monitor", dry_run: false, target_key: null,
+    result_hash: "observed-a", material_change: false, material_change_generation: 0,
+    consecutive_no_change: 1, last_checked_at: params.generated_at, next_due_at: null, cadence: null,
+    todo_update: {}, next_todos: [], successor_receipts: []};
+  assert.equal((await evaluateQuotaMonitorPollCommit({...params, phase: "commit", provider_receipt: receipt})).status, "written");
+});
+
+test("lease proof and schema must agree before any provider intent is journaled", async t => {
+  const runtime = await tempRuntime(t);
+  const params = request({schema_version: QUOTA_LEASED_MONITOR_POLL_COMMIT_REQUEST_SCHEMA,
+    phase: "preflight", runtime_root: runtime, execute: true, effect_id: "invalid-proof"});
+  for (const proof of [undefined, {}, {idempotency_key: " x", expected_version: 1},
+    {idempotency_key: "x", expected_version: 0}, {idempotency_key: "x", expected_version: 1.5},
+    {idempotency_key: "x", expected_version: Number.MAX_SAFE_INTEGER + 1},
+    {idempotency_key: "x", expected_version: 1, owner: "injected"}]) {
+    await assert.rejects(evaluateQuotaMonitorPollCommit({...params,
+      observation: observation({todo_id: "todo_public_monitor", result_hash: "a", lease_proof: proof})}));
+  }
+  await assert.rejects(readFile(join(runtime, "goals", goalId, "runs", "index.jsonl")), {code: "ENOENT"});
 });

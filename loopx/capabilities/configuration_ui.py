@@ -6,6 +6,13 @@ from typing import Any
 
 from ..configuration_transaction import configuration_payload_revision
 
+from .progress_review.policy import (
+    PROGRESS_REVIEW_MAX_DRIFT_THRESHOLD,
+    PROGRESS_REVIEW_MIN_DRIFT_THRESHOLD,
+    PROGRESS_REVIEW_MODES,
+    PROGRESS_REVIEW_SIGNALS,
+)
+
 CAPABILITY_CONFIGURATION_CATALOG_SCHEMA = "capability_configuration_catalog_v0"
 CAPABILITY_CONFIGURATION_EDITOR_SCHEMA = "capability_configuration_editor_v0"
 CAPABILITY_CONFIGURATION_RESOLUTION_SCHEMA = "capability_configuration_resolution_v0"
@@ -21,6 +28,17 @@ def _configuration_value(
     if not isinstance(value, Mapping):
         raise TypeError(f"{label} must be an object or null")
     return deepcopy({str(key): item for key, item in value.items()})
+
+
+def _steward_executor_editor_options() -> tuple[list[str], list[str]]:
+    """Return the steward editor's option lists from their owning namespace."""
+
+    from .steward_executor.machine_defaults import (
+        steward_executor_endpoints,
+        steward_reasoning_efforts,
+    )
+
+    return sorted(steward_executor_endpoints()), list(steward_reasoning_efforts())
 
 
 def _field(
@@ -60,6 +78,10 @@ def capability_configuration_editor(
 ) -> dict[str, Any]:
     """Return the provider-neutral editor contract consumed by every UI scope."""
 
+    # The steward namespace owns its closed vocabulary, so the editor offers the
+    # same values instead of restating them: a form cannot submit an executor or
+    # effort the owning namespace would reject.
+    steward_endpoints, steward_efforts = _steward_executor_editor_options()
     definitions: dict[str, dict[str, Any]] = {
         "todo_replan_cadence": {
             "supported_scopes": ["machine", "goal"],
@@ -131,6 +153,66 @@ def capability_configuration_editor(
                 ),
             ],
         },
+        "steward_executor": {
+            "supported_scopes": ["machine"],
+            "writable_scopes": ["machine"],
+            "fields": [
+                _field(
+                    "selection_policy",
+                    "Selection policy",
+                    "select",
+                    options=["preferred", "pinned", "flexible"],
+                    required=True,
+                    description=(
+                        "Preferred supplies a default and permits an explicit user "
+                        "choice. Pinned rejects another executor. Flexible permits "
+                        "automatic fallback only inside the eligible pool."
+                    ),
+                ),
+                _field(
+                    "executor_endpoint",
+                    "Primary steward executor",
+                    "select",
+                    options=steward_endpoints,
+                    required=True,
+                    description=(
+                        "The executor this machine's steward channel answers on: the "
+                        "interactive CLI login, or the operator-billed managed host. "
+                        "The choice outranks the Chat service environment."
+                    ),
+                ),
+                _field(
+                    "eligible_endpoints",
+                    "Flexible eligible executors",
+                    "string_list",
+                    description=(
+                        "One authorized executor id per line. Required only for "
+                        "flexible selection; include the primary executor."
+                    ),
+                ),
+                _field(
+                    "executor_model",
+                    "Model",
+                    "text",
+                    nullable=True,
+                    description=(
+                        "Optional model for the selected executor. Leave blank to keep "
+                        "the executor's own default."
+                    ),
+                ),
+                _field(
+                    "executor_reasoning_effort",
+                    "Reasoning effort",
+                    "select",
+                    options=steward_efforts,
+                    nullable=True,
+                    description=(
+                        "Optional reasoning effort for the selected executor. Leave "
+                        "blank to keep the executor's own default."
+                    ),
+                ),
+            ],
+        },
         "multi_subagent": {
             "supported_scopes": ["goal"],
             "writable_scopes": ["goal"],
@@ -160,6 +242,17 @@ def capability_configuration_editor(
                     "Allowed responsibility domains",
                     "string_list",
                     description="One bounded, public-safe domain per line.",
+                ),
+                _field(
+                    "execution_config",
+                    "Delegation bindings",
+                    "text",
+                    nullable=True,
+                    description=(
+                        "Repo-relative ignored JSON under .loopx/config/. It exposes "
+                        "only authorized, public-safe route status to planning; it "
+                        "does not grant a binding."
+                    ),
                 ),
             ],
         },
@@ -202,10 +295,57 @@ def capability_configuration_editor(
                 _field("strict_receipt", "Require an exact-diff receipt", "boolean"),
             ],
         },
-        "pull_request_review": {
-            "supported_scopes": ["machine"],
-            "writable_scopes": ["machine"],
+        "progress_review": {
+            "supported_scopes": ["goal"],
+            "writable_scopes": ["goal"],
             "fields": [
+                _field(
+                    "mode",
+                    "Mode",
+                    "select",
+                    options=PROGRESS_REVIEW_MODES,
+                    required=True,
+                    description=(
+                        "off records nothing; shadow records typed receipts only; "
+                        "assist lets consecutive drift receipts raise the existing "
+                        "autonomous replan obligation. No pause or gate authority."
+                    ),
+                ),
+                _field(
+                    "signal",
+                    "Drift signal",
+                    "select",
+                    options=PROGRESS_REVIEW_SIGNALS,
+                    description=(
+                        "Which receipt judgment counts as drift: the Noul behavior/"
+                        "acceptance pair or the Choice relation/increment pair."
+                    ),
+                ),
+                _field(
+                    "drift_threshold",
+                    "Consecutive drift receipts before an obligation",
+                    "number",
+                    minimum=PROGRESS_REVIEW_MIN_DRIFT_THRESHOLD,
+                    maximum=PROGRESS_REVIEW_MAX_DRIFT_THRESHOLD,
+                ),
+                _field(
+                    "contract_revision",
+                    "Pinned goal contract revision",
+                    "text",
+                    nullable=True,
+                    description=(
+                        "sha256 of the observer basis the receipts must be bound to; "
+                        "printed by `loopx-jev drift init`. assist raises nothing "
+                        "without it, and receipts for other revisions are stale."
+                    ),
+                ),
+            ],
+        },
+        "pull_request_review": {
+            "supported_scopes": ["machine", "goal"],
+            "writable_scopes": ["machine", "goal"],
+            "fields": [
+                _field("wait_for_ci", "Wait for CI", "boolean", description="When disabled, use local validation without querying or waiting for CI. This grants no merge authority."),
                 _field(
                     "review_priority",
                     "Review priority",
@@ -220,6 +360,11 @@ def capability_configuration_editor(
             ],
         },
         "local_authority_shadow": {
+            "supported_scopes": ["goal"],
+            "writable_scopes": [],
+            "fields": [],
+        },
+        "coordination_runtime_shadow": {
             "supported_scopes": ["goal"],
             "writable_scopes": ["goal"],
             "fields": [_field("enabled", "Enabled", "boolean")],

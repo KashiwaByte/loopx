@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Mapping
 from json import loads as json_loads
@@ -35,10 +36,6 @@ from .completion_validation_store import (
     read_completion_validation_declaration,
 )
 from .contract import TODO_STATUS_DONE, normalize_todo_status
-from .event_writeback import (
-    event_projection_source_authority,
-    event_projection_todo_context,
-)
 
 # Kept safely under the 30s outer CLI/MCP subprocess budget so a timed-out
 # validation still produces a typed receipt before the outer call is killed.
@@ -102,7 +99,7 @@ def _git_workspace_is_clean(path: Path) -> bool | None:
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=2,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -124,12 +121,13 @@ def _resolve_completion_validation_workspace(
     """Resolve the authority-bound workspace for one validation effect.
 
     The Goal repository remains the default when a Todo does not select a
-    separate repository.  A cross-repository Todo must instead present the
-    path-free, turn-bound delivery-workspace snapshot and run from a clean
-    independent worktree with the same canonical repository identity. The
-    snapshot may come from prior writeback or from the host's exact-Turn
-    pre-completion check because completion itself precedes refresh. The
-    candidate path is host execution context, never a public CLI cwd override.
+    repository.  When the host supplies a path-free, turn-bound delivery
+    workspace snapshot, validation must honor that exact clean independent
+    worktree even when it has the same canonical repository identity as the
+    Goal checkout. The snapshot may come from prior writeback or from the
+    host's exact-Turn pre-completion check because completion itself precedes
+    refresh. The candidate path is host execution context, never a public CLI
+    cwd override.
     """
 
     goal_workspace = _resolve_goal_repo_workspace(registry_path, goal_id)
@@ -146,31 +144,33 @@ def _resolve_completion_validation_workspace(
     if not expected_repository:
         return goal_workspace, None
 
-    goal_snapshot = capture_delivery_workspace(goal_workspace)
-    if delivery_workspace_repository(goal_snapshot) == expected_repository:
-        return goal_workspace, None
+    recorded = None
+    if delivery_workspace is not None:
+        try:
+            recorded = normalize_delivery_workspace_snapshot(delivery_workspace)
+        except (RuntimeError, TypeError, ValueError):
+            # Decoder rejection is an input/receipt failure, not an adapter crash.
+            # Keep it inside the path-free completion state model and never expose
+            # the TypeScript decoder's internal error text at the CLI/Turn boundary.
+            return None, _workspace_failure(
+                label,
+                status="workspace_receipt_invalid",
+                summary=(
+                    "the recorded delivery workspace receipt is invalid and cannot "
+                    "authorize completion validation"
+                ),
+            )
 
-    try:
-        recorded = normalize_delivery_workspace_snapshot(delivery_workspace)
-    except (RuntimeError, TypeError, ValueError):
-        # Decoder rejection is an input/receipt failure, not an adapter crash.
-        # Keep it inside the path-free completion state model and never expose
-        # the TypeScript decoder's internal error text at the CLI/Turn boundary.
-        return None, _workspace_failure(
-            label,
-            status="workspace_receipt_invalid",
-            summary=(
-                "the recorded delivery workspace receipt is invalid and cannot "
-                "authorize cross-repository validation"
-            ),
-        )
     if recorded is None:
+        goal_snapshot = capture_delivery_workspace(goal_workspace)
+        if delivery_workspace_repository(goal_snapshot) == expected_repository:
+            return goal_workspace, None
         return None, _workspace_failure(
             label,
             status="workspace_receipt_unavailable",
             summary=(
-                "cross-repository validation requires a verified delivery "
-                "workspace receipt for the selected Todo"
+                "validation outside the Goal repository requires a verified "
+                "delivery workspace receipt for the selected Todo"
             ),
         )
     if (
@@ -196,21 +196,25 @@ def _resolve_completion_validation_workspace(
             label,
             status="workspace_unverified",
             summary=(
-                "cross-repository validation requires a verifiable independent "
-                "Git worktree"
+                "recorded delivery-workspace validation requires a verifiable "
+                "independent Git worktree"
             ),
         )
     if (
         delivery_workspace_repository(current) != expected_repository
         or current.get("workspace_kind") != "independent_git_worktree"
-        or current.get("workspace_identity") != recorded.get("workspace_identity")
+        or (
+            recorded.get("workspace_revision_digest") is not None
+            and current.get("workspace_revision_digest")
+            != recorded.get("workspace_revision_digest")
+        )
     ):
         return None, _workspace_failure(
             label,
             status="workspace_repository_mismatch",
             summary=(
                 "the current validation worktree does not match the recorded "
-                "delivery repository"
+                "delivery workspace"
             ),
         )
     clean = _git_workspace_is_clean(candidate)
@@ -219,8 +223,8 @@ def _resolve_completion_validation_workspace(
             label,
             status=("workspace_dirty" if clean is False else "workspace_unverified"),
             summary=(
-                "cross-repository validation requires a clean, verifiable "
-                "delivery worktree"
+                "recorded delivery-workspace validation requires a clean, "
+                "verifiable delivery worktree"
             ),
         )
     return candidate, None
@@ -320,14 +324,17 @@ def _run_declared_completion_validation(
             "stderr_captured": False,
             "local_path_captured": False,
         }
-    except (FileNotFoundError, PermissionError) as exc:
+    except (FileNotFoundError, PermissionError):
         return {
             "schema_version": CALLER_VALIDATION_RECEIPT_SCHEMA_VERSION,
             "command_label": label,
             "exit_code": None,
             "passed": False,
             "status": "command_not_run",
-            "summary": f"validation command could not be launched: {exc}",
+            "summary": (
+                "validation command could not be launched because its executable "
+                "is unavailable"
+            ),
             "stdout_captured": False,
             "stderr_captured": False,
             "local_path_captured": False,
@@ -373,6 +380,14 @@ def run_declared_completion_validation_effect(
         and all(isinstance(item, str) and item for item in raw_argv)
     ):
         raise ValueError("validation_effect.validation_argv must be a string array")
+    declaration_digest = effect.get("validation_declaration_sha256")
+    if declaration_digest is not None and (
+        not isinstance(declaration_digest, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", declaration_digest)
+    ):
+        raise ValueError(
+            "validation_effect.validation_declaration_sha256 must be a SHA-256 digest"
+        )
     receipt = _run_declared_completion_validation(
         validation_command=(
             str(effect["validation_command"])
@@ -402,6 +417,8 @@ def run_declared_completion_validation_effect(
     )
     if receipt is None:
         raise RuntimeError("authorized validation effect produced no receipt")
+    if declaration_digest is not None:
+        receipt["validation_declaration_sha256"] = declaration_digest
     return receipt
 
 
@@ -430,14 +447,15 @@ def resolve_private_completion_validation_declaration(
         raise ValueError(
             "canonical Todo requires completion validation but omits its digest"
         )
-    # A missing sidecar is an availability case: the digest-bound Markdown or
-    # event projection may rehydrate it below. A present sidecar that fails its
-    # identity or digest checks is corruption/tamper evidence and deliberately
-    # raises instead of falling back, so a second source cannot mask the fault.
+    # The canonical digest selects immutable private content, including after
+    # a lost write response. Older installs may still use a per-Todo sidecar.
+    # Corruption in the selected source fails closed; only absence permits
+    # digest-checked rehydration from a materialized projection below.
     declaration = read_completion_validation_declaration(
         runtime_root=runtime_root,
         goal_id=goal_id,
         todo_id=todo_id,
+        expected_digest=expected,
     )
     if declaration is None:
         source = _materialized_todo_item(
@@ -445,18 +463,6 @@ def resolve_private_completion_validation_declaration(
             todo_id=todo_id,
             role=role,
         )
-        if source is None:
-            event_context = event_projection_todo_context(
-                registry_path=registry_path,
-                goal_id=goal_id,
-                state_path=state_file,
-                todo_id=todo_id,
-                role=role,
-            )
-            if event_context is not None:
-                source = dict(
-                    event_context.get("raw_item") or event_context.get("item") or {}
-                )
         declaration = (
             completion_validation_declaration(source)
             if isinstance(source, dict)
@@ -507,29 +513,17 @@ def run_completion_validation_gate_with_source(
     w.r.t. the state file and safe to call before acquiring the mutation lock,
     so a multi-second validation command does not block concurrent Todo writes.
     """
+    from ...history import load_registry
+    from ...registry import registry_goals
+    from ..goals.legacy_event_source import require_no_legacy_todo_events
+    goal = next((item for item in registry_goals(load_registry(registry_path)) if item.get("id") == goal_id), {})
+    require_no_legacy_todo_events(goal, state_path=state_file)
     projection_source = "materialized"
     source_authority: dict[str, Any] | None = None
-    event_context: dict[str, Any] | None = None
     todo = _materialized_todo_item(state_file=state_file, todo_id=todo_id, role=role)
     if todo is None:
-        event_context = event_projection_todo_context(
-            registry_path=registry_path,
-            goal_id=goal_id,
-            state_path=state_file,
-            todo_id=todo_id,
-            role=role,
-        )
-        if event_context is None:
-            return {
-                "failure": None,
-                "source_authority": None,
-                "source_snapshot": None,
-                "transaction": None,
-            }
-        projection_source = "event_log"
-        todo = dict(event_context.get("raw_item") or event_context["item"])
-        todo["role"] = event_context["role"]
-        source_authority = event_projection_source_authority(event_context)
+        return {"todo": None, "validation": None, "failure": None,
+            "source_authority": None, "source_snapshot": None, "transaction": None}
     source_snapshot = todo_completion_source_snapshot(todo)
     completion_policy_source = None
     if completion_policy_facts is not None:
@@ -542,9 +536,6 @@ def run_completion_validation_gate_with_source(
             goal_id=goal_id,
             lines=lines,
             successor_todo_ids=requested_successor_todo_ids or [],
-            event_fields=(
-                event_context.get("fields") if event_context is not None else None
-            ),
             facts=completion_policy_facts,
         )
     transaction = reduce_todo_completion_transaction(
@@ -623,7 +614,6 @@ def completion_policy_source_from_state(
     goal_id: str,
     lines: list[str],
     successor_todo_ids: list[str],
-    event_fields: Mapping[str, Any] | None,
     facts: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Project lock-comparable facts for the TS completion policy."""
@@ -644,7 +634,6 @@ def completion_policy_source_from_state(
             linked_successors=linked_successors_from_state(
                 lines=lines,
                 successor_todo_ids=successor_todo_ids,
-                event_fields=event_fields,
             ),
         ),
     )
@@ -694,26 +683,79 @@ def locked_todo_completion_source(
     goal_id: str,
     todo_id: str,
     role: str | None,
-) -> tuple[Any, dict[str, Any] | None, dict[str, Any] | None]:
-    """Resolve the materialized or event-projected Todo under the write lock."""
+) -> tuple[Any, dict[str, Any] | None]:
+    """Resolve the materialized Todo under the write lock."""
 
     match = find_todo_block(lines, todo_id=todo_id, role=role)
     if match:
         item_role, _section, _start, _end, block = match
         todo = dict(block)
         todo["role"] = item_role
-        return match, todo, None
-    event_context = event_projection_todo_context(
-        registry_path=registry_path,
-        goal_id=goal_id,
-        state_path=state_file,
-        todo_id=todo_id,
-        role=role,
-    )
-    if event_context is None:
-        return None, None, None
-    event_context["state_file"] = state_file
-    event_context["project"] = project
-    todo = dict(event_context["item"])
-    todo["role"] = event_context["role"]
-    return None, todo, event_context
+        return match, todo
+    return None, None
+
+
+def execute_completion_validation_effects(
+    result: Mapping[str, Any], *, registry_path: Path, goal_id: str,
+    delivery_workspace: Mapping[str, Any] | None = None,
+    validation_workspace_path: Path | None = None,
+) -> dict[str, Any]:
+    """Execute only the declared effects; the TS caller owns admission/resume."""
+    updates: dict[str, Any] = {}
+    effect = result.get("validation_effect")
+    acceptance_effects = result.get("goal_acceptance_validation_effects")
+    if not isinstance(effect, Mapping) and not isinstance(acceptance_effects, list):
+        raise RuntimeError("Todo terminal validation effect shape mismatch")
+    if isinstance(effect, Mapping):
+        updates["validation_receipt"] = run_declared_completion_validation_effect(
+            effect=effect,
+            registry_path=registry_path,
+            goal_id=goal_id,
+            delivery_workspace=delivery_workspace,
+            validation_workspace_path=validation_workspace_path,
+        )
+    if acceptance_effects is not None:
+        from ..goals.acceptance import run_goal_acceptance_validation_effect
+
+        if not isinstance(acceptance_effects, list) or not acceptance_effects:
+            raise RuntimeError("Goal acceptance validation effects are missing")
+        source_binding = result.get("goal_acceptance_source_binding")
+        if not isinstance(source_binding, Mapping):
+            raise RuntimeError("Goal acceptance validation omitted its source basis")
+        receipts = []
+        for row in acceptance_effects:
+            if not isinstance(row, Mapping) or not isinstance(row.get("effect"), Mapping):
+                raise RuntimeError("Goal acceptance validation effect shape mismatch")
+            receipt = run_goal_acceptance_validation_effect(
+                effect=row["effect"], registry_path=registry_path, goal_id=goal_id,
+                delivery_workspace=delivery_workspace,
+                validation_workspace_path=validation_workspace_path,
+            )
+            receipts.append({"criterion_id": row.get("criterion_id"), "receipt": receipt})
+        updates["goal_acceptance_source_binding"] = dict(source_binding)
+        updates["goal_acceptance_validation_receipts"] = receipts
+    return updates
+
+
+def completion_validation_failure(
+    result: Mapping[str, Any], *, goal_id: str, todo_id: str, dry_run: bool
+) -> dict[str, Any] | None:
+    if result.get("status") != "failed":
+        return None
+    if result.get("reason_code") not in {
+        "validation_declaration_invalid",
+        "validation_failed",
+    }:
+        return None
+    return {
+        "ok": False,
+        "dry_run": dry_run,
+        "completed": False,
+        "changed": False,
+        "goal_id": goal_id,
+        "todo_id": todo_id,
+        "validation_blocked_completion": True,
+        "reason": result.get("reason"),
+        "validation_failure": result.get("validation_failure"),
+        **dict(result),
+    }

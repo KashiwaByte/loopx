@@ -7,7 +7,13 @@ from enum import Enum
 from typing import Any
 from pathlib import Path
 
-from ...chat_manager import manager_channel
+from ...control_plane.collaboration import conversation_trigger
+from ...chat_manager import (
+    manager_channel,
+    manager_connection_executor_endpoint,
+    manager_executor_endpoint_default,
+    steward_machine_defaults,
+)
 from ..external_connector_runtime import project_external_connector_status
 from .goal_channel_contracts import bindings_for_goal
 from .goal_channel_targets import goal_channel_target_for_name
@@ -20,6 +26,30 @@ class ManagerAuthorityMode(str, Enum):
 
     CONTEXT_ONLY = "context_only"
     TURN_AUTHORIZED = "turn_authorized"
+
+
+def manager_turn_executor(runtime_controller: Any) -> str:
+    """Resolve the manager executor from this machine's current selection."""
+
+    return manager_executor_endpoint_default(
+        machine_defaults=steward_machine_defaults(runtime_controller)
+    )
+
+
+def manager_session_requires_executor_rebind(
+    session: Mapping[str, Any] | None,
+    *,
+    expected_channel: str,
+    agent_id: str,
+) -> bool:
+    """Identify a live manager Session left on the machine's old executor."""
+
+    return bool(
+        session is not None
+        and session.get("channel_id") == expected_channel
+        and session.get("agent_id") != agent_id
+        and session.get("status") != "closed"
+    )
 
 
 def parse_manager_authority_mode(value: object) -> ManagerAuthorityMode | None:
@@ -76,8 +106,15 @@ def decide_manager_event(
     target_payload: Mapping[str, Any],
     binding_payloads: Mapping[str, Any],
     event: Mapping[str, Any],
+    runtime_root: str | Path | None = None,
 ) -> dict[str, Any] | None:
-    """A manager receives addressed messages; exact worker Topics keep priority."""
+    """A manager receives addressed messages; exact worker Topics keep priority.
+
+    The route carries the executor this machine selected for its manager
+    channel rather than the one the connection recorded when it was created, so
+    a machine that changes its steward executor does not keep answering on the
+    endpoint that happened to be the default on the day of the connection.
+    """
     chat_id, message_id = (
         str(event.get("chat_id") or ""),
         str(event.get("message_id") or ""),
@@ -130,7 +167,20 @@ def decide_manager_event(
     if not _valid_manager_binding(goal_id, binding, routing):
         return ignored("invalid_routing_state")
     profile = str(identity.get("sender_profile") or "default")
-    turn_authorized = is_event_addressed_to_bot(event, identity)
+    try:
+        trigger = conversation_trigger(
+            routing.get("turn_trigger"),
+            addressed=is_event_addressed_to_bot(event, identity),
+            bot_message=event.get("sender_type") == "app",
+            human=event.get("sender_type") == "user" and bool(event.get("sender_id")),
+            historical=event.get("historical_context_only") is True,
+        )
+    except ValueError:
+        return ignored("invalid_routing_state")
+    turn_authorized = trigger["authorized"]
+    executor_endpoint_id, executor_endpoint_source = (
+        manager_connection_executor_endpoint(runtime_root)
+    )
     return {
         "matched": True,
         "reason": "matched" if turn_authorized else "context_only",
@@ -140,7 +190,8 @@ def decide_manager_event(
             "agent_id": binding["agent_id"],
             "session_id": binding["session_id"],
             "conversation_kind": "manager",
-            "executor_endpoint_id": routing.get("executor_endpoint_id") or "codex",
+            "executor_endpoint_id": executor_endpoint_id,
+            "executor_endpoint_source": executor_endpoint_source,
             "manager_channel_id": manager_channel(
                 provider="lark", audience=f"{profile}\0{chat_id}"
             ),
@@ -149,10 +200,10 @@ def decide_manager_event(
             "message_id": message_id,
             "event_id": str(event.get("event_id") or message_id),
             "topic_root_message_id": topic_root,
-            # Capture and authority are intentionally separate.  The unique
-            # configured manager chat may retain non-self messages as bounded
-            # context, but only a provider-native mention or verified reply
-            # may enqueue a manager Turn.
+            # Provider evidence is adapted to the shared conversation rule.
+            # Capture is not admission; the explicit trigger selects live input.
+            "turn_trigger": trigger["mode"],
+            "trigger_reason": trigger["reason"],
             "capture_scope": "configured_chat_all",
             "authority_mode": (
                 ManagerAuthorityMode.TURN_AUTHORIZED.value
@@ -219,7 +270,8 @@ def authorized_manager_goal_ids(
     goal_id, binding, routing = candidates[0]
     if (
         binding.get("session_id") != session.get("session_id")
-        or (routing.get("executor_endpoint_id") or "codex") != session.get("agent_id")
+        or manager_connection_executor_endpoint(runtime_root)[0]
+        != session.get("agent_id")
         or not _valid_manager_binding(goal_id, binding, routing)
     ):
         return []

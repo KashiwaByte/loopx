@@ -8,7 +8,11 @@ from datetime import datetime, timezone
 import pytest
 
 from loopx.capabilities.manager_context.inspection import (
+    CONTEXT_TOOL_NAME,
     ManagerInspection,
+    READ_ARGUMENT_NAMES,
+    READ_TOOL,
+    READ_VIEWS,
     TOOL_NAME,
     manager_index,
 )
@@ -75,6 +79,91 @@ def test_invalid_or_out_of_scope_reads_do_not_touch_core(monkeypatch, tmp_path, 
     tool, records = inspector(tmp_path)
     assert tool.read(TOOL_NAME, args)["ok"] is False
     assert not records
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        ({"view": "portfolio", "path": "/unknown"}, ["unknown_argument:path"]),
+        (
+            {"view": "shell"},
+            ["view:must_be_one_of_sources,portfolio,todos,deliveries,handoffs,agents"],
+        ),
+        ({"view": "portfolio", "offset": True}, ["offset:must_be_an_integer_at_least_0"]),
+        (
+            {"view": "portfolio", "limit": 13},
+            ["limit:must_be_an_integer_between_1_and_12"],
+        ),
+        (
+            {"view": "todos", "goal_id": "alpha", "request_id": "a" * 64},
+            ["request_id:only_for_view_handoffs"],
+        ),
+        (
+            {"view": "portfolio", "include_stopped": 1},
+            ["include_stopped:must_be_a_boolean"],
+        ),
+        (
+            {"view": "todos", "goal_id": "alpha", "include_stopped": True},
+            ["include_stopped:only_for_view_portfolio_or_agents"],
+        ),
+        ({"view": "todos", "goal_id": "alpha", "days": 7}, ["days:only_for_view_deliveries"]),
+        (
+            {"view": "deliveries", "goal_id": "alpha", "days": 91},
+            ["days:must_be_an_integer_between_1_and_90"],
+        ),
+        (
+            {"view": "todos", "goal_id": "alpha", "source_id": 3},
+            ["source_id:must_be_a_string"],
+        ),
+        ({"goal_id": "alpha"}, ["view:must_be_one_of_sources,portfolio,todos,deliveries,handoffs,agents"]),
+    ],
+)
+def test_a_refused_read_names_the_argument_that_must_change(tmp_path, args, expected):
+    """A rejected tool call must be repairable without guessing.
+
+    The caller is a model, not a human reading a stack trace: a bare
+    ``invalid_arguments`` makes it retry blind, while this payload names the
+    offending argument and what the published schema accepts.
+    """
+
+    tool, records = inspector(tmp_path)
+    result = tool.read(TOOL_NAME, args)
+    assert result["ok"] is False and result["error"] == "invalid_arguments"
+    assert result["rejected_arguments"] == expected
+    # The offer is the published schema, so the correction cannot drift from
+    # what the caller was actually handed.
+    assert result["allowed_arguments"] == list(READ_ARGUMENT_NAMES)
+    assert result["allowed_views"] == list(READ_VIEWS)
+    assert result["allowed_arguments"] == list(READ_TOOL["inputSchema"]["properties"])
+    assert not records
+
+
+def test_a_refused_read_names_every_bad_argument_and_the_called_tool(tmp_path):
+    tool, records = inspector(tmp_path)
+    result = tool.read(
+        CONTEXT_TOOL_NAME,
+        {"view": "shell", "limit": 99, "path": "/x", "days": 0},
+    )
+    assert result["rejected_arguments"] == [
+        "unknown_argument:path",
+        "view:must_be_one_of_sources,portfolio,todos,deliveries,handoffs,agents",
+        "limit:must_be_an_integer_between_1_and_12",
+        "days:only_for_view_deliveries",
+    ]
+    # The repair instruction names the tool the caller actually used.
+    assert CONTEXT_TOOL_NAME in result["detail"]
+    assert TOOL_NAME not in result["detail"]
+    assert not records
+
+
+def test_a_valid_read_keeps_its_existing_shape(tmp_path):
+    """The refusal payload is additive: legal reads are unchanged."""
+
+    tool, records = inspector(tmp_path)
+    result = tool.read(TOOL_NAME, {"view": "portfolio", "limit": 12})
+    assert result["ok"] is True
+    assert "rejected_arguments" not in result and "allowed_arguments" not in result
+    assert records
 
 
 def test_revocation_during_read_suppresses_result(monkeypatch, tmp_path):
@@ -195,8 +284,9 @@ def test_dynamic_requests_are_not_mistaken_for_client_responses(tmp_path):
         )
 
 
+@pytest.mark.parametrize("read_view", ["todos", "agents"])
 def test_manager_runtime_installs_tool_and_records_real_subprocess_read(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, read_view
 ):
     from loopx.chat_runtime import ChatRuntimeController
     from loopx.chat_store import ChatSessionStore
@@ -234,12 +324,20 @@ for line in sys.stdin:
         continue
     print(json.dumps({'id':r['id'],'result':result}), flush=True)
 """)
+    if read_view == "agents":
+        fake.write_text(fake.read_text().replace(
+            "'view':'todos','goal_id':'alpha'", "'view':'agents','query':'review'").replace(
+            "evidence['rows'][0]['title'] == 'Check the sample result'",
+            "evidence['rows'][0]['agent_id'] == 'review-worker' and evidence['rows'][0]['execution_readiness'] == 'not_checked'"))
+        (tmp_path / "registry.json").write_text(json.dumps({"goals": [
+            {"id": "alpha", "registered_agents": ["review-worker"]}
+        ]}))
     fake.chmod(0o755)
     collected = []
 
     def collect(*args, **kwargs):
         collected.append(kwargs)
-        return {"goals": [{"goal_id": "alpha"}], "snapshot_id": "fixture"}
+        return {"scope": "owner_global", "goals": [{"goal_id": "alpha"}], "snapshot_id": "fixture"}
 
     monkeypatch.setattr(context, "collect_manager_turn_context", collect)
     monkeypatch.setattr(
@@ -291,12 +389,13 @@ for line in sys.stdin:
             session_id=session["session_id"], turn_id=turn["turn_id"], timeout_sec=10
         )
         assert done["status"] == "completed", done
-        assert collected == [{"include_details": False}]
+        # An interactive endpoint keeps the on-demand read: no inline source read.
+        assert collected == [{"include_details": False, "remote_evidence": False}]
         events = store.events_after(session["session_id"], turn["turn_id"], None)
         reads = [e for e in events if e["kind"] == "manager.evidence_read"]
         assert (
             len(reads) == 1
-            and reads[0]["payload"]["rows"][0]["todo_id"] == "todo_sample"
+            and reads[0]["payload"]["rows"][0]["todo_id" if read_view == "todos" else "agent_id"] == ("todo_sample" if read_view == "todos" else "review-worker")
         )
     finally:
         runtime.close()

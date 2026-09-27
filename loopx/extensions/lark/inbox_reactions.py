@@ -35,7 +35,7 @@ ReactionDeleter = Callable[[str, str], bool]
 def _default_runner(args: Sequence[str]) -> Mapping[str, Any]:
     result = subprocess.run(
         list(args),
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         capture_output=True,
         check=False,
         timeout=10,

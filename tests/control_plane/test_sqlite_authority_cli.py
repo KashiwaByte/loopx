@@ -121,6 +121,7 @@ def test_promotion_failure_evidence_survives_real_python_runtime(tmp_path, monke
     result = effect_runtime_result("coordination.local_authority.promote", {
         "schema_version": "loopx_local_coordination_promotion_request_v0",
         "runtime_root": str(runtime), "goal_id": "sqlite-goal", "operation_id": "promotion-negative",
+        "canonical_authority": "sqlite_v0",
         "expected_shadow_provider_revision": "file:synthetic:1",
         "expected_shadow_projection_sha256": "a" * 64, "minimum_operations": 1,
         "required_event_kinds": ["todo_claim"], "writer_fence": {

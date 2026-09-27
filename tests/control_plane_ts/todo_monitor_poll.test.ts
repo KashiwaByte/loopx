@@ -128,6 +128,25 @@ test("retained lease and stale observation cannot mutate either half", async () 
   assert.deepEqual(await store.loadAuthority(), leased);
 });
 
+test("hard mode cannot bypass a missing lease; soft mode cannot accept supplied execution proof", async () => {
+  for (const mode of ["hard_lease", "soft_claim"] as const) {
+    const {store, request} = await seeded({claimed_by: "agent-a"});
+    const loaded = await store.loadAuthority();
+    assert.equal(loaded.status, "loaded");
+    if (loaded.status !== "loaded") return;
+    await store.commitAuthority({operation_id: "mode", expected_provider_revision: loaded.provider_revision,
+      events: [], receipts: [], next_projection: {...loaded.head, handoff_mode: mode}});
+    const before = await store.loadAuthority();
+    for (const proof of [null, {idempotency_key: "missing-execution", expected_version: 1}]) {
+      if (mode === "soft_claim" && proof === null) continue;
+      const result = await executeCoordinationMonitorPoll(store, {...request, lease_proof: proof});
+      assert.equal(result.status, "failed");
+      assert.deepEqual(await store.loadAuthority(), before);
+      assert.equal((await store.readReceipt(request.operation_id)).status, "missing");
+    }
+  }
+});
+
 test("target-key selection ignores completed history but never guesses between live monitors", () => {
   const active = {todo_id: "todo_current", role: "agent", task_class: "continuous_monitor",
     target_key: "watch", status: "open", archive_state: "active"};
@@ -135,4 +154,40 @@ test("target-key selection ignores completed history but never guesses between l
   assert.equal(selectMonitorTodo([history, active], null, "watch").todo_id, active.todo_id);
   assert.throws(() => selectMonitorTodo([history, active], history.todo_id, "watch"), /unfinished/);
   assert.throws(() => selectMonitorTodo([active, {...active, todo_id: "todo_other"}], null, "watch"), /multiple/);
+});
+
+test("current leased Monitor atomically observes and creates work without renewing or releasing its lease", async () => {
+  const {store, request} = await seeded({claimed_by: "agent-a"});
+  const head = await store.loadAuthority();
+  assert.equal(head.status, "loaded");
+  if (head.status !== "loaded") return;
+  const lease = {schema_version: "task_lease_v0", goal_id: request.goal_id,
+    todo_id: "todo_monitor", owner: "agent-a", status: "active",
+    idempotency_key: "execution-a", version: 4, lease_epoch: 2,
+    acquired_at: "2026-09-01T00:00:00Z", expires_at: "2026-09-01T01:00:00Z"};
+  await store.commitAuthority({operation_id: "seed-lease", expected_provider_revision: head.provider_revision,
+    events: [], receipts: [], next_projection: {...head.head, handoff_mode: "hard_lease", leases: [lease]}});
+  const fenced = {...request, now: new Date("2026-09-01T00:05:00Z"),
+    lease_proof: {idempotency_key: "execution-a", expected_version: 4}};
+  const before = await store.loadAuthority();
+  for (const proof of [null, {idempotency_key: "wrong", expected_version: 4},
+    {idempotency_key: "execution-a", expected_version: 3}]) {
+    assert.equal((await executeCoordinationMonitorPoll(store, {...fenced, lease_proof: proof})).status, "failed");
+    assert.deepEqual(await store.loadAuthority(), before);
+  }
+  const applied = await executeCoordinationMonitorPoll(store, fenced);
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.deepEqual((applied.writeback as JsonObject).lease_proof, fenced.lease_proof);
+  const after = await store.loadAuthority();
+  assert.equal(after.status, "loaded");
+  if (after.status !== "loaded") return;
+  assert.deepEqual(after.head.leases, [lease]);
+  assert.equal((after.head.todos as JsonObject[]).length, 2);
+  // A receipt settles past work even after the old execution expires; it
+  // must not execute the observation again or grant another lease.
+  assert.equal((await executeCoordinationMonitorPoll(store, {...fenced,
+    now: new Date("2026-09-02T00:00:00Z")})).status, "replayed");
+  assert.deepEqual(await store.loadAuthority(), after);
+  assert.equal((await executeCoordinationMonitorPoll(store, {...fenced, operation_id: "fresh-expired",
+    now: new Date("2026-09-02T00:00:00Z")})).status, "failed");
 });

@@ -133,4 +133,63 @@ export function registerHandoffModeConformance(provider: string, factory: Author
     assert.equal((await executeHandoffModeSet(store, request)).status, "replayed");
     assert.deepEqual(await head(store), after);
   });
+  test(`${provider}: thrown post-commit response is recovered and never retried as a fresh write`, async t => {
+    const {store} = await factory(t);
+    await seed(store);
+    let commits = 0;
+    const lost = intercept(store, async commit => {
+      commits++;
+      assert.equal((await store.commitAuthority(commit)).status, "applied");
+      throw new Error("transport disconnected after commit");
+    });
+    assert.equal((await executeHandoffModeSet(lost, request)).status, "recovered");
+    assert.equal((await executeHandoffModeSet(lost, request)).status, "replayed");
+    assert.equal(commits, 1);
+  });
+
+  test(`${provider}: unobserved receipt after commit requires same-operation recovery`, async t => {
+    const {store} = await factory(t);
+    await seed(store);
+    let committed = false;
+    const unavailable = intercept(store, async commit => {
+      const result = await store.commitAuthority(commit);
+      committed = true;
+      return result;
+    });
+    unavailable.readReceipt = id => {
+      if (committed) throw new Error("receipt connection unavailable");
+      return store.readReceipt(id);
+    };
+    const result = await executeHandoffModeSet(unavailable, request);
+    assert.equal(result.status, "ambiguous");
+    assert.equal(result.reason_code, "coordination_receipt_recovery_required");
+    assert.deepEqual(result.recovery, {operation_id: request.operation_id, retry_with_same_operation_id: true});
+    const after = await head(store);
+    assert.equal((await executeHandoffModeSet(store, request)).status, "replayed");
+    assert.deepEqual(await head(store), after);
+  });
+
+  for (const corruption of ["changed", "previous_mode", "operation_id", "handoff_mode"] as const) {
+    test(`${provider}: malformed historical ${corruption} decision cannot masquerade as a no-op`, async t => {
+      const {store} = await factory(t);
+      await seed(store);
+      await executeHandoffModeSet(store, request);
+      const before = await head(store);
+      const corrupt = intercept(store, commit => store.commitAuthority(commit));
+      corrupt.readReceipt = async id => {
+        const receipt = await store.readReceipt(id);
+        if (receipt.status !== "found") return receipt;
+        const copied = structuredClone(receipt);
+        const decision = copied.receipts[0]!.decision as JsonObject;
+        if (corruption === "changed") delete decision.changed;
+        else decision[corruption] = "wrong";
+        return copied;
+      };
+      const result = await executeHandoffModeSet(corrupt, request);
+      assert.equal(result.reason_code, "invalid_coordination_command_receipt");
+      assert.equal(result.changed, false);
+      assert.deepEqual(await head(store), before);
+    });
+  }
+
 }

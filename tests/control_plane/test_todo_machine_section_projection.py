@@ -14,6 +14,9 @@ from loopx.control_plane.todos.machine_section_projection import (
     inspect_todo_section_projection,
     render_canonical_todo_sections,
 )
+from loopx.control_plane.todos.completion_validation_projection import (
+    completion_validation_declaration_sha256,
+)
 from loopx.cli import build_parser
 from loopx.cli_commands import todo as todo_command
 from loopx.control_plane.todos import provider_projection, active_state_editing
@@ -92,6 +95,18 @@ def _records() -> list[dict[str, object]]:
     ]
 
 
+def _confirmed_payload(payload, request):
+    if payload is None or "projection_readback" not in request:
+        return payload
+    witness = request["projection_readback"]
+    return {**payload, "projection_readback": {
+        "provider_revision": witness["provider_revision"],
+        "observed_provider_revision": payload["provider_revision"],
+        "status": "delivered" if witness["changed"] else "current",
+        "next_action": "finish",
+    }}
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 def test_projection_replaces_only_machine_sections_and_is_idempotent(newline: str) -> None:
     projected = render_canonical_todo_sections(
@@ -163,6 +178,24 @@ def test_projection_assigns_display_only_provenance_to_native_records() -> None:
     assert all("source_section" not in record and "index" not in record for record in records)
 
 
+@pytest.mark.parametrize("schema", ["todo_item_v0", "todo_domain_record_v0"])
+def test_priority_text_has_a_lossless_display_without_persisted_derived_fields(schema):
+    record = deepcopy(_records()[0])
+    record.update(schema_version=schema, text="[P2] Observe a public target.")
+    record.pop("priority", None)
+    record.pop("title", None)
+    if schema == "todo_domain_record_v0":
+        record.pop("source_section", None)
+        record.pop("index", None)
+    original = deepcopy(record)
+    result = render_canonical_todo_sections(SOURCE, [record], provider_revision="priority-display")
+    assert "[P2] Observe a public target." in result.markdown
+    assert record == original
+    assert not render_canonical_todo_sections(result.markdown, [record], provider_revision="priority-display").changed
+    with pytest.raises(ValueError, match="parity mismatch"):
+        render_canonical_todo_sections(SOURCE, [{**record, "priority": "P0"}], provider_revision="priority-conflict")
+
+
 def test_projection_rejects_unknown_fields_but_allows_known_read_model_fields() -> None:
     unknown = deepcopy(_records())
     unknown[0]["future_field"] = "must-not-disappear"
@@ -178,6 +211,145 @@ def test_projection_rejects_unknown_fields_but_allows_known_read_model_fields() 
     )
     assert projected.changed is True
     assert "resume_ready" not in projected.markdown
+
+
+def test_projection_keeps_validation_revision_receipts_provider_only() -> None:
+    record = deepcopy(_records()[0])
+    declaration = {
+        "validation_command": "python3 -c 'raise SystemExit(0)'",
+        "validation_command_argv": None,
+        "validation_label": "revised validator",
+        "validation_timeout_seconds": 5,
+    }
+    declaration_sha256 = completion_validation_declaration_sha256(declaration)
+    record.update(
+        completion_validation_required=True,
+        completion_validation_sha256=declaration_sha256,
+        completion_validation_revision=1,
+        completion_validation_revision_history=[
+            {
+                "schema_version": "loopx_todo_completion_validation_revision_receipt_v0",
+                "revision": 1,
+                "operation_id": "revise-validator-1",
+                "actor_agent_id": "codex-worker",
+                "previous_declaration_sha256": "b" * 64,
+                "declaration_sha256": declaration_sha256,
+                "observed_at": "2026-09-20T00:00:00Z",
+            }
+        ],
+    )
+    projected = render_canonical_todo_sections(
+        SOURCE,
+        [record],
+        provider_revision="validation-revision",
+        private_validation_declarations={"todo_agent": declaration},
+    )
+
+    assert "completion_validation_revision" not in projected.markdown
+    replay = render_canonical_todo_sections(
+        projected.markdown,
+        [record],
+        provider_revision="validation-revision",
+    )
+    assert replay.changed is False
+
+
+def test_projection_converges_stale_markdown_after_validator_revision() -> None:
+    old_declaration = {
+        "validation_command": None,
+        "validation_command_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_goal_topic_runtime.py",
+        ],
+        "validation_label": "manager route reconciliation tests",
+        "validation_timeout_seconds": None,
+    }
+    new_declaration = {
+        **old_declaration,
+        "validation_command_argv": [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/extensions/test_lark_goal_topic_runtime.py",
+        ],
+    }
+    record = deepcopy(_records()[0])
+    record.update(
+        completion_validation_required=True,
+        completion_validation_sha256=completion_validation_declaration_sha256(
+            old_declaration
+        ),
+    )
+    old_projection = render_canonical_todo_sections(
+        SOURCE,
+        [record],
+        provider_revision="validation-before-revision",
+        private_validation_declarations={"todo_agent": old_declaration},
+    )
+
+    record.update(
+        completion_validation_sha256=completion_validation_declaration_sha256(
+            new_declaration
+        ),
+        completion_validation_revision=1,
+    )
+    revised = render_canonical_todo_sections(
+        old_projection.markdown,
+        [record],
+        provider_revision="validation-after-revision",
+        private_validation_declarations={"todo_agent": new_declaration},
+    )
+
+    assert revised.changed is True
+    assert "tests%2Fextensions%2Ftest_lark_goal_topic_runtime.py" in revised.markdown
+    assert "tests%2Ftest_goal_topic_runtime.py" not in revised.markdown
+    replay = render_canonical_todo_sections(
+        revised.markdown,
+        [record],
+        provider_revision="validation-after-revision",
+    )
+    assert replay.changed is False
+
+
+def test_projection_rejects_divergent_sidecar_not_selected_by_authority() -> None:
+    authority_declaration = {
+        "validation_command": "python3 -c 'raise SystemExit(0)'",
+        "validation_command_argv": None,
+        "validation_label": "authority validator",
+        "validation_timeout_seconds": 5,
+    }
+    divergent_declaration = {
+        **authority_declaration,
+        "validation_command": "python3 -c 'raise SystemExit(1)'",
+    }
+    record = deepcopy(_records()[0])
+    record.update(
+        completion_validation_required=True,
+        completion_validation_sha256=completion_validation_declaration_sha256(
+            authority_declaration
+        ),
+    )
+    authority_projection = render_canonical_todo_sections(
+        SOURCE,
+        [record],
+        provider_revision="validation-authority",
+        private_validation_declarations={"todo_agent": authority_declaration},
+    )
+
+    with pytest.raises(
+        TodoSectionProjectionError,
+        match="divergent private validation declarations",
+    ):
+        render_canonical_todo_sections(
+            authority_projection.markdown,
+            [record],
+            provider_revision="validation-authority",
+            private_validation_declarations={"todo_agent": divergent_declaration},
+        )
 
 
 def test_projection_renders_native_archive_with_role_and_replays() -> None:
@@ -376,7 +548,7 @@ def test_project_markdown_cli_requires_promoted_exact_revision(
         monkeypatch.setattr(
             provider_projection,
             "read_canonical_todos_if_promoted",
-            lambda **_kwargs: payload,
+            lambda **kwargs: _confirmed_payload(payload, kwargs),
         )
         monkeypatch.setattr(
             provider_projection,
@@ -509,11 +681,11 @@ def test_project_markdown_cli_publishes_with_atomic_replace(
     monkeypatch.setattr(
         provider_projection,
         "read_canonical_todos_if_promoted",
-        lambda **_kwargs: {
+        lambda **kwargs: _confirmed_payload({
             "todos": _records(),
             "source_authority": "file_v0",
             "provider_revision": "rev-1",
-        },
+        }, kwargs),
     )
     monkeypatch.setattr(
         provider_projection,
@@ -605,11 +777,11 @@ def test_project_markdown_cli_preserves_narrative_boundaries(
     monkeypatch.setattr(
         provider_projection,
         "read_canonical_todos_if_promoted",
-        lambda **_kwargs: {
+        lambda **kwargs: _confirmed_payload({
             "todos": _records(),
             "source_authority": "file_v0",
             "provider_revision": "rev-1",
-        },
+        }, kwargs),
     )
     monkeypatch.setattr(
         provider_projection,
@@ -706,3 +878,21 @@ def test_real_promoted_provider_to_cli_projection(tmp_path: Path) -> None:
     assert code == 0 and replay["changed"] is False
     assert state.read_bytes() == published
     assert read_canonical_todos_if_promoted(runtime_root=runtime, goal_id="goal-a") == before
+
+
+@pytest.mark.parametrize('generation', [0, 1, 12])
+@pytest.mark.parametrize('native', [False, True])
+def test_archived_monitor_retains_numeric_material_generation(generation, native):
+    record = {**_records()[0], 'status': 'done', 'done': True,
+        'archive_state': 'archive', 'source_section': 'Completed Work Archive',
+        'task_class': 'continuous_monitor', 'material_change_generation': generation}
+    if native:
+        record['schema_version'] = 'todo_domain_record_v0'
+        record.pop('index')
+        record.pop('source_section')
+    before = deepcopy(record)
+    rendered = render_canonical_todo_sections(SOURCE, [record], provider_revision='revision:monitor')
+    from loopx.control_plane.todos.machine_section_projection import _parsed_archive_records
+    assert _parsed_archive_records(rendered.markdown)[0]['material_change_generation'] == generation
+    assert record == before
+    assert render_canonical_todo_sections(rendered.markdown, [record], provider_revision='revision:monitor').changed is False

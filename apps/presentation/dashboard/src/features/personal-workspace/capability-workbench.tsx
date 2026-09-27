@@ -50,6 +50,7 @@ export function CapabilityEditorStatus({ available, description, t }: Readonly<{
 }
 
 function capabilityPresentationTier(capability: CapabilityDescriptor) {
+  if (capability.availability === "retired") return 5;
   if (capability.availability?.includes("experimental")) return 4;
   if (capability.capability_id === "multi_subagent") return 3;
   if (capability.configuration_editor.writable_scopes.length === 0) return 2;
@@ -78,6 +79,7 @@ export function CapabilityCatalogNavigation({
   onSelect,
   scope,
   selectedCapabilityId,
+  showScope = true,
   t,
 }: Readonly<{
   capabilities: CapabilityDescriptor[];
@@ -85,6 +87,7 @@ export function CapabilityCatalogNavigation({
   onSelect: (capabilityId: string) => void;
   scope: "goal" | "machine";
   selectedCapabilityId: string;
+  showScope?: boolean;
   t: WorkspaceTranslate;
 }>) {
   return (
@@ -101,9 +104,9 @@ export function CapabilityCatalogNavigation({
             <span>
               <strong>{capability.display_name}</strong>
             </span>
-            <em>{t(capability.available_scopes.includes(scope)
+            {showScope ? <em>{t(capability.available_scopes.includes(scope)
               ? scope === "goal" ? "capabilities.goalScope" : "capabilities.machineScope"
-              : scope === "machine" ? "capabilities.goalScope" : "capabilities.machineScope")}</em>
+              : scope === "machine" ? "capabilities.goalScope" : "capabilities.machineScope")}</em> : null}
           </button>
         );
       })}
@@ -118,6 +121,11 @@ export function CapabilityDetailHeader({ capability, locale, source }: Readonly<
 }>) {
   const { t } = useWorkspaceI18n();
   const localized = localizeCapability(capability, locale);
+  // Capability ownership remains visible even when this editor is read-only.
+  const scopes = capability.configuration_editor.supported_scopes;
+  const scopeKind = scopes.includes("machine")
+    ? scopes.includes("goal") ? "machineAndGoal" : "machine"
+    : scopes.includes("goal") ? "goal" : "unknown";
   return (
     <header>
       <span className="personal-settings-icon"><SlidersHorizontal aria-hidden size={18} /></span>
@@ -126,6 +134,7 @@ export function CapabilityDetailHeader({ capability, locale, source }: Readonly<
           <h2>{localized.display_name}</h2>
           <CapabilityEffectiveSource source={source} t={t} />
         </div>
+        <p className="personal-capability-supported-scopes">{t(`capabilities.configurationScope.${scopeKind}`)}</p>
         {capability.context_contribution && (
           <details className="personal-capability-help" data-testid="capability-context-phases">
             <summary>{locale === "zh-CN" ? "主 Agent 协作指导" : "Coordinator workflow guidance"}</summary>

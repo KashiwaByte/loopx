@@ -1,5 +1,6 @@
 /** Pure field intent planning. Admission, leases, validation and commit stay
  * with the calling lifecycle transaction; this result grants no write right. */
+import {planTodoPriority} from "./priority.ts";
 import type { JsonObject } from "../effect_program.ts";
 import { EffectRuntimeRequestError } from "../effect_runtime_errors.ts";
 import { requireJsonObject, requireNonEmptyString } from "../runtime_decode.ts";
@@ -39,7 +40,7 @@ const INTENT_FIELDS = new Set<string>([...STRING_FIELDS, ...PRESENT_FIELDS, ...F
   "status", "claimed_by", "bound_agent", "goal_bound", "blocks_agent", "excluded_agents",
   "global_gate", "unblocks_todo_id", "successor_todo_ids", "completion_continuation",
   "completion_recovery", "completion_metadata_updates_override", "resume_when",
-  "resume_monitor_generation", "no_followup", "monitor_metadata"]);
+  "resume_monitor_generation", "no_followup", "monitor_metadata", "text", "priority", "clear_priority"]);
 
 function optionalString(value: unknown, label: string): string | null {
   if (value === null || value === undefined) return null;
@@ -166,7 +167,7 @@ export function planTodoFieldUpdate(value: unknown): TodoFieldUpdatePlan {
   if (intent.claim_only && targetStatus !== "open") {
     throw new EffectRuntimeRequestError(`todo claim requires status=open; todo_id '${todoId}' is status='${targetStatus}'`);
   }
-  const updates: JsonObject = {todo_id: todoId, status: targetStatus};
+  const updates: JsonObject = {todo_id: todoId, status: targetStatus, ...planTodoPriority(block, intent)};
   if (normalizedStatus === "done" && !block.completed_at) updates.completed_at = updatedAt;
   else if (normalizedStatus && normalizedStatus !== "done") updates.completed_at = null;
   Object.assign(updates, bindingUpdates(block, intent, todoId));
@@ -203,7 +204,16 @@ export function planTodoFieldUpdate(value: unknown): TodoFieldUpdatePlan {
   const monitorPlan = request.monitor_context == null ? null : planMonitorMetadata({
     ...requireJsonObject(request.monitor_context, "monitor context"),
     schema_version: TODO_MONITOR_METADATA_REQUEST_SCHEMA, existing: block, generated_at: updatedAt,
+    reactivate: block.status === "done" && normalizedStatus === "open",
   });
+  if (monitorPlan?.transition && block.status === "done" && normalizedStatus === "open") {
+    // The new observation cycle cannot carry terminal decisions as current
+    // state. Historical operation receipts retain the original completion.
+    updates.no_followup = null;
+    updates.completion_continuation = null;
+    updates.completion_recovery = null;
+    updates.completion_turn_key = null;
+  }
   const monitor = monitorPlan?.metadata ?? intent.monitor_metadata;
   if (present(monitor)) {
     const metadata = requireJsonObject(monitor, "monitor metadata");

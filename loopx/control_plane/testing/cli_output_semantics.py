@@ -5,6 +5,21 @@ import json
 import re
 from typing import Any
 
+
+def heartbeat_user_language_prompt_revision(text: str) -> str | None:
+    """Attribute the one-time user-language prompt transition in CLI probes.
+
+    This recognizes the exact rendered policy, not runtime language or authority.
+    Full/compact/Goal and thin/brief prompts use different bounded wording.
+    """
+
+    rules = (
+        "Language=user; fallback=English; mix only if asked/scoped-bilingual.",
+        "Lang=user; default=en; mix=asked/scoped.",
+    )
+    return "heartbeat_user_language_v1" if any(rule in text for rule in rules) else None
+
+
 def host_prompt_static_safety_revision(text: str) -> str | None:
     """Exact renderer evidence for the one-time static-safety budget transition.
 
@@ -37,6 +52,28 @@ def reward_memory_outcome_prompt_revision(text: str) -> str | None:
     )
     return (
         "reward_memory_outcome_prompt_v1"
+        if all(fragment in text for fragment in required)
+        else None
+    )
+
+
+def managed_executor_binding_revision(text: str) -> str | None:
+    """Attribute the managed-executor binding readback on a Turn surface.
+
+    This is qualification evidence for the exact projection, never a runtime
+    classifier: the binding key alone would match prose, so the revision also
+    requires the executor identity, its launchability claim, and the typed
+    reason slot that only this readback renders.
+    """
+
+    required = (
+        '"managed_executor"',
+        '"executor_kind"',
+        '"available"',
+        '"unavailable_reason"',
+    )
+    return (
+        "managed_executor_binding_v0"
         if all(fragment in text for fragment in required)
         else None
     )
@@ -157,9 +194,19 @@ def guided_todo_delta_schema_versions(value: Any) -> list[str]:
     return _schema_versions_for_key(value, "todo_delta")
 
 
+def todo_work_counts_schema_versions(value: Any) -> list[str]:
+    return _schema_versions_for_key(value, "work_counts")
+
+
 def markdown_headings(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if _MARKDOWN_HEADING.match(line)]
 
 
 def runtime_root_command_route_count(text: str) -> int:
     return len(_RUNTIME_ROOT_COMMAND_ROUTE.findall(text))
+
+
+def projection_envelope_schema_versions(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return sorted(set(re.findall(r"^- projection: (?:🔴 )?envelope=`([a-z0-9_]+)`", value, re.MULTILINE)))
+    return _schema_versions_for_key(value, "projection_envelope")

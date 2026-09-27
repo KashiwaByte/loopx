@@ -47,6 +47,51 @@ def _host_tool_gate(summary: str, next_action: str) -> dict[str, str]:
     }
 
 
+# One typed endpoint-unavailability error plus the next step for each reason the
+# executor readback can publish. A surface that cannot serve a request names the
+# blocking fact and what clears it, so an operator never has to infer why an
+# endpoint that is listed as a capability refused the session.
+AGENT_ENDPOINT_UNAVAILABLE = "agent_endpoint_unavailable"
+AGENT_ENDPOINT_NEXT_ACTIONS = {
+    "dsh_runtime_unavailable": (
+        "The LoopX Chat service interpreter cannot import deepseek_harness. "
+        "Run `loopx doctor` in that service environment and check python.executable; "
+        "install `loopx[deepseek-harness]` in the same environment, then restart LoopX Chat."
+    ),
+    "operator_credential_unconfigured": (
+        "Set the managed executor credential (DEEPSEEK_API_KEY, with "
+        "DEEPSEEK_BASE_URL when the endpoint is not the provider default) in the "
+        "LoopX Chat service environment, then restart it."
+    ),
+    "invalid_reasoning_effort": (
+        "Fix the configured reasoning effort (LOOPX_MANAGER_REASONING_EFFORT or "
+        "LOOPX_TURN_REASONING_EFFORT) and restart LoopX Chat."
+    ),
+}
+
+
+def agent_endpoint_error(agent_id: str, *, reason: str = "") -> ValueError:
+    """Return the typed error for an Agent id this runtime cannot serve.
+
+    A known blocking reason becomes a typed host-tool gate with an actionable
+    next step; an unrestricted id keeps the existing untyped fallback.
+    """
+
+    if reason:
+        return CodexChatAgentError(
+            f"The Agent endpoint '{agent_id}' cannot serve this request: {reason}.",
+            error_code=AGENT_ENDPOINT_UNAVAILABLE,
+            gate=_host_tool_gate(
+                f"'{agent_id}' is unavailable: {reason}.",
+                AGENT_ENDPOINT_NEXT_ACTIONS.get(
+                    reason,
+                    "Select another Agent endpoint for this session.",
+                ),
+            ),
+        )
+    return ValueError(f"unknown Agent endpoint: {agent_id}")
+
+
 def _approval_gate(summary: str) -> dict[str, str]:
     return {
         "kind": "approval_gate",
@@ -58,6 +103,29 @@ def _approval_gate(summary: str) -> dict[str, str]:
 def _terminal_turn_error(error: Any, fallback: str) -> CodexChatAgentError:
     """Project only the app-server's typed error, never its arbitrary prose."""
     info = error.get("codexErrorInfo") if isinstance(error, dict) else None
+    # Some app-server versions wrap an HTTP error as JSON in `message` while
+    # reporting codexErrorInfo=other. Only the structured HTTP status/type is
+    # used here; the nested message may contain private request details.
+    if info == "other" and isinstance(error.get("message"), str):
+        try:
+            upstream = json.loads(error["message"])
+        except (TypeError, ValueError):
+            upstream = None
+        if (
+            isinstance(upstream, dict)
+            and upstream.get("status") == 400
+            and isinstance(upstream.get("error"), dict)
+            and upstream["error"].get("type") == "invalid_request_error"
+        ):
+            summary = "Codex 上游拒绝了本轮请求参数。"
+            return CodexChatAgentError(
+                summary,
+                error_code="upstream_invalid_request",
+                gate=_host_tool_gate(
+                    summary,
+                    "检查管家选择的模型、Codex CLI 与当前账户是否兼容，再重试。",
+                ),
+            )
     # App-server v2 exposes camel-case discriminators. Unknown/new variants
     # retain the generic failure; message/additionalDetails are not evidence
     # of a policy decision and may contain private upstream content.
@@ -143,7 +211,7 @@ def _current_builtin_model_catalog(codex_bin: str) -> Iterator[Path]:
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=15,
                 check=False,
             )
@@ -241,7 +309,7 @@ def _turn_prompt(
 ) -> str:
     envelope = {
         "schema_version": CHAT_AGENT_RESPONSE_SCHEMA_VERSION,
-        "message": "Short answer for the operator.",
+        "message": "Complete answer for the operator, at the depth this task needs.",
         "proposals": [
             {
                 "kind": "todo",
@@ -290,19 +358,20 @@ def _turn_prompt(
         + "with an autonomous project task. "
         + planning_limits
         + trusted_manager_limits
-        + "Outside manager intent delegation, when the operator requests a durable Goal, Todo, Agent binding, heartbeat, monitor, gate, or correction change, "
+        + "Outside scoped intent delegation, when the operator requests a durable Goal, Todo, Agent binding, heartbeat, monitor, gate, or correction change, "
         "describe the bounded proposal clearly so LoopX can route it through typed preview and explicit apply. "
         + protected_action_contract
-        + "Exception for the manager's supplied context_delegation catalog: when the current user explicitly asks "
-        "to delegate ordinary work or forward context for another Agent to assess/replan, emit context_handoff={goal_id,agent_id} using "
+        + "Exception for the host-supplied context_delegation catalog: when the current user explicitly asks "
+        "to delegate ordinary work or forward context for another Agent to assess/replan, emit context_handoff={goal_id,agent_id,brief} using "
         "one exact catalog recipient, proposals=[], and no confirmation gate. Otherwise context_handoff=null. "
-        "The host delivers the original user message, with no model-authored priority or task edits. "
+        "The host preserves the original user message alongside your brief. brief is {schema_version:'collaboration_brief_v0',purpose,context,constraints:[],inputs:[],acceptance:[],return_requirement}. Preserve relevant earlier corrections and rejected approaches in context, explicit constraints, observable acceptance and the owed result. Never invent missing context. inputs are shared-workspace relative files {ref,description,sha256?}; include a digest only when actually read. This is semantic context, never a priority, task edit or new authority. "
         + "Never claim the change has been written without a verified control-plane receipt. "
         "If you encounter an identity, approval, or host-tool gate, stop and describe it in gate. "
         "Reply in Chinese unless the operator asks for another language. Keep proposals bounded and reviewable. "
         "Do not expose chain-of-thought, tool narration, intended steps, or scratch work. "
-        "First write the complete operator-facing answer as ordinary text. Start with the conclusion, "
-        "use short sentences or lines so the answer can stream, and include at most five actionable items. "
+        "First write the complete operator-facing answer as safe Markdown text. Give a simple question a direct sourced answer; for a complex task, lead with the judgment and then explain the material evidence, comparisons, decisions and limitations at useful depth. "
+        "Use short sentences or lines so the answer can stream. Avoid gratuitous headings, boilerplate, raw ID inventories and more than five actionable items. "
+        "Do not emit executable HTML. The complete answer must stay in this conversation, even when a separate report artifact also exists. "
         "Then append exactly one machine-readable envelope whose message field repeats that complete answer. "
         "protected_action must be null or an object shaped as "
         '{"operation":"merge|release|deploy|delete|payment","target":"user-stated target","summary":"short public-safe proposal"}. '
@@ -519,6 +588,8 @@ class CodexChatAgentSession:
                 raise session._runtime_error(
                     "Codex did not apply the requested manager reasoning effort."
                 )
+            session.model = thread_result.get("model") or model
+            session.reasoning_effort = thread_result.get("reasoningEffort") or reasoning_effort
             session.thread_id = _extract_id(thread_result, "thread", "threadId")
             if not session.thread_id:
                 raise session._runtime_error(
@@ -881,11 +952,13 @@ class CodexChatAgentSession:
             event_turn_id = _event_turn_id(message)
             if event_thread_id and event_thread_id != self.thread_id:
                 continue
+            # A restored native Goal can leave historical turn notifications.
+            # turn/start already returned the exact turn owned by this send.
+            if event_turn_id and turn_id and event_turn_id != turn_id:
+                continue
             if message.get("method") == "turn/started" and event_turn_id:
                 turn_id = event_turn_id
                 self.current_turn_id = turn_id
-            if event_turn_id and turn_id and event_turn_id != turn_id:
-                continue
             method = str(message.get("method") or "")
             params = message.get("params")
             if on_event:
@@ -966,7 +1039,11 @@ class CodexChatAgentSession:
             visible_delta_count += 1
             on_event("answer.delta", {"text": visible_tail})
         raw_response = "".join(parts)
-        response = parse_agent_response(raw_response, protected_paths=[self.work_dir])
+        response = parse_agent_response(
+            raw_response,
+            protected_paths=[self.work_dir],
+            team_plan_context=getattr(self, "team_plan_context", None),
+        )
         if on_event:
             if (
                 CHAT_REVIEW_OPEN_TAG not in raw_response

@@ -1,6 +1,7 @@
 # RFC: Goal Direction Baseline (v0)
 
-- **RFC status:** Draft; under maintainer review
+- **RFC status:** Accepted
+- **Supersedes / closes:** none
 - **Delivery maturity:** Proposal
 - **Authors / owners:** LoopX maintainers and contributors
 - **Created:** 2026-09-10
@@ -27,6 +28,11 @@ records.
 RFC maturity and delivery maturity are independent. This proposal does not
 claim that `goal_direction_baseline_v0`, its declaration, or a runtime
 consumer exists on `main`.
+
+The separate [acceptance contract v0](../../reference/goal-acceptance-observations.md#owner-authorized-contract-v0)
+does not implement this RFC's material declarations or usage receipts.
+#2831's next slice is **direction-material revision to acceptance basis linkage**,
+qualified by the same-Agent/current-revision fixtures below.
 
 ---
 

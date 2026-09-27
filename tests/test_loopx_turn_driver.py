@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 import loopx.cli_commands.turn as turn_command
+from loopx.cli_commands.turn_rendering import render_loopx_turn_execution_markdown
 from tests.control_plane.canonical_authority_fixture import (
     initialize_canonical_authority,
 )
@@ -948,6 +949,44 @@ def test_turn_plan_transaction_key_is_stable_and_todo_scoped() -> None:
     )
 
 
+def test_source_goal_ref_scopes_turn_identity_without_changing_legacy_plan() -> None:
+    legacy = build_loopx_turn_plan(
+        _envelope(),
+        host="generic-cli",
+        execution_mode="isolated-headless",
+    )
+    instance_a = build_loopx_turn_plan(
+        _envelope(),
+        host="generic-cli",
+        execution_mode="isolated-headless",
+        goal_ref={
+            "goal_id": "fixture-goal",
+            "goal_instance_id": "ginst_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+    )
+    instance_b = build_loopx_turn_plan(
+        _envelope(),
+        host="generic-cli",
+        execution_mode="isolated-headless",
+        goal_ref={
+            "goal_id": "fixture-goal",
+            "goal_instance_id": "ginst_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+    )
+
+    assert "goal_ref" not in legacy
+    assert "goal_ref" not in legacy["transaction"]
+    assert instance_a["goal_ref"] == instance_a["transaction"]["goal_ref"]
+    assert (
+        instance_a["transaction"]["turn_key"]
+        != instance_b["transaction"]["turn_key"]
+    )
+    assert (
+        instance_a["transaction"]["turn_key"]
+        != legacy["transaction"]["turn_key"]
+    )
+
+
 def test_turn_plan_instance_id_distinguishes_new_turns_from_retries() -> None:
     first = build_loopx_turn_plan(
         _envelope(),
@@ -1029,7 +1068,7 @@ def test_turn_plan_rejects_unsafe_instance_id(instance_id: str) -> None:
 @pytest.mark.parametrize(
     ("effective_action", "expected"),
     [
-        ("capability_repair", LoopXTurnRoute.REPAIR_REQUIRED),
+        ("capability_bridge_repair", LoopXTurnRoute.REPAIR_REQUIRED),
         ("autonomous_replan", LoopXTurnRoute.REPLAN_REQUIRED),
         ("successor_replan_required", LoopXTurnRoute.REPLAN_REQUIRED),
     ],
@@ -1515,6 +1554,62 @@ def test_turn_cli_consumes_live_state_without_writes(
     assert before == after
 
 
+def test_turn_cli_resolves_its_decision_through_the_shared_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``turn`` must not re-inline the chain it shares with the managed step.
+
+    A private copy inside ``loopx/cli_commands/turn.py`` is not a formatting
+    problem: adding one decision input to the shared owner would then move only
+    one subcommand, and ``run-once`` and ``managed-step`` would disagree about
+    what the current Turn should do. Reading the live status through the shared
+    owner is the fact that identifies a private copy.
+    """
+
+    from loopx.cli_commands import turn_decision
+
+    project, runtime, registry = _write_live_fixture(tmp_path)
+    status_reads: list[dict[str, Any]] = []
+    real_collect_status = turn_decision.collect_status
+
+    def recording_collect_status(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        status_reads.append(dict(kwargs))
+        return real_collect_status(*args, **kwargs)
+
+    monkeypatch.setattr(turn_decision, "collect_status", recording_collect_status)
+    output = io.StringIO()
+
+    with contextlib.redirect_stdout(output):
+        exit_code = cli_main(
+            [
+                "--registry",
+                str(registry),
+                "--runtime-root",
+                str(runtime),
+                "--format",
+                "json",
+                "turn",
+                "plan",
+                "--goal-id",
+                "loopx-turn-fixture",
+                "--agent-id",
+                "codex-fixture",
+                "--scan-root",
+                str(project),
+            ]
+        )
+
+    payload = json.loads(output.getvalue())
+    assert exit_code == 0, payload
+    assert payload["turn_envelope"]["schema_version"] == "loopx_turn_envelope_v0"
+    assert len(status_reads) == 1, (
+        "`turn` must read its live status through the shared Turn decision "
+        "owner so run-once and managed-step cannot drift; shared-owner status "
+        f"reads: {len(status_reads)}"
+    )
+
+
 def test_turn_cli_projects_explicit_fresh_iteration_context(
     tmp_path: Path,
 ) -> None:
@@ -1603,6 +1698,62 @@ def test_turn_cli_binds_advisory_primary_without_hiding_portfolio(
     assert envelope["writeback"].get("selection_required") is None
 
 
+@pytest.mark.parametrize("selection", [None, "todo_fixture0002", "todo_missing"])
+def test_turn_cli_explicit_todo_keeps_default_and_never_falls_back(tmp_path, selection):
+    project, runtime, registry = _write_live_fixture(tmp_path, extra_agent_todo_lines=(
+        "- [ ] [P2] Check the second public fixture.",
+        "  <!-- loopx:todo todo_id=todo_fixture0002 status=open task_class=advancement_task "
+        "action_kind=fixture claimed_by=codex-fixture priority=P2 -->",
+    ))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli_main(["--registry", str(registry), "--runtime-root", str(runtime), "--format", "json",
+                         "turn", "plan", "--goal-id", "loopx-turn-fixture", "--agent-id", "codex-fixture",
+                         "--scan-root", str(project), *(["--todo-id", selection] if selection else [])])
+    result = json.loads(output.getvalue())
+    if selection == "todo_missing":
+        assert code == 1
+        assert "no alternate task" in result["error"]
+    else:
+        assert code == 0, result
+        selected = result["turn_envelope"]["action"]["selected_todo"]
+        assert selected["todo_id"] == (selection or "todo_fixture0001")
+        assert selected["selected_by"] == ("turn_explicit_todo" if selection else "turn_controller_advisory_primary")
+
+
+@pytest.mark.parametrize("extra", [
+    ["--resume-turn-key", "sha256:fixture"],
+    ["--resume-goal-id", "loopx-turn-fixture", "--resume-agent-id", "codex-fixture",
+     "--resume-todo-id", "todo_fixture0001"],
+])
+def test_turn_explicit_selection_cannot_retarget_resumption(tmp_path, extra):
+    project, runtime, registry = _write_live_fixture(tmp_path)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli_main(["--registry", str(registry), "--runtime-root", str(runtime), "--format", "json",
+                         "turn", "run-once", "--goal-id", "loopx-turn-fixture", "--agent-id", "codex-fixture",
+                         "--project", str(project), "--scan-root", str(project), "--todo-id", "todo_fixture0002", *extra])
+    assert code == 1
+    assert "cannot retarget" in json.loads(output.getvalue())["error"]
+
+
+@pytest.mark.parametrize("status,claim", [("done", "codex-fixture"), ("open", "other-agent")])
+def test_explicit_turn_todo_does_not_bypass_completion_or_actor_scope(tmp_path, status, claim):
+    project, runtime, registry = _write_live_fixture(tmp_path, extra_agent_todo_lines=(
+        f"- [{'x' if status == 'done' else ' '}] [P2] Scoped second fixture.",
+        f"  <!-- loopx:todo todo_id=todo_fixture0002 status={status} task_class=advancement_task "
+        f"action_kind=fixture claimed_by={claim} priority=P2 -->",
+    ))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli_main(["--registry", str(registry), "--runtime-root", str(runtime), "--format", "json",
+                         "turn", "plan", "--goal-id", "loopx-turn-fixture", "--agent-id", "codex-fixture",
+                         "--scan-root", str(project), "--todo-id", "todo_fixture0002"])
+    result = json.loads(output.getvalue())
+    assert code == 1, result
+    assert "no alternate task" in result["error"]
+
+
 def test_turn_cli_omits_transaction_detail_by_default(tmp_path: Path) -> None:
     project, runtime, registry = _write_live_fixture(tmp_path)
     output = io.StringIO()
@@ -1670,6 +1821,15 @@ def test_turn_run_once_cli_commits_validated_result_and_one_quota_slot(
     tmp_path: Path,
 ) -> None:
     project, runtime, registry = _write_live_fixture(tmp_path)
+    policy_output = io.StringIO()
+    with contextlib.redirect_stdout(policy_output):
+        policy_code = cli_main([
+            "--registry", str(registry), "--runtime-root", str(runtime), "--format", "json",
+            "automation-cadence", "--goal-id", "loopx-turn-fixture", "--agent-id", "codex-fixture",
+            "--min-interval-minutes", "1440", "--expected-revision", "0",
+            "--owner-reference", "fixture-owner", "--execute",
+        ])
+    assert policy_code == 0, policy_output.getvalue()
     host_project = tmp_path / "isolated-host-workspace"
     host_project.mkdir()
     host_script = """
@@ -1713,6 +1873,8 @@ raise SystemExit(0 if artifact.read_text(encoding="utf-8") == "validated" else 7
                 "json",
                 "turn",
                 "run-once",
+                "--host",
+                "generic-cli",
                 "--goal-id",
                 "loopx-turn-fixture",
                 "--agent-id",
@@ -1733,6 +1895,8 @@ raise SystemExit(0 if artifact.read_text(encoding="utf-8") == "validated" else 7
     payload = json.loads(output.getvalue())
     assert exit_code == 0, payload
     assert payload["status"] == "committed"
+    assert payload["admission"]["reserved"] is True
+    assert payload["admission"]["pre_model_admission"] == "managed_turn_only"
     assert payload["receipt"]["status"] == "committed"
     assert payload["receipt"]["next_phase"] is None
     assert payload["validation"]["status"] == "passed"
@@ -1782,6 +1946,8 @@ raise SystemExit(0 if artifact.read_text(encoding="utf-8") == "validated" else 7
                 "json",
                 "turn",
                 "run-once",
+                "--host",
+                "generic-cli",
                 "--goal-id",
                 "loopx-turn-fixture",
                 "--agent-id",
@@ -1817,6 +1983,28 @@ raise SystemExit(0 if artifact.read_text(encoding="utf-8") == "validated" else 7
     assert [row["classification"] for row in replayed_rows] == [
         "fixture_progress",
         "quota_slot_spent",
+    ]
+
+    next_output = io.StringIO()
+    with contextlib.redirect_stdout(next_output):
+        next_code = cli_main([
+            "--registry", str(registry), "--runtime-root", str(runtime), "--format", "json",
+            "turn", "run-once", "--host", "generic-cli", "--goal-id", "loopx-turn-fixture",
+            "--agent-id", "codex-fixture", "--turn-instance-id", "next-cadence-fixture",
+            "--project", str(host_project), "--host-command-json",
+            json.dumps([sys.executable, "-c", host_script]), "--validation-command-json",
+            json.dumps([sys.executable, "-c", validation_script]), "--scan-root", str(project),
+            "--no-global-sync", "--execute",
+        ])
+    waiting = json.loads(next_output.getvalue())
+    assert next_code == 1, waiting
+    assert waiting["status"] == "interval_wait"
+    assert waiting["admission"]["next_eligible_at_ms"] > 0
+    assert waiting["effects"]["host_invoked"] is False
+    assert waiting["effects"]["quota_spent"] is False
+    assert "- next_eligible_at: " in render_loopx_turn_execution_markdown(waiting)
+    assert [json.loads(line)["classification"] for line in index_path.read_text(encoding="utf-8").splitlines()] == [
+        "fixture_progress", "quota_slot_spent",
     ]
 
 
@@ -1954,6 +2142,8 @@ raise SystemExit(0 if artifact.read_text(encoding="utf-8") == "completed" else 7
         "json",
         "turn",
         "run-once",
+        "--host",
+        "generic-cli",
         "--goal-id",
         "loopx-turn-fixture",
         "--agent-id",
@@ -1996,6 +2186,27 @@ raise SystemExit(0 if artifact.read_text(encoding="utf-8") == "completed" else 7
     assert "todo_id=todo_fixture0001 status=done" in state
     assert "LoopX%20Turn%20validated%20completion" in state
     assert f"completion_turn_key={payload['resume_turn_key']}" in state
+    guard_events = [
+        event
+        for event in (
+            json.loads(line)
+            for line in (
+                runtime
+                / "goals"
+                / "loopx-turn-fixture"
+                / "rollout-event-log.jsonl"
+            )
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        if event.get("event_kind") == "quota_should_run"
+        and event.get("run_id") == payload["resume_turn_key"]
+    ]
+    assert len(guard_events) == 1
+    # Managed Turn uses the same explicit semantic-replan guard as ordinary
+    # quota should-run.  Null means this admitted Turn selected no obligation;
+    # an obligation opened while its host runs belongs to the next Turn.
+    assert guard_events[0]["details"]["semantic_replan_obligation_id"] is None
 
     next_plan_output = io.StringIO()
     with contextlib.redirect_stdout(next_plan_output):
@@ -2101,6 +2312,13 @@ def test_promoted_turn_completion_replays_after_commit_before_journal_crash(
 
     assert first_exit_code == 1, first
     assert first["error"] == "injected crash after canonical Todo commit"
+    assert first["effects"]["host_invoked"] is None
+    observation = first["journal_observation"]
+    assert observation["scope"] == "original_turn"
+    assert observation["recorded_effects"]["host_invoked"] is True
+    assert observation["recorded_effects"]["state_written"] is None
+    assert observation["recorded_effects"]["quota_spent"] is False
+    assert observation["recovery_decision"]["reinvoke_host"] is False
     assert committed_results[0]["status"] == "done"
     assert committed_results[0]["provider_status"] == "applied"
     assert committed_results[0]["idempotent_replay"] is False
@@ -2195,6 +2413,8 @@ def _turn_run_once_completion_argv(
         "json",
         "turn",
         "run-once",
+        "--host",
+        "generic-cli",
         "--goal-id",
         "loopx-turn-fixture",
         "--agent-id",
@@ -2643,7 +2863,7 @@ def test_turn_run_once_commits_independently_validated_progress(
             "summary": "One intermediate fixture step passed validation.",
             "reward_memory_reflection_json": json.dumps(
                 {
-                    "schema_version": "turn_reward_memory_reflection_v0",
+                    "schema_version": "turn_reward_memory_reflection_v1",
                     "status": "eligible",
                     "surface_id": "agent_workflow.turn_admission",
                     "outcome_kind": "engineering",
@@ -2651,6 +2871,28 @@ def test_turn_run_once_commits_independently_validated_progress(
                     "reasoning_summary": "The independent validator passed.",
                     "confidence": "high",
                     "evidence_refs": ["artifact:fixture-validation"],
+                    "experience": {
+                        "schema_version": "procedural_experience_contract_v0",
+                        "applicability": ["Repeating the validated fixture sequence"],
+                        "observed_outcome": (
+                            "The independent validator accepted the fixture sequence."
+                        ),
+                        "attribution": (
+                            "The result is bound to the exact fixture validation artifact."
+                        ),
+                        "future_behavior": {
+                            "trigger": "The same fixture sequence must be repeated.",
+                            "action": "Reuse the verified fixture sequence.",
+                            "validation": "Run the independent fixture validator.",
+                            "stop_condition": (
+                                "Stop reuse when the fixture revision or validator changes."
+                            ),
+                        },
+                        "limitations": [
+                            "The sequence applies only to the validated fixture revision."
+                        ],
+                        "evidence_refs": ["artifact:fixture-validation"],
+                    },
                 }
             ),
         }
@@ -2811,6 +3053,8 @@ raise SystemExit(0 if pathlib.Path("claimed-artifact.txt").is_file() else 9)
                 "json",
                 "turn",
                 "run-once",
+                "--host",
+                "generic-cli",
                 "--goal-id",
                 "loopx-turn-fixture",
                 "--agent-id",
@@ -3023,7 +3267,7 @@ def test_turn_run_once_codex_cli_wires_validated_reflection_post_settlement(
     project, runtime, registry = _write_live_fixture(tmp_path)
     reflection = json.dumps(
         {
-            "schema_version": "turn_reward_memory_reflection_v0",
+            "schema_version": "turn_reward_memory_reflection_v1",
             "status": "eligible",
             "surface_id": "agent_workflow.turn_admission",
             "outcome_kind": "engineering",
@@ -3031,6 +3275,26 @@ def test_turn_run_once_codex_cli_wires_validated_reflection_post_settlement(
             "reasoning_summary": "The independent validator passed.",
             "confidence": "high",
             "evidence_refs": ["receipt:codex-cli-validator"],
+            "experience": {
+                "schema_version": "procedural_experience_contract_v0",
+                "applicability": ["Running the validated Codex CLI sequence"],
+                "observed_outcome": (
+                    "The independent validator accepted the Codex CLI sequence."
+                ),
+                "attribution": "The outcome is bound to the exact validator receipt.",
+                "future_behavior": {
+                    "trigger": "The same Codex CLI sequence is considered again.",
+                    "action": "Reuse the validated Codex CLI sequence.",
+                    "validation": "Require the exact Codex CLI validator receipt.",
+                    "stop_condition": (
+                        "Stop reuse when the sequence or validator revision changes."
+                    ),
+                },
+                "limitations": [
+                    "The result applies only to the validated CLI sequence."
+                ],
+                "evidence_refs": ["receipt:codex-cli-validator"],
+            },
         },
         separators=(",", ":"),
     )
@@ -3145,11 +3409,14 @@ def test_turn_run_once_cli_resumes_session_from_recoverable_failed_turn(
     project, runtime, registry = _write_live_fixture(tmp_path)
     session_available = False
     session_actions: list[str] = []
+    session_binding_calls = 0
 
     def fake_session_binding(
         _runtime_root: Path,
         _turn_envelope: dict[str, object],
     ) -> dict[str, str] | None:
+        nonlocal session_binding_calls
+        session_binding_calls += 1
         if not session_available:
             return None
         return {
@@ -3235,3 +3502,7 @@ def test_turn_run_once_cli_resumes_session_from_recoverable_failed_turn(
     assert recovered["status"] == "stopped"
     assert recovered["quota_slot_spend_count"] == 0
     assert session_actions == ["start_new", "resume"]
+    # A journal resume resolves the saved Turn before consulting Codex session
+    # state.  Rebuilding a binding from the fresh decision can fail after the
+    # selected Todo has already completed and disappeared from the live route.
+    assert session_binding_calls == 2

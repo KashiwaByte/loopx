@@ -18,7 +18,6 @@ Two scheduling-only seams exist, both outside every product decision:
 
 from __future__ import annotations
 
-import importlib
 import json
 import select
 import subprocess
@@ -28,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ...file_lock import exclusive_file_lock
+from ...file_lock import exclusive_cross_runtime_file_lock
 from ..coordination import local_authority_shadow_outbox as shadow_outbox
 from .authority_e2e_fixtures import (
     REPO_ROOT,
@@ -63,29 +62,40 @@ PRIMARY_CRASH_WINDOWS: tuple[tuple[str, bool], ...] = (
 )
 DRAIN_CRASH_WINDOWS: tuple[str, ...] = ("before_commit", "after_commit", "after_cursor", "between_unlinks")
 PARITY_CYCLES = 3
-# ``todo archive-completed`` is deliberately absent: archiving a Todo that holds
-# a released lease record orphans that lease in the source projection while the
-# candidate head keeps it, so the bounded qualification drifts. The ladder
-# declares that gap as ``s2c2.archive_after_leased_completion_parity`` instead
-# of hiding it inside a passing row.
+# ``todo archive-completed`` stays out of this shared cross-writer parity set
+# because it is a Python-only lifecycle writer with no TypeScript counterpart to
+# interleave; the archive-after-lease fold is pinned by its own deterministic row
+# ``s2c2.archive_after_leased_completion_parity`` instead.
 PARITY_REQUIRED_WRITE_CLASSES: tuple[str, ...] = (
     "todo_add",
     "todo_update",
     "todo_complete",
     "todo_supersede",
-    "todo_capture_followups",
     "task_lease_acquire",
     "task_lease_renew",
     "task_lease_transfer",
     "task_lease_fence_close",
 )
 GROWTH_TRANSACTIONS = 10
+# The archive-after-lease row delivers six transactions: the add, the lease
+# acquire, the fenced complete (which also closes the lease fence), the anchor
+# add, and the archive that retires the completed Todo from the graph.
+ARCHIVE_PARITY_OPERATIONS = 6
+# The row's own coverage: the Todo add, the lease acquire, the fenced complete
+# with its lease fence close, and the archive-completed writer.
+ARCHIVE_PARITY_REQUIRED_WRITE_CLASSES: tuple[str, ...] = (
+    "todo_add",
+    "todo_complete",
+    "todo_archive_completed",
+    "task_lease_acquire",
+    "task_lease_fence_close",
+)
 GROWTH_TEXT_TEMPLATE = "Growth workload todo %02d " + "x" * 160
 # Each file-v0 transaction retains the complete projection, so the per-transaction
 # byte delta may grow by about one Todo record per transaction. A larger jump
 # means something beyond the live projection is being re-published.
 GROWTH_DELTA_ACCELERATION_ENVELOPE_BYTES = 2048
-EVENT_ONLY_HOLD = "event_log_writer_not_bound"
+EVENT_ONLY_HOLD = "legacy_todo_event_source_retired"
 CONTINUITY_HOLD = "source_partition_continuity_unproved"
 SHADOW_READ_MODULE = Path("loopx") / "control_plane" / "coordination" / "local_authority_shadow.ts"
 SHADOW_READ_REQUEST_SCHEMA = "loopx_coordination_runtime_shadow_outbox_read_v0"
@@ -100,48 +110,47 @@ from loopx.cli import main
 from loopx.control_plane.coordination import local_authority_shadow_adapter as adapter
 from loopx.control_plane.coordination import local_authority_shadow_outbox as outbox
 from loopx.control_plane.todos import active_state_editing
-window, state = sys.argv[1], pathlib.Path(sys.argv[2]).resolve()
-def pause():
-    print('BARRIER ' + json.dumps({'window': window}), flush=True)
+window, state = sys.argv[1], pathlib.Path(sys.argv[2])
+def pause(payload=None):
+    print('BARRIER ' + json.dumps(payload or {}), flush=True)
     time.sleep(40)
     raise RuntimeError('parent failed to terminate at persistence barrier')
 actual_rpc = adapter.effect_runtime_result
 def rpc(method, request, **kwargs):
-    if method == 'coordination.runtime_shadow.commit_entry' and window == 'before_commit':
-        pause()
-    result = actual_rpc(method, request, **kwargs)
-    if method == 'coordination.runtime_shadow.commit_entry' and window == 'after_commit':
-        pause()
-    return result
+    if method == 'coordination.runtime_shadow.drain' and window in {'before_commit', 'after_commit', 'after_cursor', 'between_unlinks'}:
+        import subprocess
+        child = subprocess.Popen(['node', '--no-warnings', '--experimental-strip-types',
+            'loopx/control_plane/testing/shadow_drain_fault_process.ts', window],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        child.stdin.write(json.dumps(request)); child.stdin.close()
+        for line in child.stdout:
+            if line.startswith('BARRIER '):
+                print(line, end='', flush=True)
+                sys.stdin.readline()  # Parent requests death at the observed barrier.
+                child.kill(); child.wait(timeout=10)
+                print('REAPED', flush=True)
+                time.sleep(40)
+                raise RuntimeError('parent failed to terminate crash worker')
+        raise RuntimeError('native barrier missing: ' + child.stderr.read())
+    return actual_rpc(method, request, **kwargs)
 adapter.effect_runtime_result = rpc
-actual_cursor = outbox.write_cursor
-def cursor(*args, **kwargs):
-    result = actual_cursor(*args, **kwargs)
-    if window == 'after_cursor':
-        pause()
-    return result
-outbox.write_cursor = cursor
 actual_json = outbox.durable_write_json
 def write_json(path, value):
-    if window == 'before_marker' and path.name.endswith('.committed.json'):
-        pause()
+    if window == 'before_marker' and path.name.endswith('.committed.json'): pause()
     return actual_json(path, value)
 outbox.durable_write_json = write_json
 actual_replace = active_state_editing.os.replace
 def replace(source, target):
-    is_primary = pathlib.Path(target).resolve() == state
-    if is_primary and window == 'before_replace':
-        pause()
+    is_primary = pathlib.Path(target) == state
+    if is_primary and window == 'before_replace': pause()
     result = actual_replace(source, target)
-    if is_primary and window == 'after_replace':
-        pause()
+    if is_primary and window == 'after_replace': pause()
     return result
 active_state_editing.os.replace = replace
 actual_unlink = pathlib.Path.unlink
 def unlink(path, *args, **kwargs):
     result = actual_unlink(path, *args, **kwargs)
-    if window == 'between_unlinks' and path.name.endswith('.prepared.json'):
-        pause()
+    if window == 'between_unlinks' and path.name.endswith('.prepared.json'): pause()
     return result
 pathlib.Path.unlink = unlink
 raise SystemExit(main(sys.argv[3:]))
@@ -344,7 +353,7 @@ def history(workspace: GoalWorkspace) -> list[JsonObject]:
         [node, "--no-warnings", "--experimental-strip-types", "--input-type=module", "-e", script, str(request_path)],
         cwd=REPO_ROOT,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         timeout=60,
         check=False,
     )
@@ -397,9 +406,14 @@ def todo_count(workspace: GoalWorkspace) -> int:
 
 @contextmanager
 def hold_drain_lock(workspace: GoalWorkspace) -> Iterator[None]:
-    """Hold the stable maintenance lock so writers defer their post-commit drain."""
+    """Hold the maintenance lock so writers defer their post-commit drain.
 
-    with exclusive_file_lock(
+    The native batch takes the TypeScript mutation marker, so the window must
+    hold the same cross-runtime lock the production readers take; a kernel-only
+    flock would no longer exclude it.
+    """
+
+    with exclusive_cross_runtime_file_lock(
         shadow_outbox.drain_lock_target(workspace.runtime_root, workspace.goal_id),
         operation="e2e_window",
     ):
@@ -414,9 +428,10 @@ def crash_cli(workspace: GoalWorkspace, window: str, *args: str) -> None:
         command,
         cwd=REPO_ROOT,
         env=cli_env(workspace),
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     line = ""
     try:
@@ -425,6 +440,14 @@ def crash_cli(workspace: GoalWorkspace, window: str, *args: str) -> None:
         if readable:
             line = process.stdout.readline()
     finally:
+        if line.startswith("BARRIER "):
+            barrier = json.loads(line.removeprefix("BARRIER "))
+            if barrier.get("native_pid"):
+                assert process.stdin is not None and process.stdout is not None
+                process.stdin.write("terminate_native\n")
+                process.stdin.flush()
+                readable, _, _ = select.select([process.stdout], [], [], 10)
+                expect(bool(readable) and process.stdout.readline().strip() == "REAPED", "native owner must be reaped")
         process.kill()
         _, stderr = process.communicate(timeout=10)
     expect(line.startswith("BARRIER "), f"{window}: the CLI did not reach its persistence window: {stderr[-200:]}")
@@ -783,20 +806,20 @@ def _mixed_writer_cycle(ledger: _MixedWriterLedger, cycle: int) -> None:
         flag="superseded",
     )
     ledger.mutate(
-        "todo capture-followups",
-        ledger.cli(
-            "todo", "capture-followups",
-            "--follow-up", f"Cycle {cycle}: verify the captured projection.",
-            "--evidence", "validation://ladder-parity-followup",
-        ),
-        flag="changed",
+        "todo add (verification)",
+        add_todo(workspace, f"Cycle {cycle}: verify the captured projection."),
+        flag="added",
     )
 
 
 def _assert_bounded_parity(ledger: _MixedWriterLedger, cycle: int, anchor_todo_id: str) -> JsonObject:
     workspace = ledger.workspace
     inspection = _object(inspect(workspace).get("inspection"), f"cycle {cycle} inspection")
-    expect(inspection.get("status") == "matched" and inspection.get("parity_matches") is True, f"cycle {cycle}: the candidate head must match the primary")
+    expect(
+        inspection.get("status") == "matched" and inspection.get("parity_matches") is True,
+        f"cycle {cycle}: the candidate head must match the primary "
+        f"(status={inspection.get('status')!r}, reason_code={inspection.get('reason_code')!r})",
+    )
     flags = ["--minimum-operations", str(ledger.deliveries)]
     for write_class in PARITY_REQUIRED_WRITE_CLASSES:
         flags.extend(["--require-event-kind", write_class])
@@ -908,7 +931,7 @@ def row_parity_divergent_detects_foreign_edit(context: RowContext) -> RowOutcome
 
 
 def row_event_only_todo_source_holds(context: RowContext) -> RowOutcome:
-    """An event-only Todo source holds qualification and candidate reads fail-closed; recovery needs rollback and rebootstrap."""
+    """A retired source refuses candidate/primary operations; preserving both sources allows explicit cleanup."""
 
     workspace = capture_workspace(context, "ladder-event")
     todo_ids: list[str] = []
@@ -918,47 +941,24 @@ def row_event_only_todo_source_holds(context: RowContext) -> RowOutcome:
         todo_ids.append(str(added["todo_id"]))
     qualified(qualify(workspace), label="baseline")
     log = workspace.state_path.with_name("events.jsonl")
-    # The product's own state-event store writes the event-only source. It is
-    # loaded lazily so this strictly typed ladder module does not follow the
-    # untyped state-event module at type-check time.
-    state_events = importlib.import_module("loopx.event_sourced_state")
-    state_events.AppendOnlyStateEventStore(log).append(
-        state_events.make_state_event(
-            event_id="ladder-event-only-todo",
-            goal_id=workspace.goal_id,
-            event_type=state_events.TODO_ADDED,
-            refs={"todo_id": "todo_event_only"},
-            payload={"role": "agent", "title": "An event-only todo without a Markdown writer.", "task_class": "advancement_task"},
-            recorded_at="2026-09-06T00:00:00+00:00",
-        )
-    )
+    log.write_text(json.dumps({"schema_version": "loopx_state_event_v0",
+        "event_type": "todo_added", "refs": {"todo_id": "todo_event_only"}}) + "\n", encoding="utf-8")
     log_bytes = log.read_bytes()
     surfaces = {"inspect": inspect(workspace), "qualify": qualify(workspace), "read-candidate": read_candidate(workspace, todo_ids[0])}
     for label, payload in surfaces.items():
-        expect(payload.get("ok") is False and payload.get("error") == EVENT_ONLY_HOLD, f"{label} must hold on the unbound event source")
+        expect(payload.get("ok") is False and str(payload.get("error") or "").startswith(EVENT_ONLY_HOLD), f"{label} must refuse retired source: {payload.get('error')}")
     status = shadow_status(workspace)
     expect(status.get("ok") is True and management_status(status) == "active", "status must stay readable while the lineage is held")
-    during = add_todo(workspace, "Markdown write during the event-only hold.")
-    expect(during.get("added") is True, "the primary write must still commit")
-    held = capture_evidence(during, label="todo add (during hold)")
-    expect(held.get("outcome") == "pending" and held.get("reason_code") == CONTINUITY_HOLD, "the capture must hold on unproven continuity")
-    expect(log.read_bytes() == log_bytes, "the hold must not touch the event log")
-    expect(backlog(shadow_status(workspace), "todos").get("committed_pending") == 1, "the held entry must stay pending")
-    log.unlink()
-    removed = rejected(qualify(workspace), "qualification", label="qualify after removal")
-    expect(removed.get("reason_code") == "outbox_pending", "removing the event source must not requalify the held lineage")
-    stopped = drain(workspace)
-    expect(stopped.get("outcome") == "stopped" and stopped.get("reason_code") == CONTINUITY_HOLD, "drain must keep holding the entry")
-    summary = _recover_by_rollback_and_rebootstrap(workspace, label="event-only")
-    return passed(
-        hold=EVENT_ONLY_HOLD,
-        held_surfaces=sorted(surfaces),
-        primary_write_during_hold=CONTINUITY_HOLD,
-        event_log_untouched=True,
-        removal_requalifies=False,
-        recovered_by="rollback_then_bootstrap",
-        rebootstrap_baseline_todos=summary.get("todo_count"),
-    )
+    before = workspace.state_path.read_bytes()
+    during = goal_cli(workspace, "todo", "add", "--role", "agent",
+        "--text", "Markdown write during the retired event hold.", check=False)
+    expect(during.get("ok") is False, "retired source must reject primary writes")
+    expect(workspace.state_path.read_bytes() == before, "refusal must preserve Markdown")
+    expect(log.read_bytes() == log_bytes, "refusal must preserve the event file")
+    log.unlink()  # The fixture owns this file; product never removes it.
+    qualified(qualify(workspace), label="retired source removed without any write")
+    return passed(hold=EVENT_ONLY_HOLD, held_surfaces=sorted(surfaces),
+        primary_write_refused=True, event_log_untouched=True)
 
 
 @dataclass(frozen=True)
@@ -1121,6 +1121,94 @@ def row_growth_measurement_gate(context: RowContext) -> RowOutcome:
     )
 
 
+def row_archive_after_leased_completion_parity(context: RowContext) -> RowOutcome:
+    """Archiving a Todo whose released lease stays on disk keeps the candidate head matched and qualifiable."""
+
+    workspace = capture_workspace(context, "ladder-archive-leased")
+    leased = add_todo(workspace, "Leased todo archived after its completion is captured.")
+    leased_todo_id = str(leased["todo_id"])
+    delivered(leased, label="todo add (leased)")
+    acquired = acquire_lease(workspace, todo_id=leased_todo_id, owner=AGENT_A, idempotency_key="ladder-archive-leased-a")
+    delivered(acquired, label="task-lease acquire")
+    completed = goal_cli(
+        workspace, "todo", "complete", "--todo-id", leased_todo_id, "--agent-id", AGENT_A,
+        "--task-lease-idempotency-key", "ladder-archive-leased-a",
+        "--task-lease-expected-version", lease_version(acquired, label="acquire"),
+        "--evidence", "validation://ladder-archive-leased", "--no-follow-up",
+    )
+    delivered(completed, label="todo complete")
+    anchor = add_todo(workspace, "Anchor todo that stays open across the archive write.")
+    anchor_todo_id = str(anchor["todo_id"])
+    delivered(anchor, label="todo add (anchor)")
+    qualified(qualify(workspace), label="baseline")
+    archived = goal_cli(workspace, "todo", "archive-completed", "--role", "agent", "--max-active-done", "0", "--execute")
+    expect(archived.get("changed") is True and archived.get("moved_count") == 1, "archive-completed must move exactly the completed todo")
+    inspection = _object(inspect(workspace).get("inspection"), "post-archive inspection")
+    expect(
+        inspection.get("status") == "matched" and inspection.get("parity_matches") is True,
+        "archiving a Todo whose released lease remains on disk must not orphan that lease in the candidate head",
+    )
+    expect(inspection.get("reason_code") is None, "a matched archive must report no drift reason")
+    # Require exactly the event kinds this row delivers, including the archive
+    # that retires the Todo from the graph while its released lease file stays
+    # on disk as audit history. Reusing the mixed-writer parity set here would
+    # demand writers this row never drives.
+    flags = ["--minimum-operations", str(ARCHIVE_PARITY_OPERATIONS)]
+    for write_class in ARCHIVE_PARITY_REQUIRED_WRITE_CLASSES:
+        flags.extend(["--require-event-kind", write_class])
+    qualification = qualified(qualify(workspace, *flags), label="post-archive")
+    read = read_candidate(workspace, anchor_todo_id)
+    expect(read.get("ok") is True, "a qualified read must remain available after the archive write")
+    lease_dir = workspace.runtime_root / "goals" / workspace.goal_id / "task-leases"
+    lease_names = sorted(path.name for path in lease_dir.glob("*.json"))
+    expect(f"{leased_todo_id}.json" in lease_names, "the released lease file must stay on disk as audit history")
+
+    # The second boundary the same rule covers: a later lease write must not
+    # re-read the retained lease of the archived Todo into its own partition.
+    successor = add_todo(workspace, "Successor todo that takes a fresh lease after the archive.")
+    successor_todo_id = str(successor["todo_id"])
+    delivered(successor, label="todo add (successor)")
+    successor_lease = acquire_lease(
+        workspace, todo_id=successor_todo_id, owner=AGENT_A, idempotency_key="ladder-archive-leased-b",
+    )
+    delivered(successor_lease, label="task-lease acquire (successor)")
+    after_successor = _object(inspect(workspace).get("inspection"), "post-successor inspection")
+    expect(
+        after_successor.get("status") == "matched" and after_successor.get("parity_matches") is True,
+        "a lease write after the archive must not inherit the retained lease of the archived Todo",
+    )
+    # Completion closes the lease fence in a separate native request. It must
+    # retain the same current-graph rule as acquire, not reintroduce audit leases.
+    successor_completed = goal_cli(
+        workspace, "todo", "complete", "--todo-id", successor_todo_id, "--agent-id", AGENT_A,
+        "--task-lease-idempotency-key", "ladder-archive-leased-b",
+        "--task-lease-expected-version", lease_version(successor_lease, label="successor acquire"),
+        "--evidence", "validation://ladder-successor-complete", "--no-follow-up",
+    )
+    delivered(successor_completed, label="todo complete (successor)")
+    drained = drain(workspace)
+    expect(drained.get("ok") is True and drained.get("pending_after") == 0,
+           "successor fence-close must leave no unprovable lease partition")
+    qualified(qualify(workspace), label="post-successor completion")
+    expect(read_candidate(workspace, anchor_todo_id).get("ok") is True,
+           "candidate reads must survive successor fence-close")
+    final_lease_names = sorted(path.name for path in lease_dir.glob("*.json"))
+    expect(
+        {f"{leased_todo_id}.json", f"{successor_todo_id}.json"} <= set(final_lease_names),
+        "both the archived Todo's audit lease and the successor's live lease must remain on disk",
+    )
+    return passed(
+        archived_todo=leased_todo_id,
+        retained_lease_files=len(lease_names),
+        parity_status="matched",
+        parity_reason=None,
+        qualification_cursor=str(qualification.get("cursor")),
+        anchor_read_qualified=True,
+        successor_todo=successor_todo_id,
+        post_successor_parity="matched",
+        final_lease_files=len(final_lease_names),
+    )
+
 __all__ = [
     "CRASH_WORKER",
     "DRAIN_CRASH_WINDOWS",
@@ -1129,6 +1217,7 @@ __all__ = [
     "PARITY_CYCLES",
     "PARITY_REQUIRED_WRITE_CLASSES",
     "PRIMARY_CRASH_WINDOWS",
+    "row_archive_after_leased_completion_parity",
     "row_drain_idempotent",
     "row_event_only_todo_source_holds",
     "row_growth_measurement_gate",

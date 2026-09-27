@@ -1,9 +1,10 @@
 # RFC: Capable Agent Manager and Semantic Work Handoff (v0)
 
-- **RFC status:** Draft, under maintainer review
-- **Delivery maturity:** Proposal; existing foundations are identified in Section 4
+- **RFC status:** Accepted
+- **Supersedes / closes:** none
+- **Delivery maturity:** Partial; private runtime profile, team-plan confirmation and Todo materialization shipped; complete M1–M4 remain unqualified.
 - **Authors / owners:** LoopX maintainers; manager engineering owner
-- **Created / last normative revision:** 2026-09-13
+- **Created / last normative revision:** 2026-09-13 / 2026-09-15
 - **Implementation baseline:** `7eb4b7bb1661bd5eff63a8725a33169792d5964b`
 - **Language mirror:** [中文版](capable-manager-semantic-handoff-v0.zh-CN.md)
 - **Related contracts:** [Effect interpreter](agent-loop-effect-interpreter-v0.md), [Manager continuity](../../reference/protocols/manager-evidence-and-continuity-v0.md), [Goal Vision/Replan](../../reference/protocols/goal-vision-replan-contract-v0.md), [Desktop frontends](desktop-execution-frontends-v0.md), [Shared authority](shared-goal-authority-state-provider-v0.md), [Shared Goal alignment/amendment](shared-goal-alignment-and-governed-amendment-v0.md), [TS migration](typescript-control-plane-migration-v0.md)
@@ -61,6 +62,34 @@ Include global manager conversations, host-native investigation, ordinary author
 
 Do not build a replacement agent runtime, a second scheduler, an external-agent marketplace, a new repository API, a universal workflow DSL or a duplicate task database. A substantial refactor of the current manager, collaboration and adapter boundaries is explicitly in scope; conserving current code volume or module names is not an acceptance goal. Do not require OpenViking, a shared online database or A2A to make local handoffs correct. Do not copy private reasoning traces or complete historical transcripts into every request. Complex financial and other domain effects remain owned by their capabilities and execution adapters.
 
+### Current cross-RFC route (2026-09-16)
+
+At `43d362532`, the private `manager_runtime` profile, steward executor configuration and team preview→frontend confirmation→initial Todo materialization have implementations. #4547/#4548/#4552 supply confirmation UI, bundle and browser fixture; they do not prove worker execution. DSH Chat remains a bounded read-only segment without cross-turn host sessions and cannot borrow Codex `trusted_owner` qualification.
+
+The [overall roadmap](loopx-overall-roadmap-v0.md) records verified F1–F7 and R1–R7. Repair R1 commitment preservation, stale basis and recovery first, then qualify R2 small teams; M2/M3 converge through R3, and M4 requires real user journeys. Section 4 retains its older baseline as migration input, not an override of this checkpoint. Partial merges do not complete M1–M4. Parallel joins, pipeline dependencies, peer help/review, execution responsibility continuation and cross-host collaboration between long-running LoopX Agents follow the roadmap Section 5 matrix. R2 requires real inter-Agent handoff; M2/M3 cannot reduce to steward broadcasts or one-turn forwarding.
+
+The local semantic exchange now extends the existing `manager-context` owner:
+`collaboration_brief_v0` preserves corrections, constraints, relative artifact
+versions, acceptance and return requirements alongside the unchanged owner
+message. Same-Goal peers independently assess requests and return conclusions;
+the requester receives results again until explicit consumption. Owner-local Chat
+shows the brief and live read/decision/return facts in the original conversation.
+The optional identity-scoped stdio tools support sandboxed managed dsh workers.
+See the [three-Agent allocation demo](../../../examples/collaboration-delivery/README.md)
+for dependent artifacts, two review rounds and owner correction. The controller
+selects phases and transfers files; request transport adds no scheduling, lease
+transfer or shared-intent mutation. This is a bounded R3 slice, not M2–M4/G1
+completion; external-audience peer forwarding and cross-host continuation remain
+with their existing roadmap owners.
+
+Receiver recovery now exposes later pending requests through the existing CLI
+and identity-scoped MCP `next_cursor`. Deferred requests awaiting conclusions no
+longer prevent access beyond the first 20. `tests/test_inbox_pagination.py`
+qualifies 45 durable requests, process restart, scope rejection, live registration
+revocation and independent result return. This covers the local receiver paging
+part of A20 and restart evidence for A5/A13. It does not qualify cross-day managed
+execution, live Lark, frontend journey completion or the remaining M1–M4 work.
+
 ## 4. Current-system contract: audited facts
 
 The baseline already has substantial reusable machinery:
@@ -82,18 +111,7 @@ A separate pending [#4312](https://github.com/huangruiteng/loopx/pull/4312) at `
 
 The reviewed [PR #4306](https://github.com/huangruiteng/loopx/pull/4306), subsequently closed as recorded in Appendix B, proposed a special GitHub evidence reader with revision guards, pagination, typed failure handling and routing policy. Its latest reviewed shape was read-first, so it was not merely a forwarding workaround. Nevertheless, the manager should not need this additional per-resource tool surface for ordinary host investigation. Section 6 rejects it as the chosen product path, retaining useful regression requirements.
 
-### 4.1 Cross-RFC implementation checkpoint
-
-Rechecked `origin/main` at the implementation baseline above on 2026-09-13. These are source/history findings, not fresh deployment qualification. RFC status and shipped slices must be reported separately; an old index or a merged refactor title is insufficient.
-
-| Contract | Verified foundation at this baseline | Still outside this RFC's delivery claim |
-| --- | --- | --- |
-| **TS migration** | Accepted; Stage 1/2A foundations and active Stage 2B transaction cutovers. `todos/public_update.ts`, `coordination/todo_update.ts`, `todo_monitor_poll.ts` and structured consumers already own substantial semantics. | T0–T4 are a continuing execution plan, not all completed. Native field/lease/monitor support remains bounded. Moving a planner to TS is not moving its commit. |
-| **Shared authority** | Draft with implemented foundations. `AuthorityStore` defines conditional durable state/events/receipt commit, readback and scan. [#4280](https://github.com/huangruiteng/loopx/pull/4280), [#4283](https://github.com/huangruiteng/loopx/pull/4283), [#4287](https://github.com/huangruiteng/loopx/pull/4287) consolidate transaction, presentation and retained-journal semantics. File/NoKV and SQLite/PostgreSQL candidate paths exist. | A provider implementation is not default promotion or a shared service. D1 projection, D2 profile qualification/soak and D3 fenced cutover retain their own evidence and approval conditions. |
-| **Shared Goal alignment/amendment** | Draft with Stage 1/2 foundations: `goals/shared_goal_alignment.{py,ts}` reads the current work basis; `goal_amendment_proposal.{py,ts}` validates/retains proposals with no canonical effect. Their source basis includes canonical Todo/lease revision when promoted. | Complete Goal-intent versioning, governed Stage 3 commit, verifier/lease-impact handling and its qualification are not supplied by proposal admission. An event sequence or Todo provider revision is not the full Goal revision. |
-| **Manager and handoff (#4330)** | Existing manager inbox/context/tracking/return paths are the migration source; Section 4 identifies their owners. | Capable profile promotion, the general collaboration transaction and A1–A16 remain proposed. This RFC must consume the other owners rather than implement them again. |
-
-Supplemental checkpoint at `6b337bcbde8457bc3268ec7d2780367ace3c6147`: merged #4286 (`c0b572d2d508bb10c32701057dd71ff4f8eb663c`) adds `coordination/command_receipt.ts` as the shared recovery owner for canonical Todo commands and separates archive transactions into `todo_archive.ts`. Its File/SQLite/PostgreSQL/NoKV conformance matrix is reusable M2 foundation, not a capability to design again. Use the original-operation ambiguous recovery semantics when reconciling request/work commits. This removes duplicate TS transaction rules, not Python writers, T1/T2 gaps or D1–D3 promotion requirements.
+- Checkpoint moved to the execution ledger: [Cross-RFC implementation checkpoint](ledger/capable-manager-semantic-handoff-v0/2026-09-13-cross-rfc-implementation.md).
 
 ### 4.2 Four questions, four ownership boundaries
 
@@ -130,6 +148,20 @@ At session start, expose the effective host, model/effort, accessible resource c
 
 ### 5.2 Target boundaries: refactor around work, not the manager
 
+The [App-first conversation/inbox design](app-conversation-and-async-inbox-v0.md)
+is the delivery sequence for this boundary: connect managed or attached work,
+keep subsequent requests and results in LoopX, then converge the reusable
+accept/read/disposition/return lifecycle into its existing TS owner. Lark is an
+adapter, not the owner of generic asynchronous coordination. This plan preserves
+its identity, authority and reply behavior while the App path is qualified first.
+
+
+The steward's cross-project relationship and a project coordinator's scoped
+delivery commitment are distinct product responsibilities. Neither is a new
+authority rank or runtime type. The [project coordination contract](../../reference/project-coordination.md)
+records the shared operations, local Goal Chat reuse, limits and next delivery
+order. A Chat endpoint never impersonates the registered coordinator it contacts.
+
 The target has three product/technical owners:
 
 1. **Manager agent application:** conversation continuity, investigation, judgment, delegation, synthesis and user feedback. Its AGENTS/skills teach LoopX state discovery and collaboration. Its ordinary tools come from the host runtime. It does not own an independent handoff ledger or invent low-level workflow steps for every user request.
@@ -145,6 +177,14 @@ For a small local manager action, a current request/Turn and accepted effect rec
 The durable semantic context consists of a small typed identity/control header plus a versioned human-readable brief and resolvable work/artifact references. The header drives routing and legal transitions. The brief carries open-ended domain meaning; Core does not classify every sentence into a rigid schema. This is dense general-task state, not serialization of the model's hidden thoughts. The same context remains available when a runtime session is replaced.
 
 Prefer one cohesive replacement to compatibility wrappers that preserve duplicate decisions. Inventory every existing producer/reader, migrate with lossless mappings, switch one writer and delete the replaced rules. Reusing contracts and data is required; reusing every current class, JSON directory and prompt is not.
+
+The lead Agent owns task decomposition, investigation, delegation, revision and
+synthesis. Host services execute admitted operations and recover their receipts;
+they do not encode the scenario's next business phase. A managed worker may
+coordinate other Agents through the same scoped creation, session and request
+operations defined by the [session execution RFC](agent-session-execution-modes-v0.md#reusable-agent-operations-and-continuation-ownership).
+Keep the manager application thin and shared state transitions in their typed
+owners. Do not build a second scheduler in the manager or provider adapter.
 
 ### 5.3 Authority that enables work
 
@@ -179,13 +219,23 @@ Do not put the entire handoff inside Goal Vision's bounded summary or expand eve
 
 ### 5.5 Responsibility discovery and receiver-owned planning
 
-Discover all registered active Goals and their agents within authorized host scope. Stopped Goals are excluded by default but can be requested. Discoverability, read access, context delivery and execution permission are four separate facts. “Best effort” means the manager investigates role, current work, repository and availability; it does not mean broadcasting private context or guessing an identity.
+**Broad discovery is the owner default.** The private steward discovers the owner's registered Goals and Agents across the local host and already-authorized connected sources, without requiring per-recipient enrollment just to find them. Search and pagination must reach the full permitted inventory; a small prompt or first-page limit is not a smaller discovery scope. Keep stopped Goals available through history/search, while excluding them from default work assignment. Offline, unbound, capacity-limited and unknown-presence Agents remain discoverable with their actual state.
+
+Discoverability, evidence read access, context-delivery grants and execution readiness are separate facts. A narrow delivery allowlist must not become the owner discovery catalog or justify “no Agent exists.” A discovered relevant owner without a delivery grant is a specific delegation gap, with an existing configuration/recovery route; missing runtime evidence is an unknown-readiness gap. Reuse the broad authorized inventory for investigation, then check the requested effect separately. Shared/external audiences receive only their authorized metadata and evidence; owner-private coverage does not implicitly become group-visible coverage. Do not broadcast private context, discover arbitrary unconnected hosts or expand execution authority through discovery. These are target defaults; the current recipient catalog alone does not implement them.
+
+The existing manager context-delivery catalog now excludes Goals marked stopped in its selected registry, and delivery rechecks that activation guard before creating or replaying an inbox request. A malformed activation state cannot grant a recipient. This is one admission boundary only: a lagging global mirror still needs source-authority reconciliation, and registration does not establish a live session, executable capacity, suitable model or a returned result. Explicit inspection of a stopped Goal remains separate from delivering it new work.
 
 Prefer the explicitly named receiver; otherwise resolve the best responsible agent from current state. A missing convenience routing profile must not make a known authorized worker nonexistent. Avoid fixed per-request catalogs as the only responsibility model. If several agents fit, choose an assessment owner and say why; clarify only when ambiguity materially changes authority or outcome. If no worker is suitable, do the permitted work locally or report the actual missing capability. Do not silently start a new user task or wake a stopped Goal.
 
 The receiver gets the packet at a supported safe interaction boundary. The existing turn-start hook is the baseline; an attached runtime may support prompt delivery at its next safe continuation point. Always publish whether the target is reachable, queued until wake, or unsupported. Inbox storage does not prove injection into a model session, and injection does not prove adoption.
 
 The receiver compares the new request to current state, records adopted/partially adopted/deferred/rejected with a concise reason, and applies any plan change through its own canonical Todo/Vision workflow. `partial` must identify the accepted and unresolved parts. A deferred outcome names a resume condition and owner; it must not silently close an execution request still owed. Explicit cancellation/reprioritization requires the corresponding current authority and receipt.
+
+For a cross-Goal question such as “assess a market-positioning opportunity and propose a PR,” the steward resolves responsibility in two passes. Admission first requires an authorized audience/Goal scope, a Goal that has not stopped, current Agent registration, and a supported delivery path. Then it ranks the admitted candidates by accepted responsibility and recent relevant work, resolvable evidence and source freshness, current session/Turn reachability, and the configured model/runtime's ability to perform the requested investigation. A registered identity alone is not a live session; a live session alone does not make its Goal authoritative for this topic. A paused, failed or absent session may be queued only when its managed wake and return path are qualified, and the user sees that queued state. A model preference may break ties but cannot override scope, permission, responsibility or a stopped Goal. The selection includes the reason and the evidence basis; uncertain signals stay unknown instead of becoming an invented score.
+
+The steward sends one source-linked consultation or delegated-work request to the selected receiver, carrying the original question, relevant prior decisions, the requested answer or PR outcome, and the original frontend/Lark return route. The receiver's assessment and any PR/validation receipts return through the existing request/result outbox; the steward may synthesize the answer, but the original route receives the result or an actionable failure without a second user prompt. A duplicate provider callback for the same source event must recover that request and answer-delivery receipt, not create another model run or another visible answer. Independently sent identical text remains a distinct request. Qualify this with one real active worker, one stopped/registered-only decoy, one model-fit alternative, frontend and Lark readback, a lost ACK, and a receiver that defers or fails after inbox delivery. Until this journey passes, a recipient catalog or “context delivered” receipt is discovery progress, not completed delegation.
+
+**Discovery implementation checkpoint.** The existing manager/context read tool now has an `agents` view over the complete permitted registry, with responsibility search, pagination and explicit stopped-history opt-in. It reads independently of the progress snapshot's Agent cap and sender-bound delivery list. Local owner scope is broad by default; Goal Chat and external audiences retain their scope. CLI and authorized SSH exports share the reader. Registration, declared responsibility, context delivery permission and unchecked execution readiness remain distinct. This qualifies a bounded read/diagnostic slice of A24, not worker selection, launch, adoption or original-route completion; prompt-only adapters and older remote installations remain explicit coverage gaps. Continue A24 through existing delivery configuration, actual worker execution and result return before claiming the golden query passed.
 
 ### 5.6 One exchange, independent durable facts
 
@@ -205,6 +255,32 @@ Migrate current inbox/tracking/roundtrip records into the single collaboration o
 At-least-once delivery with idempotent Core effects is the target. Do not promise exactly-once external effects: uncertain sends are reconciled using provider receipts before retry. Concurrent workers use existing claims/leases; delegation does not claim the worker's Todo. Cross-host operation uses configured transport and authority, not a bare local path copied to another machine.
 
 The receiver commits result/evidence links and audience-ready text. The manager may synthesize multiple worker outcomes into one answer, maintaining request-level coverage. A deterministic outbox delivers an already committed result even if the manager model is unavailable. If synthesis is required, persist that duty; do not let an optional synthesis step erase the worker's result. Model retries never replay an already accepted action.
+
+#### Hierarchical delegation and autonomous progress
+
+An Agent may delegate a bounded subproblem and remain responsible for integrating
+its result. Record parent/request lineage without treating it as a grant. At
+each hop, scope, allowed effects, depth, total fanout and shared budget remain
+within effective authorization; child creation does not multiply the team's
+resource allowance. Reuse an existing peer when appropriate. Cancelling one
+request affects only its owned descendant executions, not a shared Agent's
+unrelated work. Detect wait cycles and release unnecessary execution slots
+while awaiting children, so parents cannot consume all child capacity.
+
+Return follows the real dependency: child artifact -> receiver validation and
+adoption/rejection -> parent integration -> original requester. Directly
+forwarding a grandchild's output to the lead does not prove the intermediate
+Agent coordinated or accepted it. Messages use the shared inbox/queue/steer
+policies; receiving a message cannot grant a claim, alter intent or accept work.
+
+Extend A6/A8/A13 with a three-level synthetic journey and two input revisions.
+The lead retains substantive work of its own; an intermediate worker decides
+whether another peer is needed. Freeze the objective, constraints and injected
+failure, not the team roster or phase sequence. At least one revised delegation
+must originate from an Agent's response to contradictory evidence. Record
+request/decision references and adoption facts, not private reasoning traces.
+The harness may inject faults and check invariants; it must not supply every
+next phase, manually forward results or certify success from message counts.
 
 ### 5.7 Session and product continuity
 
@@ -278,6 +354,10 @@ The same contract works when a research worker asks another worker to counterche
 
 | Current seam | Target | Retirement condition |
 | --- | --- | --- |
+| `review_packet.py` context assembly | `handoff/project_agent_context.py`, shared by full packet and direct handoff-only | Shared source assembly is implemented; duplicate packet-owned derivation removed |
+| `review_packet.py` human judgment, gate display and rendering | Retained presentation adapter | Owns no generic handoff state or new authority |
+| Handoff length control, fragmentation and reassembly | Channel codec plus `handoff restore` receiver | Real producer/receiver CLI validates complete fields, strict errors and in-budget compatibility; no Lark/cross-host qualification |
+| Handoff request identity, assessment, result and recovery | M2/M3 collaboration owner | Separately qualified; codec digests are neither request identity nor ownership receipts |
 | Manager inherits Chat planning-only restrictions and JSON preview fallback | Dedicated capable-manager role using native host tools and accepted effect receipts; keep explicit plan-only mode for users who select it | M1 proves ordinary authorized actions and restricted-mode parity; remove contradictory manager instructions |
 | Manager context inbox plus same-Goal Todo-handoff rules | One collaboration work-request contract with referenced semantic context and intent-specific admission | M2 lossless migration and two-consumer conformance; remove duplicate identities and transitions |
 | `manager_context` owns generic dispatch/decision semantics in Python | Core TypeScript collaboration domain; Python calls the typed boundary and adapts runtime/channel I/O | Switch one writer after differential tests, then delete the old decision implementation |
@@ -302,8 +382,12 @@ SemanticContext {
   revision, digest, brief, source_refs[], work_revision_refs[],
   access_scope_ref, omissions[]
 }
+DispatchAttempt {
+  attempt_id, request_id, request_revision, target_ref, intent,
+  effectful, state, supersedes_attempt_ref?
+}
 Observation {
-  event_id, request_id, request_revision, actor_ref, event_kind,
+  event_id, request_id, request_revision, attempt_ref?, actor_ref, event_kind,
   evidence_refs[], result_ref?, recorded_at
 }
 ```
@@ -312,16 +396,56 @@ Observation {
 
 Validate reference access before presenting context. A summary may be model-authored but retains its sources, authorship and revision; a host validates envelope identity and authority. Oversized context is retained as an access-controlled artifact and a disclosed projection; if it cannot be stored/read, reject with a recoverable context error rather than claim a complete handoff. Existing summaries need no global budget increase.
 
+#### Request identity and result routing across a team
+
+Keep creation ancestry, work dependencies and communication routes distinct.
+The Agent that created a worker need not be the requester of its next work.
+A peer can address another authorized peer without relaying through the parent
+model; that address grants neither resource access nor a work claim. The proposed contract's
+`request_id`, `attempt_id`, `sender_ref`, `target_ref` and `return_ref` represent the needed relations. Do not add a parallel work-ID scheme or infer
+return ownership from the runtime tree.
+
+A host may consume several messages in one model turn. Distinct requests still
+retain independent assessment, result and acceptance relations; a turn ID or
+one final answer cannot settle all of them. A correction to one request remains
+a revision of that request, not a new task merely because another turn starts.
+
+Commit the result and its scoped artifact references before notifying the
+requester. Activity events may update a historical UI turn, but are hints to
+read the result, not its body or acceptance. Preserve/re-offer the committed
+result through the existing outbox until the exact return is acknowledged;
+transport delivery, receiver consumption and work acceptance are separate facts.
+If the originating session is gone, resolve its logical return route under the
+same audience boundary. Do not rerun completed work just to regenerate a reply.
+
+Waiting is observation, not a join or another scheduling owner. Subscribe before
+checking durable pending results, then recheck after wake/reconnect; coalesced
+notifications cannot replace result storage. A join uses canonical dependency
+identities, current artifact versions and independent acceptance. Interrupted,
+rejected or missing results must remain visible even without a final answer.
+Only the binding's continuation owner may admit a new execution opportunity;
+a final-answer event cannot implicitly restart an idle coordinator.
+
+Extend A8/A10/A18 with one sibling-request fixture: a root creates B, A and D
+request distinct work from B, and B receives both in one host turn. Each requester
+must recover only its own result after disconnect; the root's activity view
+cannot substitute for either return. Include a result arriving during coordinator
+finalization, an interrupted member with no answer, and a lost notification after
+result commit. These remain proposed cross-host acceptance, not a claim that
+all current adapters provide durable wakeup.
+
 State is projected from accepted observations along independent axes:
 
 | Axis | Legal evolution and invariant |
 | --- | --- |
-| Assignment/delivery | unassigned → assigned → inbox-persisted → presented; reassignments create attempt identities; presentation names an actual host turn, not a CLI fetch alone |
-| Assessment/work | pending → accepted / partially-accepted / deferred / rejected; accepted work may run and resolve; deferred remains open with a condition; accepted is not completed |
-| Control requests | correction / cancellation / expiry are recorded requests or conditions; cancellation becomes effective only at an acknowledged safe boundary, expiry prevents new dispatch but does not undo an in-flight external effect |
-| Result delivery | absent → result-committed → pending-send → sent-verified; failed or uncertain sends retain the result; uncertainty requires reconciliation |
+| Assignment/delivery | unassigned → assigned → inbox stored → presented; reassignment creates an immutable attempt identity; presentation requires a real host Turn, not a CLI fetch alone |
+| Judgment/work | pending → accepted / partially-accepted / deferred / rejected; accepted work can execute and resolve; deferred work remains open with its condition; acceptance is not completion |
+| Control request | correction/cancellation/expiry is recorded as a request or condition; cancellation takes effect at an acknowledged safe boundary; expiry blocks new dispatch, not an in-flight external effect |
+| Result delivery | absent → committed result → pending send → verified delivered; failure/ambiguity preserves the result and ambiguous sends reconcile first |
 
-Every observation is appended once by event identity with compare-and-set on the request revision. Repeated identical events return the prior receipt; changed payload under that identity conflicts. Core effects return accepted/rejected/conflict/already-applied observations through the existing effect-interpreter seam. Reassignment cannot erase an active execution claim. If the old worker is unreachable, record the uncertainty and preserve the claim until its existing lease/transfer rules permit another executor.
+Each observation is append-once by event identity. A request-head compare-and-set authorizes a new dispatch, assessment or effect attempt against the current request revision. Evidence and receipts for an already authorized attempt remain appendable against that attempt's immutable request revision after the request head advances; they must not be rebound to the new head or rejected merely because a correction or cancellation arrived later. Same-event retries return the prior receipt; changed payload under one identity conflicts. Core effects return accepted/rejected/conflict/already-applied observations through the existing effect interpreter.
+
+At most one effectful attempt for a request may hold the request-level execution fence across all revisions. A correction or reassignment cannot authorize another effectful attempt until the prior attempt is proved non-executing through acknowledged cancellation, expiry plus an enforceable fence, or the applicable Todo/lease transfer receipt. If no owner can enforce that boundary, the new receiver may inspect and prepare but must not execute a conflicting effect. Consultation may use multiple non-effectful attempts. Reassignment never erases an active execution claim.
 
 A durable pending request carries a next wake/recheck condition through the existing host scheduling owner. Busy, offline, unsupported delivery, dependency wait and missing input are explicit observations, not repeated model polls. When deferred work becomes eligible, wake or present it once through the supported adapter. A result can be terminal failure/rejection, but incomplete work is not converted into success merely to empty the inbox.
 
@@ -345,7 +469,7 @@ Parallel work does not imply isolated execution resources. Reuse runtime seriali
 
 ### 5.12 Integration with alignment, authority and the TS kernel
 
-**Classify the requested change before selecting its writer.** Consultation can return evidence without a Todo. An in-intent lane correction uses the receiver's existing Vision/Replan/Todo path. A shared dependency or work-graph change that requires an amendment under the alignment contract uses its proposal/admission path; changing shared objective, acceptance, non-goals, permissions or stop conditions never becomes a lane edit merely because the manager requested it. Stage 2 admission has `canonical_effect: none`. Until the corresponding governed commit class is implemented and qualified, retain the proposal and report that precise execution gap; continue unrelated authorized work. Do not invent a manager commit endpoint, peer vote or additional routine human confirmation. Once available, automated amendment uses the qualified Stage 3 `GoalAmendmentAuthority` commit owner's pre-authorized policy/verifier, exact-basis CAS and receipt; peers rebase or receive the specified in-flight-work disposition.
+**Classify the requested change before selecting its writer.** Consultation can return evidence without a Todo. An in-intent lane correction uses the receiver's existing Vision/Replan/Todo path. A shared dependency or work-graph change that requires an amendment under the alignment contract uses its proposal/admission path; changing shared objective, acceptance, non-goals, permissions or stop conditions never becomes a lane edit merely because the manager requested it. Stage 2 admission has `canonical_effect: none`. Until the corresponding governed commit class is implemented and qualified, retain the proposal and report that precise execution gap; continue unrelated authorized work. Do not invent a manager commit endpoint, peer vote or additional routine human confirmation. Each amendment class requires its own qualified policy/verifier/commit path. The first Stage 3 `GoalAmendmentAuthority` slice authorizes only intent-preserving `shared_work_graph`; it cannot commit acceptance, non-goal, permission, objective or stop-condition changes. Once a class is separately qualified, reuse that class's commit owner, exact-basis CAS and receipt; peers rebase or receive the specified in-flight-work disposition.
 
 Current amendment admission requires a causal replan obligation and affected Todo IDs. It is not the generic inbox for consultation or pre-Todo work; do not fabricate those records to admit an ordinary request. An adopted handoff separately links actual replan/work settlement. Effect Program, Turn and quota receipts retain their current identities and owners; none becomes a request-completion receipt by aliasing its ID.
 
@@ -354,6 +478,8 @@ Current amendment admission requires a causal replan obligation and affected Tod
 **Separate request state from coordination and transport state.** Reuse the existing manager request ledger as the migration source for the general collaboration ledger; it owns intent/assessment/result relations, not copied editable Todos. The shared-authority v0 coordination head remains scoped to its reviewed Todo/claim/lease/gate/receipt semantics. Conversation and semantic brief bodies, raw artifacts, transport attempts and scheduler cursors remain with their existing capability/artifact/adapter owners. Use scoped references between them. Do not add these families to a generic `next_projection` merely because the store accepts JSON. Physical storage may be shared only with independent namespaces, access/retention contracts and reviewed schema compatibility. No provider deployment is required to introduce the request contract.
 
 **Commit within each actual authority boundary; reconcile across boundaries.** A request transition and its own receipt must publish atomically under its owning transaction. A Todo/lease mutation retains its existing lock or promoted authority's state/event/receipt CAS. If adoption also updates work state, persist the effect intent, call that owner, and link its exact receipt; a crash between the two commits leaves a recoverable pending relation. It must not manufacture an atomic request-plus-Todo commit across independent stores. Cross-Goal handoff likewise carries each Goal's basis and receipts, with explicit partial outcomes, not a distributed transaction or shared synthetic revision. Use the existing effect-interpreter, journals and recovery paths; no new workflow engine is required.
+
+**Serialize request-derived amendment cancellation through the existing owners.** Follow [alignment §5.1](shared-goal-alignment-and-governed-amendment-v0.md#51-source-request-reservation-and-cancellation-ordering): request-owner CAS reserves one exact effect under the request fence; the qualified Goal amendment owner atomically settles that operation as committed or aborted. Later corrections/cancellation block new work but remain pending for the reserved effect until its terminal receipt is linked. A source-liveness read followed by an independent Goal CAS is not a cancellation fence. Missing receipts or expired leases cannot release the reservation; conditional abort must durably prevent a delayed original commit. This is a narrowly scoped extension of the existing request fence and amendment operation receipt, not a second Goal writer or a general distributed transaction. Expose pending cancellation versus already-committed effect consistently in frontend, Lark and CLI. Until the selected profile qualifies this protocol, request-derived amendments remain admission-only.
 
 **Honor the selected source per Goal.** Before promotion, existing legacy commands remain the writer. After promotion, call the selected canonical authority; an empty result stays empty and provider failure never falls back to stale Markdown or lease files. Markdown remains a permanent readable projection, not a retired UI or a second writer. SSH transport reachability is independent of shared-provider adoption. A received message grants neither a fresh claim nor authority to compute through an expired fence. Authorized independent reads may continue during a provider outage; controlled writes obey the authority contract.
 
@@ -379,6 +505,20 @@ Stage A replaces the current Todo note; it does not provide immutable historical
 **M2/M3 deliver the product bridge.** Preserve the public CLI and digest path while introducing ordinary manager/worker invocation of the same typed effects. The owner should be able to ask “let the other agent continue, preserving the failed approach and my correction” without manually exporting JSON or repeatedly approving an already authorized request. Expose prepared context, actual receiver assessment, Todo ownership readback and result delivery as distinct facts in existing frontend/Lark views. Automatic presentation/start, cross-host artifact resolution and automatic return are integration work, not capabilities already shipped by #4094. Frontend or Lark text must not mint a transfer grant.
 
 Qualify worker→worker through this adapter as the concrete second M2 consumer **only after** it consumes the general request/context and emits the shared assessment/result/return relations. A standalone `adopt` success is insufficient. Reuse the Stage A real CLI fixtures for context readback, stale note/revision, lease rejection, unavailable artifacts, ordinary foreign-owner claim rejection, operation replay and uncertain-write recovery. Keep context separate from action/actor/target/revision fields: operational-key collisions and scalar/array roots fail before mutation, with revision/note/owner/receipts unchanged. Add A5/A7/A13–A16 integration cases: a rejected approach plus correction changes receiver planning; historical replay does not prove current ownership; the final conclusion returns without a manager-only dependency. Retiring the old caller requires this evidence and the TS §5 review artifact; no new generic continuation framework is a prerequisite.
+
+### 5.14 Steward adoption of the reusable conversation work surface
+
+The shared [conversation work surface](intelligent-review-presentation-surfaces-v0.md#88-reusable-conversation-work-surface) owns adaptive reports, truthful event presentation, Turn-scoped stop/steer, reconnect and cross-channel density for all LoopX conversations. This RFC applies those same rules to the steward's owner conversation; it owns recipient selection, receiver assessment and the original-route return. A manager-specific answer format or transport must not become a second presentation authority.
+
+Routing uses §5.5 rather than a static Agent name list. For a product-design request addressed to the steward, first inspect authorized current Goal, registration, claimed work and fresh session reachability; then rank eligible receivers by responsibility and context, with model/profile fit and actual capacity as separate constraints. Explain the selected recipient or the exact gap. The receiver must acknowledge and assess the full corrected intent, then either work or defer with an owner and condition. The original conversation receives the assessment and final evidenced result through §5.6; the catalog, a stored inbox request and a spinner are three distinct incomplete states. This must pass with a real active worker plus stopped, registered-only, stale and model-mismatched decoys before advertising automatic delegation.
+
+Delivery now prioritizes one complete supported intent→receiver→work→result journey, with the shared report, activity and stop/steer behavior needed by that journey. Do not make routing wait for presentation polish across every channel. Frontend and Lark still need separate real acceptance before an equivalence claim. Characterize and retire duplicated answer-shape prose and message/Turn correlation rules where parity is proven.
+
+The [golden-query pack](../../product/use-cases/steward/golden-queries.md) supplies short user requests and independent outcome/attention oracles. GQ01/GQ02 qualify creation and existing-Agent connection; GQ03/GQ04 qualify responsible dispatch; GQ05/GQ11–GQ13 qualify two-cycle small-team coordination, with GQ07–GQ09 continuity; GQ06/GQ10/GQ14–GQ15 extend materials, attention and replanning. GQ16/GQ17 remain later cross-host/scale qualification. These are scenario tests over existing A1–A24, not new Core protocol states.
+
+When routing fails, distinguish unread/unavailable sources, incomplete or stale directory coverage, no relevant registered owner, unauthorized scope, missing binding, unknown runtime readiness, capacity wait and receiver rejection. Probe/refresh permitted sources and repair an eligible binding through its owner before asking the user to locate an Agent. Registration grants neither reachability nor authority. If no existing receiver qualifies, an already-authorized creation path is valid; otherwise retain the request and ask only for the concrete missing decision. Never select an irrelevant sole candidate or silently replace an explicitly requested model. A well-written recommendation with no requested dispatch is still an undelivered task.
+
+Ordinary follow-ups retain the responsible owner; direct small reads need no team. One binding retains one execution driver. Existing request/outbox and continuous-monitor owners handle event-driven continuation and delayed return; do not compensate with faster polling. Retain useful constraints through scoped context, distinguishing preference, current fact and action grant; optional memory providers remain optional. GQ03's CI example requires causal evidence and all other review blockers, not a blanket approve policy.
 
 ## 6. Alternatives and disposition of #4306
 
@@ -430,24 +570,28 @@ The following IDs are durable acceptance anchors for engineering Todos and PRs. 
 | --- | --- | --- |
 | A1 | Owner asks about a real local repository and remote PR | Manager independently reads normal tools, pins actual revision and gives an evidence-backed answer without a special PR provider |
 | A2 | Local cache unavailable; alternate permitted source works | Manager completes the investigation; real denial is reported accurately and not circumvented |
-| A3 | One persistent grant, two requests and a runtime restart | Permitted work proceeds without repeat approval; revoked/out-of-scope actions do not |
+| A3 | One persistent grant, two requests and a runtime restart; revoke before a queued mutation executes; untrusted repository/web text requests a grant or instruction change | One reversible non-Core host mutation succeeds with readback under the standing grant without repeat approval; the revoked queued mutation is rejected before execution; untrusted content remains data and cannot change effective grants/instructions; out-of-scope effects do not run |
 | A4 | Active worker absent from convenience routing profile | Current registered responsibility is discovered; correct authorized receiver selected; stopped targets remain excluded |
 | A5 | Three linked user messages including a correction and prior rejected approach | Receiver explains the intended change, preserved constraints and actual Todo/Vision consequence without asking the user to retype context |
-| A6 | Manager→worker and worker→worker run the same handoff fixture | Same identity, revision, assessment, state links and return semantics, including cross-Goal consultation without an initial Todo and a second review round of one Todo; no second task database |
-| A7 | Duplicate ingress, correction/cancellation during execution, concurrent claim, repeated same-Todo review and crash after a non-Core effect | No duplicate accepted effect; revision conflict is reconciled; no silent priority/ownership override |
+| A6 | Manager→worker and worker→worker run the same handoff fixture | Both paths use the same identity construction and invariants—not the same literal ID across distinct requests—for revision, assessment, state links and return, including cross-Goal consultation without an initial Todo and a second review round of one Todo; no second task database |
+| A7 | Duplicate ingress; correction/cancellation races a late receipt and a request-derived amendment commit; effectful pre-Todo reassignment; concurrent claim; repeated same-Todo review; crash after a non-Core effect | An authorized old attempt can append its exact receipt after the request head advances without authorizing new work; no duplicate effectful attempt executes; an obsolete unreserved source cannot commit; reserved commit/abort races follow alignment §5.1, including crash, lost reply and delayed executor cases; no false cancellation or silent priority/ownership override |
 | A8 | Worker finishes while manager/transport restarts | Result survives; original audience receives it automatically; ambiguous send is reconciled, not blindly repeated |
 | A9 | Long response and truncated protocol trailer | Full valid answer is preserved and recoverable; no leaked protocol, lost obligation or replayed action |
 | A10 | Owner frontend and authorized Lark conversation | Consistent request facts; truthful queued/assessed/resolved/delivery states; different audiences remain isolated |
 | A11 | Registered SSH host unavailable or older receiver | Coverage and pending route are explicit; local mentions do not pretend to be remote evidence; recovery resumes correctly |
 | A12 | Model/session/tool-profile upgrade | Compatible session resumes; incompatible recovery preserves constraints and pending requests; effective configuration is visible |
 | A13 | Work spans two days; replace the executable session after an accepted plan, a rejected approach and a later correction | Receiver reconstructs current commitments and unresolved obligations from canonical state/context; refreshes time-sensitive evidence; explains its actual plan delta and returns the owed conclusion without silently reviving the rejected path or requiring the original transcript |
-| A14 | Handoff includes a relevant image/document and reaches a different configured host through a text-only channel | Receiver observation ties actual read/extraction to the artifact revision and its effect on obligations/plan, or gives an explicit no-read reason; no false read receipt, private disclosure or sender-local-path assumption |
-| A15 | Same handoff fixture against unpromoted and explicitly configured promoted Goal sources; provider outage and crash between request/work commits | Exactly one selected work-state writer; no fallback on canonical empty/failure; original work receipt is recovered and linked without duplicate effects; a pending request relation remains distinguishable from a committed work change |
-| A16 | Receiver lane replan versus shared amendment, stale basis and peer-held work | Lane edits stay inside intent and authority; proposal admission changes no Goal; unsupported commit is explicit; a supported amendment requires the qualified Stage 3 `GoalAmendmentAuthority` commit owner's exact receipt and peer rebase/lease disposition, never just manager or verifier prose |
+| A14 | Authorized handoff carries a decision-relevant image/document through a text-only entry point to another configured host; paired denied and unavailable cases use the same fixture | Positive case proves remote retrieval/extraction, artifact version and a concrete effect on the receiver's obligation or plan. Negative cases record the exact unread reason without fabricated receipt, private disclosure or sender-local path dependence |
+| A15 | Same handoff fixture on legacy and explicitly promoted Goal sources; provider offline; crash between request/work commits | Exactly one selected work-state writer; canonical empty/failure never falls back; recovery links the original work receipt without replay; request-pending and work-committed states remain distinct |
+| A16 | Receiver replan and shared amendment; stale basis; peer-held work; source request corrected/cancelled while commit races | Route changes stay inside intent/permission; admission does not change the Goal; unsupported commit remains explicit. A supported amendment requires the separately qualified commit class, exact receipt and peer rebase/lease disposition; a request-derived proposal additionally requires the exact source reservation and Goal-owner terminal receipt from alignment §5.1; repeat its A7 race matrix across both owners, including same-operation abort/recovery—not manager or verifier prose |
 | A17 | Abrupt loss before a fresh brief; replace the same Agent session with no recall provider, after an external action with uncertain outcome | Same Agent/new-session fixture preserves the work owner and does not fabricate a cross-Agent transfer grant or mutate the note merely to restore context; read back the actual claim/lease disposition. Last durable context and missing interval are explicit; reconcile uncertain effects, perform a justified next step and return without the old session |
 | A18 | Old session stays live or returns; concurrent replacement, cancellation and a late correction | Make the stale executor actually attempt a conflicting Core and external effect after replacement: reject at the owning enforceable boundary, or withhold replacement execution where fencing is failed/unsupported. Reconcile already submitted effects; test late return/correction/cancellation and read back current binding/claim; no duplicate effect or false cancellation |
 | A19 | Decision-gap recall with same-Agent replacement versus another Agent; disabled provider, stale index, timeout and zero hits | Stage 1 never auto-calls; Stage 2 requires qualified admission/readback. Reject out-of-scope returned rows; another Agent receives only explicitly authorized source-authored context, not raw private provider hits or archive access. No source impersonation; zero hits preserve unknown; no-provider continuation works; revalidate historical facts |
 | A20 | Context compaction and bounded projection omit a material rejected approach or unresolved question | Coverage exposes the omission; authorized drill-down restores required context or records a real gap; no unbounded TurnEnvelope, lost obligation or false completed handoff; frontend/Lark/CLI show the same actual restoration and result |
+| A21 | Short question and long evidence-rich investigation through owner Chat and Lark | The short answer is direct; the long answer has a readable conclusion, preserved full Markdown report, source/version links and bounded gaps. Frontend rendering treats model HTML as inert; Lark does not truncate away the conclusion or silently lose the report. Neither answer requires identical boilerplate sections |
+| A22 | Tool/progress events, reconnect, SSE replay and delayed final answer | The current phase and only host-emitted public activity are visible; replay deduplicates by event identity, keeps the complete final answer and does not restart the Turn. Failures and absent activity remain truthful |
+| A23 | Stop and steer an active Turn; stale button, duplicate ingress, completion race and unsupported adapter | Stop affects only the selected Turn and reports the actual outcome. Steering is received in that Turn or explicitly queued with a receipt; no correction silently disappears, later Turn stops, duplicate model run or worker cancellation |
+| A24 | Steward routes a product request to a responsible active Agent amid stopped, registered-only, stale and model-mismatched decoys | Fresh responsibility, authorization, runtime reachability, capacity and profile fit determine the recipient; receiver assessment, work and final evidenced conclusion return once to the original frontend/Lark conversation. Catalog discovery and inbox delivery alone fail |
 
 Run deterministic transition/compatibility tests, real installed-runtime qualification, then real frontend/Lark roundtrips with synthetic safe tasks and an authorized private canary. Record runtime/source versions and emitted receipts. Include mobile Lark and packaged frontend render/readback; backend tests alone do not pass A10. Provider receipt ambiguity and offline failure cases are required, not optional happy-path add-ons.
 
@@ -458,6 +602,29 @@ Measure ingress acknowledgement latency, first substantive response, handoff ass
 Target an ingress receipt within two seconds on a healthy local service, independently of model latency; this is an initial SLO to measure, not a model-response promise. Long work announces an actionable delay rather than emitting periodic noise. Cap model concurrency and per-turn investigation cost through existing runtime/Goal configuration; the manager's budget must not consume all worker capacity. Busy workers retain accepted work; queuing and next wake are visible.
 
 Use existing service recovery and receipt pumps. No manager-specific business automation for each kind of request. Expose configuration and failures through the existing CLI, capability settings and manager conversation. Troubleshooting distinguishes model failure, tool/policy denial, state conflict, unreachable receiver and transport formatting/delivery failure.
+
+**Accepted queue preparation failures (S1/S10, A12/A22/A23):** an accepted
+request owns a terminal outcome even before an adapter starts. A missing runtime
+asset, invalid workspace or failed session restoration must settle the affected
+queued Turn through the shared Chat lifecycle and release its claim. Waiting for
+an answer must observe that durable failure promptly, rather than wait for the
+model timeout while leaving runnable work behind. Keep the original typed
+provider failure where available; unexpected local preparation errors use
+`runtime_unavailable`, with private diagnostics retained locally. Cancellation
+and an already terminal result win over a late preparation error. Restoring the
+runtime must not replay a failed request; the same ingress identity returns the
+same failure, while a fresh explicit request can run after repair.
+
+The bounded Python queue repair uses the existing store's fenced failure and
+claim-release operations for all queue callers; Lark only translates the typed
+outcome. It does not create a separate manager scheduler or new TS authority.
+The TS turn-driver migration must preserve this pre-dispatch failure matrix
+alongside accepted-request recovery. Validate with a removed-release fixture,
+multiple queued requests, a stop race, same-identity redelivery and a fresh
+request after recovery. These qualify the preparation boundary, not successful
+owner selection, receiver adoption or the complete A24 journey. Operational
+recovery must also verify the service's actual installed release: a healthy HTTP
+listener alone does not prove its lazy-loaded runtime assets still exist.
 
 ## 11. Normative delivery plan
 
@@ -493,7 +660,7 @@ If this program changes a provider, retention or authority-source profile, its a
 
 ### 11.2 Execution order and integration receipts
 
-1. **Start M1; finish baseline reconciliation in that PR.** Record the exact source head and actual runtime/entrypoint call sites. Fix the owner-private profile and existing readback/feedback. Run A1–A3/A12. Do not deliver a standalone inventory framework.
+1. **Complete and qualify M1 through R1/R2 without rebuilding shipped profiles/entrypoints.** Record the exact source head and actual runtime/entrypoint call sites. Fix the owner-private profile and existing readback/feedback. Run A1–A3/A12. Do not deliver a standalone inventory framework.
 2. **Replace one complete M2 request transaction, then attach receivers.** Begin from `manager_context` request/tracking/return producers and both real consumers, including the shipped #4094 CLI continuation adapter (§5.13). Publish the before/after ownership map, migration mapping and the migration economics review artifact (§5.12). Preserve accepted work state through existing commands; qualify crash-between-commits and legacy/promoted sources before widening producer rollout. Use existing alignment source-basis reads, not a copied classifier.
 3. **Close M3 automatic return and user visibility.** Independent reply recovery can ship in parallel with steps 1–2. Integrate the generic producer only after its receipt contract is stable; exercise A8–A10, A13–A16 and A17/A20 across the actual entrance/receiver/return paths. With the source session gone, verify the same committed result/outbox identity, reconnect recovery and audience isolation through packaged frontend, Lark and CLI readback.
 4. **Promote a named M4 cohort and remove the replaced paths.** Keep provider default, Goal-intent authority and capability qualifications explicit. Shared-amendment commit integration follows its upstream readiness; until then the UI says proposal/admission or unsupported commit, never “Goal changed.” Provider source migration follows the shared-authority program rather than this release.
@@ -528,7 +695,7 @@ The external sources inform the design; they do not prove LoopX behavior. The na
 
 2026-09-13: reconciled shared-authority, shared-alignment and TS migration progress at the pinned baseline; added Sections 4.1–4.2, 5.12 and 11.1–11.2 plus A15–A16. Updated the companion RFCs and index, retained separate promotion/commit owners, and sharpened A13 elapsed-time and A14 actual-use evidence. No upstream qualification hold is waived.
 
-Record future decisions as dated links to reviewed changes, naming the normative sections affected. Preserve previous source revisions and unresolved requests. Do not turn an append-only delivery log into an alternate task authority.
+Later dated checkpoints live in the [per-entry ledger](ledger/capable-manager-semantic-handoff-v0/), one file per slice. Record future decisions as dated links to reviewed changes, naming the normative sections affected. Preserve previous source revisions and unresolved requests. Do not turn an append-only delivery log into an alternate task authority.
 
 ## Appendix C: Grok Bot product and implementation study
 

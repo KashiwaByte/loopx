@@ -30,6 +30,7 @@ from ..effect_program import ReceiptBoundMonitorPhase, ReceiptBoundReplayPhase
 from ..goals.goal_frontier import (
     build_goal_frontier_projection_context_from_status,
 )
+from ..quota.blocked_transition_notice import build_blocked_transition_notice
 from ..quota.error_codes import HeartbeatReceiptIdentityConflictError
 from ..agents.capability_memory import resolve_agent_capabilities
 from ..quota.goal_boundary import (
@@ -67,6 +68,8 @@ from ..scheduler.execution_context import (
     SchedulerExecutionContextResolution,
 )
 from ..todos.contract import (
+    TODO_STATUS_BLOCKED,
+    TODO_STATUS_DEFERRED,
     TODO_STATUS_OPEN,
     TODO_TASK_CLASS_ADVANCEMENT,
     TODO_TASK_CLASS_BLOCKER,
@@ -97,12 +100,12 @@ from ..todos.user_gate import (
 from ..work_items.capability_monitor_fallback import (
     build_capability_gate_with_monitor_fallback,
 )
-from ..work_items.planning_inventory import quota_runnable_action_candidates
 from ..work_items.primary_action import protocol_action_text as _protocol_action_text
 from ..work_items.work_lane import (
     lark_inbox_reply_due_work_lane_contract,
     operator_inbox_material_review_due_work_lane_contract,
     preserve_heartbeat_receipt_bound_work_lane,
+    receipt_bound_deferred_work_lane,
     scoped_user_gate_due_monitor_contract,
     work_lane_contract_is_lark_inbox_reply_due,
     work_lane_contract_is_operator_inbox_material_review_due,
@@ -227,6 +230,8 @@ def _blocked_priority_fallback(
         return None
 
     blocked_items: list[dict[str, Any]] = []
+    transition_notices: list[dict[str, Any]] = []
+    owner_visible_blocker = False
     for item in first_open:
         if not isinstance(item, dict):
             continue
@@ -258,6 +263,21 @@ def _blocked_priority_fallback(
         if not text:
             continue
         blocked_items.append(compact_todo_summary_item(item, text=text))
+        # A scheduled future monitor window is a deferral, not a blocker, so it
+        # never earns an owner notice. An advancement item that is blocked, or
+        # that waits on an unsatisfied resume condition, does: the owner is
+        # told why the higher-priority work is not moving while fallback
+        # delivery continues, without being asked to act.
+        if not future_monitor and (
+            status == TODO_STATUS_BLOCKED or resume_condition_pending
+        ):
+            owner_visible_blocker = True
+            notice = build_blocked_transition_notice(
+                item,
+                selected_executable=selected,
+            )
+            if notice is not None:
+                transition_notices.append(notice)
 
     if not blocked_items:
         return None
@@ -267,14 +287,22 @@ def _blocked_priority_fallback(
         "schema_version": "blocked_priority_fallback_v0",
         "kind": "blocked_priority_fallback",
         "severity": "warning",
-        "notify_user": False,
+        "notify_user": owner_visible_blocker,
         "requires_user_action": False,
         "reason": (
-            "a higher-priority agent todo is blocked, deferred, or scheduled "
-            "for a future monitor window before the "
-            "selected executable fallback"
+            (
+                "a higher-priority agent todo is blocked before the selected "
+                "executable fallback; the fallback continues and no owner "
+                "action is required"
+            )
+            if owner_visible_blocker
+            else (
+                "a higher-priority agent todo is deferred or scheduled for a "
+                "future monitor window before the selected executable fallback"
+            )
         ),
         "blocked_items": blocked_items[:3],
+        "blocked_transition_notices": transition_notices[:3],
         "selected_executable": selected_item,
         "recommended_action": (
             "Keep the blocked core todo visible in status while selecting fallback; "
@@ -422,6 +450,20 @@ def _build_agent_work_lane(
         ),
     )
     return monitor_only, work_lane, task_orchestration
+
+
+def _deferred_receipt_bound_work_lane(
+    *, todo_id: str, source_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Keep a deferred Todo's old receipt visible without selecting new work."""
+
+    if any(
+        normalize_todo_id(source_item.get("todo_id")) == todo_id
+        and normalize_todo_status(source_item.get("status")) == TODO_STATUS_DEFERRED
+        for source_item in source_items
+    ):
+        return receipt_bound_deferred_work_lane(todo_id=todo_id)
+    return None
 
 
 def _prepare_quota_should_run_item(
@@ -710,12 +752,25 @@ def _prepare_quota_should_run_item(
             and candidate.get("selection_binding") == "heartbeat_receipt"
         ):
             receipt_bound_agent_next_action = candidate
-            preserved_work_lane = preserve_heartbeat_receipt_bound_work_lane(
-                work_lane_contract,
-                selected_todo=candidate,
+            work_lane_contract = (
+                preserve_heartbeat_receipt_bound_work_lane(
+                    work_lane_contract,
+                    selected_todo=candidate,
+                )
+                or work_lane_contract
             )
-            if isinstance(preserved_work_lane, dict):
-                work_lane_contract = preserved_work_lane
+        else:
+            # The old Turn still owns its committed settlement identity, but a
+            # deferred Todo is not an executable candidate.  A successor may be
+            # selected only by a fresh Turn; do not leak it through work-lane
+            # fallback on this replay.
+            work_lane_contract = (
+                _deferred_receipt_bound_work_lane(
+                    todo_id=receipt_bound_todo_id,
+                    source_items=agent_todo_planning_source_items,
+                )
+                or work_lane_contract
+            )
     if inbox_priority_due:
         task_orchestration_contract = capability_gate = capability_monitor_contract = None
         capability_monitor_fallback = scoped_user_gate_fallback = workspace_guard = None
@@ -781,14 +836,12 @@ def _prepare_quota_should_run_item(
         recovery_allowed = False
         reason = str(projection_gap_repair.get("reason") or reason)
     boundary_projection_repair = None
+    # Resolve exact identity before Agent/display compaction. Live callers supply
+    # the complete source; pure status callers use only their supplied snapshot.
     requested_action_candidate = (
         build_explicit_advancement_next_action(
             agent_identity=agent_identity,
-            agent_todo_items=quota_runnable_action_candidates(
-                agent_id=agent_frontier_id or "",
-                agent_todo_summary=agent_todo_summary,
-                capability_gate=capability_gate,
-            ),
+            agent_todo_items=agent_todo_planning_source_items,
             available_capabilities=effective_available_capabilities,
             todo_id=requested_action_todo_id,
             selection_binding="pending_action_selection",

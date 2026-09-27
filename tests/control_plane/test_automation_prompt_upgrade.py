@@ -34,7 +34,7 @@ def fixture(tmp_path: Path, backing_kind="heartbeat"):
     registry = tmp_path / "registry.json"
     state = tmp_path / "STATE.md"
     state.write_text("# Fixture\n", encoding="utf-8")
-    registry.write_text(json.dumps({"goals": [{"id": "fixture-goal", "repo": str(tmp_path),
+    registry.write_text(json.dumps({"common_runtime_root": str(tmp_path / "runtime"), "goals": [{"id": "fixture-goal", "repo": str(tmp_path),
         "state_file": str(state), "registered_agents": ["agent-a"]}]}), encoding="utf-8")
     return home, path, database, registry, prompt
 

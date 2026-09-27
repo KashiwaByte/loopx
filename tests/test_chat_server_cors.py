@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import http.client
 import json
+import tempfile
 import threading
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from loopx.chat_action_store import ChatActionStore
 from loopx.chat_actions import ChatActionService
 from loopx.chat_server import ChatHTTPServer, ChatRequestHandler
+from loopx.chat_store import ChatSessionStore
 from loopx.control_plane.effect_runtime import (
     EffectRuntimePermanentIOError,
     EffectRuntimeStartupError,
@@ -25,6 +27,9 @@ def _start_server() -> tuple[ChatHTTPServer, threading.Thread]:
     server.selected_goal_id = None
     server.registry_path = Path("/tmp/loopx-test-registry.json")
     server.runtime_root_override = None
+    # The capabilities readback quotes the steward channel's Session, so a
+    # fixture server carries the store the real startup always installs.
+    server.chat_store = ChatSessionStore(Path(tempfile.mkdtemp()) / "runtime")
     server.scan_roots = []
     server.limit = 20
     server.runtime_controller = _RuntimeController()
@@ -202,6 +207,39 @@ def test_chat_action_context_cannot_persist_or_emit_overflowed_float(
         assert b"Infinity" not in response_body
         assert json.loads(response_body)["error_code"] == "invalid_action_preview"
         assert action_store.list() == []
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    "action", ["snapshot", "apply", "cancel", "regenerate", "reject", "defer"]
+)
+def test_missing_action_returns_the_same_http_error(
+    tmp_path: Path, action: str
+) -> None:
+    server, thread = _start_server()
+    server.action_store = ChatActionStore(tmp_path / "actions")
+    server.action_service = ChatActionService(
+        store=server.action_store, registry_path=tmp_path / "registry.json"
+    )
+    try:
+        response = _request(
+            server.server_address[1],
+            method="GET" if action == "snapshot" else "POST",
+            origin=None,
+            path="/api/actions/missing"
+            + ("" if action == "snapshot" else f"/{action}"),
+            body=None if action == "snapshot" else b"{}",
+        )
+        assert response.status == 404
+        assert json.loads(response.read()) == {
+            "ok": False,
+            "error": "typed Chat action proposal was not found",
+            "error_code": "action_not_found",
+        }
+        assert server.action_store.list() == []
     finally:
         server.shutdown()
         thread.join(timeout=5)

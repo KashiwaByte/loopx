@@ -144,6 +144,20 @@ def test_seed_reuses_scoped_memory_guard_not_an_import_permission() -> None:
         "revision_ref": "revision:synthetic-verification",
         "target_class": seed["target_class"],
         "content_summary": seed["content_summary"],
+        "experience": {
+            "schema_version": "procedural_experience_contract_v0",
+            "applicability": seed["applicability"],
+            "observed_outcome": seed["observations"][1],
+            "attribution": seed["observations"][2],
+            "future_behavior": {
+                "trigger": seed["applicability"][0],
+                "action": seed["procedure"][2],
+                "validation": seed["procedure"][5],
+                "stop_condition": seed["procedure"][4],
+            },
+            "limitations": seed["limits"],
+            "evidence_refs": [source_ref],
+        },
         "source": {
             "source_kind": "reviewed_learning_card",
             "source_ref": source_ref,
@@ -168,6 +182,7 @@ def test_seed_reuses_scoped_memory_guard_not_an_import_permission() -> None:
     candidate = build_scoped_feedback_reward_memory_candidate(event)["shared_candidate"]
     assert candidate["status"] == "review_ready"
     assert candidate["candidate"]["content_summary"] == seed["content_summary"]
+    assert candidate["guard"]["experience_quality"]["passed"] is True
     assert candidate["provider_write_performed"] is False
     assert candidate["external_writes_performed"] is False
     assert (

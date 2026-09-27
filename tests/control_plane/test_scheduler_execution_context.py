@@ -397,6 +397,23 @@ def test_app_heartbeat_settlement_keeps_automation_active_until_terminal(
     assert terminal["keep_active"] is False
 
 
+def test_peer_coordination_block_keeps_recoverable_heartbeat_active() -> None:
+    liveness = build_automation_liveness(
+        {
+            "effective_action": "peer_coordination_blocked",
+            "heartbeat_recommendation": {
+                "recommended_mode": "peer_coordination_blocked"
+            },
+            "execution_obligation": {"must_attempt_work": False},
+        }
+    )
+
+    assert liveness["keep_active"] is True
+    assert liveness["pause_allowed"] is False
+    assert liveness["automation_action"] == "keep_active_peer_coordination_backoff"
+    assert "peer activation capability" in liveness["next_trigger"]
+
+
 def test_goal_runtime_projects_typed_immediate_continuation() -> None:
     context = scheduler_execution_context_for_runtime_profile(
         SchedulerRuntimeProfile.ARK_MANAGED_AGENT_GOAL

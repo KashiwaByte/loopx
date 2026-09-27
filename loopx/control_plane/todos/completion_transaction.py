@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -284,6 +285,16 @@ def _valid_receipt(value: Any) -> bool:
         and value.get("stdout_captured") is False
         and value.get("stderr_captured") is False
         and value.get("local_path_captured") is False
+        and (
+            value.get("validation_declaration_sha256") is None
+            or (
+                isinstance(value.get("validation_declaration_sha256"), str)
+                and re.fullmatch(
+                    r"[a-f0-9]{64}",
+                    value.get("validation_declaration_sha256"),
+                ) is not None
+            )
+        )
     )
 
 
@@ -388,6 +399,16 @@ def _valid_execute_validation_result(result: Mapping[str, Any]) -> bool:
         and (
             effect.get("task_repository") is None
             or isinstance(effect.get("task_repository"), str)
+        )
+        and (
+            effect.get("validation_declaration_sha256") is None
+            or (
+                isinstance(effect.get("validation_declaration_sha256"), str)
+                and re.fullmatch(
+                    r"[a-f0-9]{64}",
+                    effect.get("validation_declaration_sha256"),
+                ) is not None
+            )
         )
     )
 

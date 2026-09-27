@@ -231,7 +231,7 @@ def test_cli_reports_effect_runtime_startup_failure_without_traceback(
     assert payload["schema_version"] == "loopx_start_goal_guided_v0"
     assert payload["error"] == "LoopX TypeScript control-plane runtime is unavailable"
     assert payload["diagnostic_code"] == diagnostic_code
-    assert payload["runtime_requirement"]["minimum_node_version"] == "22.18.0"
+    assert payload["runtime_requirement"]["minimum_node_version"] == "22.22.3"
     action = payload["recommended_action"]
     assert expected_action_fragment in action
     assert ("Node.js" in action) is mentions_node_installation
@@ -1933,8 +1933,6 @@ def test_ark_managed_agent_plans_todos_before_one_shot_goal_activation(
         f" --objective {shlex.quote(GOAL_TEXT)}"
         " --adapter-kind read_only_project_map_v0"
         " --adapter-status connected-read-only"
-        " --no-onboarding-scan"
-        " --codex-app-heartbeat ask"
     )
     assert actionable_connect_command in payload["message"]
     assert "preview the issue-fix route before todo writeback" not in payload["message"]

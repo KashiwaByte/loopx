@@ -34,6 +34,9 @@ def test_install_reconciles_both_roots_and_retires_codex_aliases(roots):
         skill(root, "loopx")
         skill(root, "loopx-pr-review")
         skill(root, "loop-global-summary")
+    # Cross-host import can rewrite the surface label and omit metadata.
+    for path in alternate.glob("*/SKILL.md"):
+        path.write_text(MARKER.replace("codex-skills", "Codex-skills"))
     rich = "# LoopX PR Review\n\nRun `loopx pr-review` first\n"
     skill(target, "loopx-pr-review", rich)
     readback.write_skill_install_readback(

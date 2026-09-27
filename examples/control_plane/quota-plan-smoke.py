@@ -524,7 +524,7 @@ def assert_outcome_floor_projected_blocker_quiet_noop() -> None:
     assert monitor_contract["agent_channel"]["must_attempt"] is True, monitor_contract
     assert monitor_contract["agent_channel"]["quiet_noop_allowed"] is False, monitor_contract
     assert "outcome-floor evidence" in monitor_contract["agent_channel"]["primary_action"], monitor_contract
-    assert "outcome-floor evidence" in monitor_decision["protocol_action_packet"]["summary"], monitor_decision
+    assert "protocol_action_packet" not in monitor_decision, monitor_decision
 
 
 def assert_control_plane_health_self_repair_should_run() -> None:

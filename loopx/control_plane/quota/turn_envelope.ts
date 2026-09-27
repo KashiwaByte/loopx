@@ -1,3 +1,4 @@
+import { EffectiveAction } from "./effective_action.generated.ts";
 import { createHash } from "node:crypto";
 
 import {
@@ -5,9 +6,10 @@ import {
   type JsonObject,
 } from "../effect_program.ts";
 import { EffectRuntimeRequestError } from "../effect_runtime_errors.ts";
+import { turnStartPromptBudgetBytes } from "../capability_hooks.ts";
 import { requireJsonObject } from "../runtime_decode.ts";
 import { projectPendingCapabilityIntent } from "../work_items/pending_capability_intent.ts";
-import { measureTurnEnvelope, TURN_ENVELOPE_BUDGET_BYTES } from "./turn_envelope_budget.ts";
+import { measureTurnEnvelope, turnEnvelopeBudgetBytes, TURN_ENVELOPE_SECTION_TARGETS } from "./turn_envelope_budget.ts";
 export { TURN_ENVELOPE_BUDGET_BYTES } from "./turn_envelope_budget.ts";
 
 export const TURN_ENVELOPE_SCHEMA_VERSION = "loopx_turn_envelope_v0";
@@ -255,6 +257,11 @@ function replanActionPacket(payload: JsonObject): JsonObject | null {
     "schema_version", "decision", "obligation_id", "uncovered_frontier",
     "required_outcome", "allowed_terminal", "bounded_frontier",
   ]);
+  // The typed replan owner supplies bounded instructions; do not truncate their
+  // authority/stop qualifiers through generic diagnostic compaction.
+  if (Array.isArray(source.planning_guidance)) compact.planning_guidance = source.planning_guidance;
+  const writeback = object(source.writeback_contract);
+  if (writeback.vision_authoring) compact.writeback_contract = writeback;
   return Object.keys(compact).length > 0 ? compact : null;
 }
 
@@ -294,9 +301,12 @@ function requiredReads(interaction: JsonObject, payload: JsonObject): JsonObject
   const result: JsonObject[] = [];
   for (const value of raw.slice(0, 5)) {
     const item = object(value);
-    const command = text(item.command, 360);
+    const promptBudget = item.source === "turn_start_capability_hook"
+      ? turnStartPromptBudgetBytes(item.prompt_budget_bytes) : 0;
+    const command = text(item.command, promptBudget || 360);
     if (!command) continue;
     const compact: JsonObject = { command };
+    if (promptBudget) compact.prompt_budget_bytes = promptBudget;
     for (const field of ["kind", "reason", "source"]) {
       const rendered = text(item[field], 240);
       if (rendered) compact[field] = rendered;
@@ -321,6 +331,22 @@ function boundary(payload: JsonObject): JsonObject {
   for (const field of ["write_scope", "available_capabilities", "requires_parent_approval"]) {
     const values = textList(source[field], 16, 180);
     if (values.length > 0) result[field] = values;
+  }
+  // Carry the already resolved approval from quota; dropping it leaves only
+  // the bootstrap approval requirement and strands authorized execution.
+  const approved = object(source.checkpointed_boundary_authority);
+  const approvedScopes = Array.isArray(approved.active_write_scope)
+    ? approved.active_write_scope.filter((scope): scope is string =>
+      typeof scope === "string" && scope.length > 0 && scope.length <= 180).slice(0, 16)
+    : [];
+  if (approved.schema_version === "checkpointed_boundary_authority_v0"
+      && Number.isInteger(approved.active_count) && Number(approved.active_count) > 0
+      && approvedScopes.length > 0) {
+    result.checkpointed_boundary_authority = {
+      schema_version: approved.schema_version,
+      active_count: approved.active_count,
+      active_write_scope: approvedScopes,
+    };
   }
   const guards = textList(source.guards, 8, 280);
   if (guards.length > 0) result.guards = guards;
@@ -362,7 +388,7 @@ function scheduler(payload: JsonObject, turn: ReturnType<typeof interpretQuotaSh
   const app: JsonObject = {};
   for (const field of [
     "host_surface", "apply", "host_action", "recommended_rrule",
-    "no_spend_for_cadence_change",
+    "no_spend_for_cadence_change", "execution_interval_policy", "guarantee",
   ]) {
     if (sourceApp[field] !== null && sourceApp[field] !== undefined) app[field] = sourceApp[field];
   }
@@ -491,6 +517,25 @@ function contractCapsule(
     );
     if (Object.keys(compact).length > 0) capsule[sourceKey] = compact;
   }
+  // Preserve the bounded source diagnosis; the generic capsule list path is
+  // for scalar lists and must not stringify structured component checks.
+  const diagnostics = object(payload.vision_continuation_audit).outcome_checkpoint_diagnostics;
+  if (Array.isArray(diagnostics) && diagnostics.length > 0) {
+    const audit = object(capsule.vision_continuation_audit);
+    audit.outcome_checkpoint_diagnostics = diagnostics.slice(0, 5).map((value) => {
+      const source = object(value);
+      const checks = object(source.component_checks);
+      return {
+        reason_code: text(source.reason_code, 80),
+        resolution_hint: text(source.resolution_hint, 420),
+        component_checks: Object.fromEntries([
+          "checkpoint_satisfied", "checkpoint_fresh", "path_outcome_valid",
+          "evidence_refs_present", "final_outcome_claim_present", "no_reported_outcome_gap",
+        ].filter((key) => typeof checks[key] === "boolean").map((key) => [key, checks[key]])),
+      };
+    });
+    capsule.vision_continuation_audit = audit;
+  }
   const taskScope = text(payload.task_scope, 80);
   if (taskScope) capsule.task_scope = taskScope;
   const workLane = object(payload.work_lane_contract);
@@ -552,7 +597,7 @@ function actionProjection(payload: JsonObject, protocolActionFields: JsonObject)
   const interaction = object(payload.interaction_contract);
   const agentChannel = object(interaction.agent_channel);
   const cliChannel = object(interaction.cli_channel);
-  const capabilityIntent = payload.effective_action === "governed_capability_intent"
+  const capabilityIntent = payload.effective_action === EffectiveAction.GOVERNED_CAPABILITY_INTENT
     ? projectPendingCapabilityIntent(payload.pending_capability_intent) : null;
   // A governed capability action has already won the live decision. Stale
   // replan/host-reentry projections must not replace its exact command.
@@ -560,11 +605,14 @@ function actionProjection(payload: JsonObject, protocolActionFields: JsonObject)
   const recommendedAction = replanPacket
     ? "apply replan_action_packet and emit one required semantic outcome"
     : text(turn.observation.recommended_action || payload.recommended_action, 480);
+  // The signed host action is executable authority, not a display summary.
+  // Budget diagnostics may warn on long commands but must not cut them.
+  const primaryAction = scalarString(agentChannel.primary_action, "agent_channel.primary_action").trim();
   const action: JsonObject = {
     recommended_action: recommendedAction,
     primary_action: replanPacket
       ? "produce one required semantic outcome"
-      : text(agentChannel.primary_action, 480),
+      : primaryAction || null,
     must_attempt: Boolean(agentChannel.must_attempt),
     delivery_allowed: Boolean(agentChannel.delivery_allowed),
     quiet_noop_allowed: Boolean(agentChannel.quiet_noop_allowed),
@@ -647,8 +695,33 @@ function actionProjection(payload: JsonObject, protocolActionFields: JsonObject)
   return projection;
 }
 
+function compactPeerActivation(contract: JsonObject, detailRef: string): JsonObject {
+  if (contract.mode !== "task_scoped_peer"
+    || Buffer.byteLength(JSON.stringify(contract), "utf8") <= TURN_ENVELOPE_SECTION_TARGETS.context) return contract;
+  const summary: JsonObject = {};
+  for (const field of ["schema_version", "mode", "coordinator_agent_id", "assignment_key",
+    "execution_scope", "task_selection", "execution_state", "activation_required",
+    "activation_allowed", "required_capability", "retry_policy", "terminal_outcome", "writeback_owner"]) {
+    if (field in contract) summary[field] = contract[field];
+  }
+  return { ...summary, delivery: "projected", read_required: true,
+    eligible_peer_count: Array.isArray(contract.eligible_peer_lanes) ? contract.eligible_peer_lanes.length : 0,
+    blocked_peer_count: Array.isArray(contract.blocked_peer_lanes) ? contract.blocked_peer_lanes.length : 0,
+    content_hash: canonicalHash(contract), detail_ref: detailRef,
+    instruction: "Read the envelope full_decision detail command before selecting or activating a peer task; counts are not executable lanes.",
+  };
+}
+
 function turnActionProjection(payload: JsonObject, protocolActionFields: JsonObject): JsonObject {
   const projection = actionProjection(payload, protocolActionFields);
+  const orchestration = object(projection.task_orchestration_contract);
+  if (Object.keys(orchestration).length > 0) {
+    const peer = object(orchestration.peer_activation_diagnostic);
+    projection.task_orchestration_contract = orchestration.mode === "adaptive" && Object.keys(peer).length > 0
+      ? { ...orchestration, peer_activation_diagnostic: compactPeerActivation(peer,
+        "full_decision.task_orchestration_contract.peer_activation_diagnostic") }
+      : compactPeerActivation(orchestration, "full_decision.task_orchestration_contract");
+  }
   const action = object(projection.action);
   const horizon = object(action.planning_horizon);
   if (Object.keys(object(horizon.detail_refs)).length > 0) {
@@ -662,7 +735,7 @@ function turnActionProjection(payload: JsonObject, protocolActionFields: JsonObj
   // Guidance must not crowd out the actionable contract. Preserve a signed
   // content reference to the existing full-decision route under budget pressure.
   if (Object.keys(context).length > 0
-    && Buffer.byteLength(JSON.stringify(projection), "utf8") > TURN_ENVELOPE_BUDGET_BYTES - 1_400) {
+    && Buffer.byteLength(JSON.stringify(projection), "utf8") > turnEnvelopeBudgetBytes(projection) - 1_400) {
     projection.agent_context = {
       schema_version: context.schema_version, phase: context.phase, scope: context.scope,
       target: "coordinator", authority: "guidance_only", delivery: "projected",

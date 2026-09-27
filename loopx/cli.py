@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from .cli_commands.automation_cadence import (
+    register_automation_cadence_command, handle_automation_cadence_command,
+)
+
 import argparse
 import sys
 
 from .cli_commands.agent_capabilities import register_agent_capabilities, handle_agent_capabilities
+from .cli_commands.agent_directory import register_agent_directory, handle_agent_directory
 from .cli_commands.agent_context import register_agent_context, handle_agent_context
+from .capabilities.multi_subagent.cli import (
+    register_native_child_commands, handle_native_child_command,
+)
 from .cli_commands.todo_continuation import register_todo_continuation, handle_todo_continuation
 from .cli_commands.manager_inbox import register_manager_inbox, handle_manager_inbox
+from .cli_commands.delegation import register_delegation, handle_delegation
 from .capabilities.content_ops.cli import (
     handle_content_ops_command,
     register_content_ops_commands,
@@ -70,12 +79,17 @@ from .capabilities.connector_registry.cli import (
     handle_connector_command,
     register_connector_commands,
 )
+from .capabilities.external_research.cli import (
+    handle_external_evidence_command,
+    register_external_evidence_commands,
+)
 from .cli_commands import (
     handle_turn_command,
     handle_benchmark_command,
     handle_bootstrap_connect_command,
     handle_canary_command,
     handle_coordination_shadow_command,
+    handle_authority_archive_command,
     handle_capability_command,
     handle_doctor_command,
     handle_dreaming_command,
@@ -106,6 +120,7 @@ from .cli_commands import (
     handle_task_lease_command,
     handle_authority_shadow_command,
     handle_version_command,
+    handle_usage_ping_command,
     handle_host_mode_plan_command,
     handle_worker_bridge_command,
     handle_workflow_skills_command,
@@ -114,6 +129,7 @@ from .cli_commands import (
     register_bootstrap_connect_command,
     register_canary_commands,
     register_coordination_shadow_command,
+    register_authority_archive_command,
     register_capability_commands,
     register_doctor_command,
     register_dreaming_commands,
@@ -148,6 +164,7 @@ from .cli_commands import (
     register_authority_shadow_command,
     register_todo_command,
     register_version_command,
+    register_usage_ping_command,
     register_host_mode_plan_command,
     register_worker_bridge_commands,
     register_workflow_skills_command,
@@ -159,6 +176,10 @@ from .cli_commands.opencode2_goal_worker import (
 from .cli_commands.shared_goal_alignment import (
     handle_shared_goal_alignment_command,
     register_shared_goal_alignment_command,
+)
+from .cli_commands.goal_acceptance import (
+    handle_goal_acceptance_command,
+    register_goal_acceptance_command,
 )
 from .cli_commands.goal_amendment_proposal import (
     handle_goal_amendment_proposal_command,
@@ -256,6 +277,8 @@ def build_parser() -> LoopXArgumentParser:
 
     register_first_run_report_command(sub)
 
+    register_usage_ping_command(sub, add_subcommand_format)
+
     register_opencode2_goal_worker_command(sub)
 
     register_worker_bridge_commands(sub, add_subcommand_format)
@@ -306,6 +329,8 @@ def build_parser() -> LoopXArgumentParser:
 
     register_connector_commands(sub, add_subcommand_format)
 
+    register_external_evidence_commands(sub, add_subcommand_format)
+
     register_ml_experiment_commands(sub, add_subcommand_format)
 
     _register_demo_commands(sub, add_subcommand_format)
@@ -327,8 +352,11 @@ def build_parser() -> LoopXArgumentParser:
     register_project_lifecycle_commands(sub, add_subcommand_format)
     register_goal_channel_commands(sub, add_subcommand_format)
     register_manager_inbox(sub, add_subcommand_format)
+    register_delegation(sub, add_subcommand_format)
     register_agent_capabilities(sub, add_subcommand_format)
     register_agent_context(sub, add_subcommand_format)
+    register_native_child_commands(sub, add_subcommand_format)
+    register_agent_directory(sub, add_subcommand_format)
     register_lark_inbox_commands(sub, add_subcommand_format)
     register_lark_kanban_commands(sub, add_subcommand_format)
 
@@ -343,11 +371,14 @@ def build_parser() -> LoopXArgumentParser:
     register_explore_commands(sub, add_subcommand_format)
     register_todo_command(sub, add_subcommand_format)
     register_coordination_shadow_command(sub, add_subcommand_format)
+    register_automation_cadence_command(sub, add_subcommand_format)
+    register_authority_archive_command(sub, add_subcommand_format)
     register_task_lease_command(sub, add_subcommand_format)
     register_authority_shadow_command(sub, add_subcommand_format)
     register_todo_continuation(sub, add_subcommand_format)
     register_handoff_mode_command(sub, add_subcommand_format)
     register_shared_goal_alignment_command(sub, add_subcommand_format)
+    register_goal_acceptance_command(sub, add_subcommand_format)
     register_goal_amendment_proposal_command(sub, add_subcommand_format)
     register_quota_command(sub)
 
@@ -418,6 +449,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "first-run-report":
         return handle_first_run_report_command(args, print_payload)
+
+    if args.command == "usage-ping":
+        return handle_usage_ping_command(args, print_payload)
 
     if args.command == "opencode2-goal-worker":
         return handle_opencode2_goal_worker_command(args, print_payload)
@@ -616,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
             effective_runtime_root(registry_path, args.runtime_root)
             if args.command == "decision-context"
             and args.decision_context_command
-            in {"recall-context", "prepare-evidence", "prepare-review"}
+            in {"recall-context", "prepare-evidence", "prepare-review", "capture"}
             else None
         ),
         output_format=output_format,
@@ -687,6 +721,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if connector_result is not None:
         return connector_result
+
+    external_evidence_result = handle_external_evidence_command(
+        args, output_format=output_format, print_payload=print_payload,
+    )
+    if external_evidence_result is not None:
+        return external_evidence_result
 
     registry_admin_result = handle_registry_admin_command(
         args,
@@ -766,10 +806,30 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "agent-context":
-        return handle_agent_context(args, registry_path, print_payload, output_format)
+        return handle_agent_context(
+            args,
+            registry_path,
+            effective_runtime_root(registry_path, args.runtime_root),
+            print_payload,
+            output_format,
+        )
+
+    if args.command == "native-child":
+        return handle_native_child_command(
+            args, registry_path, effective_runtime_root(registry_path, args.runtime_root),
+            print_payload, output_format,
+        )
+
+    if args.command == "agent-directory":
+        return handle_agent_directory(
+            args, registry_path, effective_runtime_root(registry_path, args.runtime_root),
+            print_payload, output_format,
+        )
 
     if args.command == "manager-inbox":
         return handle_manager_inbox(args, registry_path, effective_runtime_root(registry_path, args.runtime_root))
+    if args.command == "delegation":
+        return handle_delegation(args, registry_path, effective_runtime_root(registry_path, args.runtime_root))
 
     lark_inbox_result = handle_lark_inbox_command(
         args,
@@ -793,6 +853,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pr_review_result = handle_pr_review_command(
         args,
+        registry_path=registry_path,
         output_format=output_format,
         print_payload=print_payload,
         runtime_root=(
@@ -850,6 +911,19 @@ def main(argv: list[str] | None = None) -> int:
     if explore_result is not None:
         return explore_result
 
+    cadence_result = handle_automation_cadence_command(
+        args, registry_path=registry_path, runtime_root_arg=args.runtime_root,
+        print_payload=print_payload, output_format=output_format,
+    )
+    if cadence_result is not None:
+        return cadence_result
+    authority_archive_result = handle_authority_archive_command(
+        args, registry_path=registry_path, runtime_root_arg=args.runtime_root,
+        output_format=output_format, print_payload=print_payload,
+    )
+    if authority_archive_result is not None:
+        return authority_archive_result
+
     coordination_shadow_result = handle_coordination_shadow_command(
         args,
         registry_path=registry_path,
@@ -896,6 +970,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     if handoff_mode_result is not None:
         return handoff_mode_result
+
+    goal_acceptance_result = handle_goal_acceptance_command(
+        args, registry_path=registry_path, runtime_root_arg=args.runtime_root,
+        output_format=output_format, print_payload=print_payload,
+    )
+    if goal_acceptance_result is not None:
+        return goal_acceptance_result
 
     shared_goal_alignment_result = handle_shared_goal_alignment_command(
         args,

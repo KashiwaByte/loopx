@@ -13,11 +13,57 @@ from loopx.extensions.lark.event_collector import (
     plan_lark_event_collector,
 )
 from loopx.extensions.lark.event_collector_runtime import (
+    _callback_event_shape,
+    _operation_transport_runner,
     _run_json_with_status,
     enrich_lark_event_reply_context,
     lark_event_requires_reply_context_lookup,
     run_lark_event_collector,
 )
+
+
+def test_operation_transport_runner_preserves_explicit_node_prefix() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=json.dumps({"ok": True}),
+            stderr="",
+        )
+
+    transport = _operation_transport_runner(
+        runner,
+        command_prefix=["/opt/node", "/opt/lark-cli"],
+    )
+
+    result = transport(
+        ["/opt/lark-cli", "im", "chats", "get"],
+        None,
+        30,
+    )
+
+    assert result["returncode"] == 0
+    assert calls == [["/opt/node", "/opt/lark-cli", "im", "chats", "get"]]
+
+
+def test_operation_callback_failure_shape_retains_timestamp_width_without_value() -> (
+    None
+):
+    shape = _callback_event_shape(
+        {
+            "type": "card.action.trigger",
+            "timestamp": "1776409469273",
+            "action_tag": "button",
+            "action_value": "{}",
+        }
+    )
+
+    assert shape["timestamp_is_digits"] is True
+    assert shape["timestamp_digit_count"] == 13
+    assert "1776409469273" not in json.dumps(shape)
 
 
 def test_reply_context_lookup_does_not_trust_unrelated_text_mentions() -> None:
@@ -202,6 +248,12 @@ def test_operation_callback_status_separates_readiness_from_qualification(
                 "listener_active": True,
                 "listener_ready": True,
                 "callback_delivery_verified": False,
+                "last_failure_code": "callback_timestamp_invalid",
+                "last_failure_stage": "validate_timestamp",
+                "last_failure_event_shape": {
+                    "timestamp_is_digits": True,
+                    "timestamp_digit_count": 13,
+                },
             }
         ),
         encoding="utf-8",
@@ -223,9 +275,16 @@ def test_operation_callback_status_separates_readiness_from_qualification(
     assert status["operation_callback_listener_active"] is True
     assert status["operation_callback_listener_ready"] is True
     assert (
-        status["operation_callback_qualification_state"]
-        == "listener_ready_unqualified"
+        status["operation_callback_qualification_state"] == "listener_ready_unqualified"
     )
+    assert status["operation_callback_last_failure_code"] == (
+        "callback_timestamp_invalid"
+    )
+    assert status["operation_callback_last_failure_stage"] == "validate_timestamp"
+    assert status["operation_callback_last_failure_event_shape"] == {
+        "timestamp_is_digits": True,
+        "timestamp_digit_count": 13,
+    }
 
     payload = json.loads(callback_status.read_text(encoding="utf-8"))
     payload["callback_delivery_verified"] = True
@@ -313,6 +372,8 @@ def test_collector_runs_independent_operation_callback_consumer(
     assert status["callback_delivery_verified"] is True
     assert status["listener_ready"] is False
     assert status["failed_callback_count"] == 1
+    assert status["last_failure_code"] == "result_delivery_unverified"
+    assert status["last_failure_stage"] == "handle_callback"
     assert status["listener_active"] is False
 
 

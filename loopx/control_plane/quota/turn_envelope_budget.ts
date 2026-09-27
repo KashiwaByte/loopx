@@ -1,4 +1,5 @@
 /** Performance diagnostics, never Turn admission or execution authority. */
+import { turnStartPromptBudgetBytes } from "../capability_hooks.ts";
 import type { JsonObject } from "../effect_program.ts";
 
 export const TURN_ENVELOPE_BUDGET_BYTES = 8_192;
@@ -30,13 +31,25 @@ function sectionBytes(envelope: JsonObject): Record<Section, number> {
   return sizes;
 }
 
+export function turnEnvelopeBudgetBytes(envelope: JsonObject): number {
+  const reads = Array.isArray(envelope.required_reads) ? envelope.required_reads : [];
+  return TURN_ENVELOPE_BUDGET_BYTES + reads.slice(0, 5).reduce((total: number, value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return total;
+    const read = value as JsonObject;
+    return total + (read.source === "turn_start_capability_hook"
+      ? turnStartPromptBudgetBytes(read.prompt_budget_bytes) : 0);
+  }, 0);
+}
+
 export function measureTurnEnvelope(envelope: JsonObject, source: JsonObject): void {
   // Keep v0 *_json_bytes code-point metrics for compatibility. New diagnostics
   // and the performance target use actual compact JSON UTF-8 bytes.
   const sourceChars = [...JSON.stringify(source)].length;
+  const budgetBytes = turnEnvelopeBudgetBytes(envelope);
+  const hookBudget = budgetBytes - TURN_ENVELOPE_BUDGET_BYTES;
   envelope.compaction = {
     source_json_bytes: sourceChars, envelope_json_bytes: 0,
-    byte_reduction_ratio: 0, budget_bytes: TURN_ENVELOPE_BUDGET_BYTES,
+    byte_reduction_ratio: 0, budget_bytes: budgetBytes,
     within_budget: true, envelope_utf8_bytes: 0,
   };
   // Measurements include their own serialized metadata. Recompute to a fixed
@@ -56,18 +69,19 @@ export function measureTurnEnvelope(envelope: JsonObject, source: JsonObject): v
       byte_reduction_ratio: ratioLocked
         ? (envelope.compaction as JsonObject).byte_reduction_ratio : sourceChars
         ? Math.round((1 - chars / sourceChars) * 10_000) / 10_000 : 0,
-      budget_bytes: TURN_ENVELOPE_BUDGET_BYTES,
-      within_budget: bytes <= TURN_ENVELOPE_BUDGET_BYTES,
+      budget_bytes: budgetBytes,
+      within_budget: bytes <= budgetBytes,
       envelope_utf8_bytes: bytes,
     };
-    if (bytes > TURN_ENVELOPE_BUDGET_BYTES) {
+    if (hookBudget) metric.hook_prompt_budget_bytes = hookBudget;
+    if (bytes > budgetBytes) {
       const sections = sectionBytes(envelope);
       metric.warning = {
         code: "turn_envelope_budget_exceeded", severity: "warning",
-        excess_bytes: bytes - TURN_ENVELOPE_BUDGET_BYTES,
+        excess_bytes: bytes - budgetBytes,
         section_bytes: sections,
         over_target_sections: (Object.keys(sections) as Section[])
-          .filter((key) => sections[key] > TURN_ENVELOPE_SECTION_TARGETS[key]),
+          .filter((key) => sections[key] > TURN_ENVELOPE_SECTION_TARGETS[key] + (key === "action" ? hookBudget : 0)),
       };
     }
     envelope.compaction = metric;

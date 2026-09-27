@@ -18,6 +18,10 @@ from .chat_monitor_actions import ChatMonitorActionMixin
 from .chat_store import ChatSessionStore
 from .chat_todo_actions import ChatTodoActionMixin
 from .configure_goal import configure_goal
+from .control_plane.goals.configure_goal_service import (
+    bind_goal_agent_with_global_sync,
+    read_goal_agent_binding_with_source_route,
+)
 from .control_plane.runtime.time import now_utc, parse_timestamp
 from .control_plane.scheduler.monitor_todo import monitor_next_due_at
 from .history import load_registry
@@ -42,6 +46,7 @@ SUPPORTED_ACTION_KINDS = {
     "monitor.update",
     "gate.resolve",
     "operation.execute",
+    "team.plan",
 }
 _OPAQUE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
 # Runtime Endpoint ids and durable Goal agent ids are chosen independently, so
@@ -133,14 +138,14 @@ def _normalize_cadence(value: Any) -> str:
     raise ValueError("cadence must look like 30m, 2h, 1d, hourly, or daily")
 
 
-def _monitor_metadata(parameters: Mapping[str, Any]) -> dict[str, str]:
+def _monitor_metadata(parameters: Mapping[str, Any], *, schedule: bool = True) -> dict[str, str]:
     metadata = {
         key: str(parameters[key])
         for key in ("target_key", "cadence")
         if parameters.get(key)
     }
     cadence = metadata.get("cadence")
-    if cadence:
+    if cadence and schedule:
         next_due_at = monitor_next_due_at(
             generated_at=now_utc().isoformat(),
             cadence=cadence,
@@ -199,6 +204,43 @@ class ChatActionService(
             Path(root).expanduser().resolve() for root in workspace_roots
         )
 
+    def project_team_plan_preview(self, preview: Mapping[str, Any]) -> dict[str, Any]:
+        """Offer an admitted steward team preview as the card a surface lists.
+
+        An admitted preview is a validated proposal, not yet a confirmation: the
+        product surfaces list *typed actions*, so the manager channel projects
+        the preview it already admitted into exactly one `team.plan` proposal.
+        The projection creates no work and grants nothing -- confirming that
+        card is still the only apply, and the apply re-validates the same
+        payload with the host's own facts. It is idempotent per plan, so a
+        replayed Turn reuses the card instead of stacking a second one.
+        """
+
+        goal_id = str(preview.get("goal_id") or "")
+        if not goal_id:
+            raise ValueError("a team plan preview must name the Goal it staffs")
+        lanes = preview.get("lanes")
+        lane_count = len(lanes) if isinstance(lanes, Sequence) else 0
+        return self.preview(
+            {
+                "action_kind": "team.plan",
+                "summary": (
+                    f"确认 {goal_id} 的 {lane_count} 条 lane 团队计划"
+                    if lane_count
+                    else f"确认 {goal_id} 的团队计划"
+                ),
+                # The card is read by the manager channel that produced it, and
+                # it stays scoped to the one Goal the preview named.
+                "context": {"kind": "manager", "goal_id": goal_id},
+                "normalized_parameters": {
+                    "goal_id": goal_id,
+                    "plan": dict(preview),
+                    "requested_by": "manager",
+                },
+                "idempotency_key": "team-plan:" + _digest(dict(preview)),
+            }
+        )
+
     def _registry(self) -> dict[str, Any]:
         return load_registry(self.registry_path)
 
@@ -221,6 +263,58 @@ class ChatActionService(
         except OSError as exc:
             raise ValueError("the active LoopX registry is unavailable") from exc
         return hashlib.sha256(content).hexdigest()
+
+    def _team_plan_state_fingerprint(
+        self, goal_id: str, plan: Mapping[str, Any]
+    ) -> str:
+        """Bind every fact a confirmed team plan was reviewed against.
+
+        Registry bytes are not enough. A plan is reviewed against the Goal's own
+        intent -- the objective its work advances -- and that intent lives in the
+        active-state document and in the canonical source basis the lanes would
+        be created against, neither of which the registry bytes cover. Changing
+        the objective therefore used to leave the confirmed plan applicable,
+        because nothing the preview bound had moved.
+
+        An unreadable fact is bound as its own explicit absence rather than
+        dropped from the digest, so the precondition fails closed in both
+        directions: a Goal whose intent becomes readable after the preview asks
+        the owner to confirm again instead of silently dropping the check.
+        """
+
+        from .control_plane.work_items.governed_transition_proposal import (
+            steward_team_plan_intent_basis,
+        )
+
+        goal = self._goal(goal_id)
+        project = Path(str(goal.get("repo") or "")).expanduser()
+        state_file = Path(str(goal.get("state_file") or ""))
+        if not state_file.is_absolute():
+            state_file = project / state_file
+        try:
+            state_digest: str | None = hashlib.sha256(
+                state_file.read_bytes()
+            ).hexdigest()
+        except OSError:
+            state_digest = None
+        from .control_plane.coordination.local_authority import read_canonical_todos_if_promoted
+        from .control_plane.coordination.local_authority_shadow_adapter import effective_runtime_root
+        canonical = read_canonical_todos_if_promoted(
+            runtime_root=effective_runtime_root(self.registry_path, None), goal_id=goal_id)
+        return _digest(
+            {
+                "registry": self._registry_fingerprint(),
+                "provider_revision": canonical.get("provider_revision") if canonical else None,
+                "goal_id": goal_id,
+                "active_state": state_digest,
+                "intent_basis": steward_team_plan_intent_basis(
+                    goal_id=goal_id,
+                    goal=goal,
+                    registry_path=self.registry_path,
+                    plan=plan,
+                ),
+            }
+        )
 
     def _agent_eligibility(
         self,
@@ -337,6 +431,9 @@ class ChatActionService(
         )
 
     def _goal_state_fingerprint(self, goal_id: str) -> str:
+        basis = self._canonical_update_basis(goal_id)
+        if basis is not None:
+            return _digest({"goal_id": goal_id, "canonical_update_basis": basis})
         goal = self._goal(goal_id)
         project = Path(str(goal.get("repo") or "")).expanduser().resolve()
         state_file = Path(str(goal.get("state_file") or ""))
@@ -572,16 +669,11 @@ class ChatActionService(
                 ),
                 adapter_status="connected",
                 display_name=str(parameters.get("title") or "").strip() or None,
-                onboarding_connection_validation="provider-prevalidated",
                 next_probe=None,
                 spawn_allowed=False,
                 max_children=0,
                 allowed_domains=[],
                 write_scope=[],
-                onboarding_scan_enabled=False,
-                accept_onboarding_agent_todos=False,
-                begin_autonomous_advance=False,
-                codex_app_heartbeat="no",
                 preserve_todos=True,
                 force=False,
                 dry_run=False,
@@ -776,58 +868,44 @@ class ChatActionService(
     def _apply_agent_bind(
         self, proposal_id: str, proposal: dict[str, Any], parameters: dict[str, Any]
     ) -> dict[str, Any]:
-        current_fingerprint = self._registry_fingerprint()
         goal_id = str(parameters["goal_id"])
         agent_id = str(parameters["agent_id"])
-        existing = registered_agent_ids_for_goal(self._goal(goal_id))
-        if agent_id in existing and current_fingerprint != proposal.get(
-            "expected_state_fingerprint"
-        ):
-            receipt = {
-                "receipt_id": _digest(
-                    {
-                        "proposal_id": proposal_id,
-                        "goal_id": goal_id,
-                        "agent_id": agent_id,
-                    }
-                )[:32],
-                "outcome": "agent_already_bound",
-                "projection_verified": True,
-                "resource_ids": {"goal_id": goal_id, "agent_id": agent_id},
-            }
-            stored = self.store.apply(
-                proposal_id,
-                current_state_fingerprint=str(proposal["expected_state_fingerprint"]),
-                receipt=receipt,
-            )
-            return {"proposal": stored, "turn": None}
-        if current_fingerprint != proposal.get("expected_state_fingerprint"):
-            stale = self.store.apply(
-                proposal_id, current_state_fingerprint=current_fingerprint, receipt={}
-            )
-            return {"proposal": stale, "turn": None}
-        registered = sorted({*existing, agent_id})
-        result = configure_goal(
+        expected_revision = str(proposal["expected_state_fingerprint"])
+        result = bind_goal_agent_with_global_sync(
             registry_path=self.registry_path,
             goal_id=goal_id,
-            registered_agents=registered,
+            agent_id=agent_id,
             execute=True,
+            expected_revision=expected_revision,
         )
-        projected = registered_agent_ids_for_goal(self._goal(goal_id))
-        if agent_id not in projected:
-            raise ValueError("Agent binding was not visible in the Goal projection")
+        if result.get("status") == "stale":
+            stale = self.store.apply(
+                proposal_id,
+                current_state_fingerprint=str(result["actual_revision"]),
+                receipt={},
+            )
+            return {"proposal": stale, "turn": None}
+        if not result.get("ok") or not result.get("projection_verified"):
+            raise ValueError(
+                str(
+                    result.get("error")
+                    or "Agent binding did not verify in source and shared registries"
+                )
+            )
         receipt = {
             "receipt_id": _digest(
                 {"proposal_id": proposal_id, "goal_id": goal_id, "agent_id": agent_id}
             )[:32],
             "outcome": "agent_bound"
-            if result.get("changed")
+            if result.get("status") == "bound"
             else "agent_already_bound",
             "projection_verified": True,
             "resource_ids": {"goal_id": goal_id, "agent_id": agent_id},
         }
         stored = self.store.apply(
-            proposal_id, current_state_fingerprint=current_fingerprint, receipt=receipt
+            proposal_id,
+            current_state_fingerprint=expected_revision,
+            receipt=receipt,
         )
         return {"proposal": stored, "turn": None}
 
@@ -934,6 +1012,103 @@ class ChatActionService(
         )
         return {"proposal": stored, "turn": None}
 
+    def _apply_team_plan(
+        self, proposal_id: str, proposal: dict[str, Any], parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create each ready lane's first bounded Todo through the Todo owner."""
+
+        from .control_plane.work_items.team_plan_adapter import apply_team_plan
+
+        goal_id = str(parameters["goal_id"])
+        plan = parameters.get("plan")
+        if not isinstance(plan, Mapping):
+            raise ValueError("team plan proposal is malformed")
+        expected = str(proposal.get("expected_state_fingerprint") or "")
+        try:
+            settlement = apply_team_plan(
+                registry_path=self.registry_path, goal_id=goal_id,
+                agent_id=None, proposal={**dict(plan), "proposal_id": proposal_id},
+                expected_state_fingerprint=expected,
+                read_fingerprint=lambda: self._team_plan_state_fingerprint(goal_id, plan),
+            )
+        except (OSError, ValueError, RuntimeError) as error:
+            error_code = getattr(error, "diagnostic_code", None) or getattr(error, "code", None)
+            observed = getattr(error, "current_fingerprint", None)
+            if error_code == "team_plan_preview_stale" and observed and observed != expected:
+                stale = self.store.apply(proposal_id,
+                    current_state_fingerprint=observed, receipt={})
+                return {"proposal": stale, "turn": None}
+            return {"proposal": self.store.mark_failed(proposal_id,
+                error_code=("team_plan_projection_pending" if error_code == "team_plan_projection_pending" else "team_plan_commit_failed"),
+                message=("Tasks committed; display readback is pending. Retry this same plan to recover the result."
+                         if error_code == "team_plan_projection_pending" else
+                         "The batch could not be confirmed. Retry this same plan to recover its commit result.")),
+                "turn": None}
+        current_fingerprint = expected
+        lane_todo_ids = [str(item) for item in (settlement.get("lane_todo_ids") or [])]
+        intent_basis = str(settlement.get("intent_basis") or "")
+        gap_count = int(settlement.get("gap_count") or 0)
+        if not lane_todo_ids:
+            # Every lane stayed a gap, so this confirmation created nothing and
+            # reused nothing. The old path wrote a receipt that reported
+            # "lanes already present" with a verified projection and an empty
+            # Todo id, which reads as success where the readback finds no work.
+            # A confirmation that can only create nothing is recorded as the
+            # typed failure it is, and the plan's lanes and reasons stay in the
+            # card the owner confirmed.
+            return {
+                "proposal": self.store.mark_failed(
+                    proposal_id,
+                    error_code="team_plan_no_staffable_lane",
+                    message=(
+                        f"none of the plan's {gap_count} lane(s) can be staffed by "
+                        "this host, so confirming it created no work"
+                    ),
+                ),
+                "turn": None,
+            }
+        # Recovery describes this attempt; original staffing gaps remain in the
+        # receipt so readback never implies that retry created the missing work.
+        if str(settlement.get("action") or "") == "reused":
+            outcome = "team_plan_commit_recovered"
+        elif gap_count:
+            outcome = "team_plan_partially_applied"
+        else:
+            outcome = "team_plan_applied"
+        receipt = {
+            "receipt_id": _digest(
+                {
+                    "proposal_id": proposal_id,
+                    "goal_id": goal_id,
+                    "lane_todo_ids": lane_todo_ids,
+                }
+            )[:32],
+            "outcome": outcome,
+            "projection_verified": True,
+            "resource_ids": {
+                "goal_id": goal_id,
+                "todo_id": str(settlement.get("todo_id") or ""),
+                "lane_todo_ids": lane_todo_ids,
+            },
+        }
+        lane_settlements = settlement.get("lane_settlements")
+        if lane_settlements:
+            # Which lane each created Todo is, who runs it, the priority it
+            # carries and the acceptance it was confirmed to end on, so the
+            # owner's readback still names the commitment and not just the work.
+            receipt["lanes"] = [dict(item) for item in lane_settlements]
+        if gap_count:
+            receipt["gap_count"] = gap_count
+            receipt["gap_lanes"] = settlement.get("gap_lanes", [])
+        if intent_basis:
+            # The canonical revision these lanes were created against, so the
+            # owner's readback can name what the work advances.
+            receipt["intent_basis"] = intent_basis
+        stored = self.store.apply(
+            proposal_id, current_state_fingerprint=current_fingerprint, receipt=receipt
+        )
+        return {"proposal": stored, "turn": None}
+
     def preview(self, request: Mapping[str, Any]) -> dict[str, Any]:
         unknown = set(request) - {
             "action_kind",
@@ -952,6 +1127,7 @@ class ChatActionService(
         if not isinstance(parameters, Mapping) or not isinstance(context, Mapping):
             raise ValueError("normalized_parameters and context must be objects")
         normalized = self._normalize(action_kind, parameters)
+        canonical_update_basis = None
         if action_kind == "goal.create":
             project, _source_goal = self._project_for_goal_create(
                 {
@@ -975,6 +1151,7 @@ class ChatActionService(
                 registry_path=self.registry_path,
                 goal_id=normalized["goal_id"],
                 text=normalized["text"],
+                priority=normalized.get("priority"),
             )
             fingerprint = str(canonical_preview["preview_id"])
             evidence = ["Canonical LoopX Todo dry-run validated the proposal."]
@@ -985,9 +1162,34 @@ class ChatActionService(
             )
             evidence = ["The recoverable Goal and Agent Chat Session is available."]
             permission = "scoped_correction"
+        elif action_kind == "goal.lifecycle":
+            lifecycle_preview = self._goal_lifecycle_preview(normalized)
+            fingerprint = str(lifecycle_preview["state_fingerprint"])
+            canonical_update_basis = lifecycle_preview.get("source_basis")
+            evidence = [
+                "The lifecycle transition is bound to the current authoritative Goal source."
+            ]
+            permission = "durable_write"
+        elif action_kind == "team.plan":
+            # A plan is reviewed against this Goal's registration facts *and*
+            # the intent its lanes would advance, so both are bound here and
+            # re-read at apply. Binding only the registry let an owner objective
+            # change leave a confirmed plan applicable.
+            fingerprint = self._team_plan_state_fingerprint(
+                str(normalized["goal_id"]), normalized["plan"]
+            )
+            evidence = [
+                "The plan was validated against this Goal's registered Agents and the host's advancement action kinds.",
+                "Applying it creates the first bounded Todo of each ready lane, through the canonical Todo owner.",
+            ]
+            permission = "durable_write"
         elif action_kind in {"todo.update", "monitor.update"}:
-            if action_kind == "todo.update":
-                canonical_preview = self._run_todo_update(normalized, dry_run=True)
+            if normalized.get("operation") != "run_now":
+                canonical_update_basis = self._canonical_update_basis(normalized["goal_id"],
+                    completion_todo_id=normalized["todo_id"] if normalized.get("operation") in {"complete", "stop"} else None)
+            if action_kind == "todo.update" or normalized.get("operation") != "run_now":
+                run = self._run_todo_update if action_kind == "todo.update" else self._run_monitor_update
+                canonical_preview = run(normalized, dry_run=True, basis=canonical_update_basis)
                 if canonical_preview.get("ok") is not True:
                     raise ValueError(
                         str(
@@ -995,7 +1197,9 @@ class ChatActionService(
                             or "Todo transition failed canonical dry-run validation"
                         )
                     )
-            goal_fingerprint = self._goal_state_fingerprint(normalized["goal_id"])
+            goal_fingerprint = (_digest({"goal_id": normalized["goal_id"],
+                "canonical_update_basis": canonical_update_basis}) if canonical_update_basis is not None
+                else self._goal_state_fingerprint(normalized["goal_id"]))
             if (
                 action_kind == "monitor.update"
                 and normalized.get("operation") == "run_now"
@@ -1017,8 +1221,18 @@ class ChatActionService(
                 fingerprint = goal_fingerprint
             evidence = [
                 "Canonical LoopX Todo dry-run validated the requested transition."
-                if action_kind == "todo.update"
-                else "Canonical LoopX Todo state validated the requested transition."
+                if normalized.get("operation") != "run_now"
+                else "The monitor execution request is bound to the current Goal state."
+            ]
+            permission = "durable_write"
+        elif action_kind == "agent.bind":
+            binding = read_goal_agent_binding_with_source_route(
+                registry_path=self.registry_path,
+                goal_id=str(normalized["goal_id"]),
+            )
+            fingerprint = str(binding["revision"])
+            evidence = [
+                "The Agent binding was validated against the canonical source Goal peer set."
             ]
             permission = "durable_write"
         else:
@@ -1050,6 +1264,7 @@ class ChatActionService(
             idempotency_key=_opaque(
                 request.get("idempotency_key"), field="idempotency_key"
             ),
+            canonical_update_basis=canonical_update_basis,
         )
         return (
             self.store.arm_operation(str(proposal["proposal_id"]))
@@ -1152,6 +1367,8 @@ class ChatActionService(
             raise self._heartbeat_gate(parameters)
         if action_kind == "monitor.create":
             return self._apply_monitor_create(proposal_id, proposal, parameters)
+        if action_kind == "team.plan":
+            return self._apply_team_plan(proposal_id, proposal, parameters)
         if action_kind == "todo.update":
             return self._apply_todo_update(proposal_id, proposal, parameters)
         if action_kind == "monitor.update":
@@ -1183,6 +1400,7 @@ class ChatActionService(
                     registry_path=self.registry_path,
                     goal_id=str(parameters["goal_id"]),
                     text=str(parameters["text"]),
+                    priority=parameters.get("priority"),
                 )
                 current_fingerprint = str(current["preview_id"])
                 if current_fingerprint != proposal.get("expected_state_fingerprint"):
@@ -1196,6 +1414,7 @@ class ChatActionService(
                     registry_path=self.registry_path,
                     goal_id=str(parameters["goal_id"]),
                     text=str(parameters["text"]),
+                    priority=parameters.get("priority"),
                     preview_id=current_fingerprint,
                 )
                 canonical_receipt = applied["receipt"]

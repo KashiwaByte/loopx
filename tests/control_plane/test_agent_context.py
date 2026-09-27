@@ -5,7 +5,10 @@ import sys
 
 import pytest
 
-from loopx.control_plane.agent_context import project_agent_context
+from loopx.control_plane.agent_context import (
+    envelope_agent_context,
+    project_agent_context,
+)
 from loopx.control_plane.quota.live_decision import build_live_quota_should_run_decision
 from loopx.control_plane.quota.turn_envelope import (
     build_turn_envelope,
@@ -156,6 +159,44 @@ def test_managed_request_and_return_carry_parent_context_without_fabricating_com
     assert subagent_execution_payload_projection({"host_result": {}}) == {}
 
 
+def test_managed_return_does_not_relabel_before_plan_receipts_as_fresh():
+    before = project_agent_context(
+        phase="before_plan",
+        scope=SCOPE,
+        orchestration=POLICY,
+        observations={
+            "delegation_context": {
+                "schema_version": "loopx_delegation_context_v0",
+                "configuration_state": "ready",
+                "observed_at": "2026-09-19T00:00:00+00:00",
+                "authorized_count": 1,
+                "projected_count": 1,
+                "routes": [
+                    {
+                        "binding_id": "review",
+                        "agent_id": "reviewer",
+                        "todo_id": "todo-review",
+                        "runtime_id": "generic-cli",
+                        "readiness": "unknown",
+                    }
+                ],
+                "operation_receipts": {"observed": 1, "running": 1},
+            }
+        },
+    )
+    envelope = {"agent_context": before, "boundary": {"orchestration": POLICY}}
+
+    returned = envelope_agent_context(
+        envelope,
+        phase="after_delegate_result",
+        observations={"reconciliation_counts": {"observed": 1, "completed": 1}},
+    )
+
+    facts = returned["contributions"][0]["facts"]
+    assert facts["reconciliation_counts"] == {"observed": 1, "completed": 1}
+    assert "delegation_receipts" not in facts
+
+
 def test_host_prompt_and_durable_journal_replay_keep_lifecycle_context(tmp_path):
     from loopx.control_plane.turn_driver import run_loopx_turn_once
     from loopx.control_plane.turn_driver.codex_cli import _prompt
@@ -241,8 +282,90 @@ def test_native_cli_is_read_only_and_does_not_claim_native_receipts(tmp_path, ph
     assert payload["read_only"] is True
     assert payload["agent_context"]["phase"] == phase
     assert payload["host_receipts_observed"] is False
+    assert payload["host_receipts_scope"] == "native_tool_input"
+    assert "host_capacity_observed" not in payload
+    assert "host_capacity_scope" not in payload
     assert registry.read_bytes() == before
     command[command.index(SCOPE["agent_id"])] = "unregistered"
     rejected = subprocess.run(command, capture_output=True, text=True)
     assert rejected.returncode == 1
     assert json.loads(rejected.stdout)["ok"] is False
+
+
+def test_native_cli_projects_typed_capacity_exhaustion_without_raw_error(tmp_path):
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "goals": [
+                    {
+                        "id": SCOPE["goal_id"],
+                        "repo": str(tmp_path),
+                        "status": "active",
+                        "registered_agents": [SCOPE["agent_id"]],
+                        "spawn_policy": POLICY,
+                    }
+                ],
+            }
+        )
+    )
+    before = registry.read_bytes()
+    command = [
+        sys.executable,
+        "-m",
+        "loopx.cli",
+        "--registry",
+        str(registry),
+        "agent-context",
+        "--goal-id",
+        SCOPE["goal_id"],
+        "--agent-id",
+        SCOPE["agent_id"],
+        "--phase",
+        "after_delegate_result",
+        "--native-child-operation",
+        "spawn",
+        "--native-child-outcome",
+        "agent_thread_limit_reached",
+        "--native-child-count",
+        "1",
+        "--format",
+        "json",
+    ]
+
+    result = subprocess.run(command, capture_output=True, text=True, check=True)
+    payload = json.loads(result.stdout)
+    [contribution] = payload["agent_context"]["contributions"]
+    observation = contribution["facts"]["native_host_capacity"]
+    assert payload["host_capacity_observed"] is True
+    assert payload["host_receipts_observed"] is False
+    assert observation["reason_code"] == "agent_thread_limit_reached"
+    assert observation["retry_same_turn"] is False
+    assert observation["recovery_actions"] == [
+        "continue_parent_work",
+        "defer_unlaunched_children",
+        "retry_after_capacity_change",
+    ]
+    assert registry.read_bytes() == before
+
+    invalid = subprocess.run(
+        [
+            *command[: command.index("after_delegate_result")],
+            "before_plan",
+            *command[command.index("after_delegate_result") + 1 :],
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert invalid.returncode == 1
+    assert "after_delegate_result" in json.loads(invalid.stdout)["error"]
+
+    disabled_payload = json.loads(registry.read_text())
+    disabled_payload["goals"][0]["spawn_policy"]["spawn_allowed"] = False
+    registry.write_text(json.dumps(disabled_payload))
+    disabled_before = registry.read_bytes()
+    disabled = subprocess.run(command, capture_output=True, text=True)
+    assert disabled.returncode == 1
+    assert "enabled multi_subagent" in json.loads(disabled.stdout)["error"]
+    assert registry.read_bytes() == disabled_before

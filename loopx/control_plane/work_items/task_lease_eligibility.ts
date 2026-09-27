@@ -23,6 +23,24 @@ export function leaseOwnerRejection(todo: LeaseEligibilityTodo | null | undefine
   return null;
 }
 
+/** Diagnostics share the exact rejection precedence used by mutation admission. */
+export function leaseOwnerConstraint(todo: LeaseEligibilityTodo | null | undefined,
+  owner: string | null, registered: readonly string[]) {
+  const reason = leaseOwnerRejection(todo, owner, registered);
+  switch (reason) {
+    case null: return {effective: true as const};
+    case "todo_not_open":
+      return {effective: false as const, reason, todo_status: todo?.status || "unknown"};
+    case "owner_not_registered":
+      return {effective: false as const, reason, registered_agents: [...registered]};
+    case "owner_excluded_from_todo":
+      return {effective: false as const, reason, excluded_agents: [...(todo?.excluded_agents ?? [])]};
+    case "owner_conflicts_with_claim":
+      return {effective: false as const, reason, claimed_by: todo?.claimed_by ?? null};
+    default: return {effective: false as const, reason};
+  }
+}
+
 function strings(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.some(item => typeof item !== "string")) {
     throw new EffectRuntimeRequestError(`${label} must be an array of strings`);
@@ -47,8 +65,9 @@ export function evaluateTaskLeaseOwnerEligibility(value: unknown) {
     todo = {status: raw.status, claimed_by: nullableString(raw.claimed_by, "todo.claimed_by"),
       excluded_agents: strings(raw.excluded_agents, "todo.excluded_agents")};
   }
-  const code = leaseOwnerRejection(todo, nullableString(input.owner, "owner"),
+  const constraint = leaseOwnerConstraint(todo, nullableString(input.owner, "owner"),
     strings(input.registered_agents, "registered_agents"));
   return {schema_version: "task_lease_owner_eligibility_v0",
-    outcome: code === null ? "apply" : "rejected", code: code ?? "lease_owner_allowed"};
+    outcome: constraint.effective ? "apply" : "rejected",
+    code: constraint.effective ? "lease_owner_allowed" : constraint.reason, constraint};
 }

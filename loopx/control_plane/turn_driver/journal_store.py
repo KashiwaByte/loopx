@@ -93,6 +93,69 @@ def load_loopx_turn_plan_from_journal(
     return dict(plan)
 
 
+def find_loopx_turn_key_by_settlement_identity(
+    runtime_root: Path,
+    *,
+    goal_id: str,
+    agent_id: str,
+    todo_id: str,
+    turn_instance_id: str,
+) -> str | None:
+    """Resolve one journal from its durable settlement identity.
+
+    A host process can finish after its caller loses the command reply, so the
+    caller-stable ``turn_instance_id`` is the recovery address.  Never select a
+    journal by recency or by a partial Goal/Agent match: the transaction's
+    typed settlement identity must equal every supplied field, and ambiguity
+    fails closed.
+    """
+
+    expected = SettlementIdentity(
+        goal_id=goal_id,
+        agent_id=agent_id,
+        todo_id=todo_id,
+        turn_instance_id=turn_instance_id,
+    )
+    turns_dir = runtime_root / "goals" / goal_id / "turns"
+    if not turns_dir.is_dir():
+        return None
+    matches: list[str] = []
+    for path in sorted(turns_dir.glob("*.json")):
+        turn_key = f"sha256:{path.stem}"
+        if not TURN_KEY_RE.fullmatch(turn_key):
+            continue
+        try:
+            plan = load_loopx_turn_plan_from_journal(
+                runtime_root,
+                goal_id=goal_id,
+                turn_key=turn_key,
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if _journal_plan_turn_instance_id(plan) != turn_instance_id:
+            continue
+        transaction = plan.get("transaction")
+        settlement = (
+            transaction.get("settlement_plan")
+            if isinstance(transaction, Mapping)
+            else None
+        )
+        identity = (
+            settlement.get("identity") if isinstance(settlement, Mapping) else None
+        )
+        if not isinstance(identity, Mapping):
+            continue
+        try:
+            actual = SettlementIdentity.from_runtime_payload(identity)
+        except RuntimeError:
+            continue
+        if _identity_binding_tuple(actual) == _identity_binding_tuple(expected):
+            matches.append(turn_key)
+    if len(matches) > 1:
+        raise ValueError("LoopX Turn settlement identity matched multiple journals")
+    return matches[0] if matches else None
+
+
 def _journal_plan_turn_instance_id(plan: Mapping[str, Any]) -> str | None:
     transaction = plan.get("transaction")
     if isinstance(transaction, Mapping):

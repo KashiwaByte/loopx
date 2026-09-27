@@ -1,9 +1,117 @@
 # SQLite authority provider
 
 SQLite is an **opt-in local conformance candidate**, behind the existing
-TypeScript `AuthorityStore` interface. File remains the default. This slice
-does not promote a goal, migrate existing authority, enable cross-host writes,
-or qualify ten elapsed days of operation.
+TypeScript `AuthorityStore` interface. File remains the canonical-provider
+fallback when no selector is present; this does not make every new Goal
+canonical or migrate an existing legacy Goal. This slice
+does not promote a goal, run a live cutover, enable cross-host writes, or
+qualify ten elapsed days of operation. It does provide the explicit
+version-1 to version-2 database migration described below.
+
+## Short-term default decision and matched experiment
+
+The September 27 decision is to target **SQLite for the next qualified local
+new-Goal default**, rather than first defaulting to File and moving again.
+This is an implementation direction, **not default activation or completed D2
+qualification**. File remains an explicit provider, a conformance reference and
+an export/recovery destination. Existing Goals retain their selected authority;
+a rejected SQLite runtime must never silently open File instead.
+
+The decision compares current File checkpoint/delta storage, not its retired
+full-projection-per-commit layout. The final matched experiment ran sequentially
+on Linux x86_64 (16 vCPUs), Node 22.22.3 / SQLite 3.51.3, with baseline
+`96ce9efb3` and candidate `758db221e`. For each workload the baseline SQLite
+arm ran immediately before its candidate arm; candidate File arms followed.
+The same runner and qualified runtime served every arm. Each uses 20 warm
+read samples, the final 100 writes and five fresh-process head reads. Values
+below are p95 milliseconds. Cold process includes module loading and does not
+clear the OS page cache. These are bounded observations, not population
+estimates or formal capacity/soak qualification.
+
+| Projection / commits | SQLite receipt before | Receipt after | SQLite scan 100 before | Scan after |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed 20 KiB / 128 | 67.69 | 16.04 | 184.69 | 71.37 |
+| Mixed 20 KiB / 512 | 75.70 | 17.18 | 187.22 | 67.61 |
+| 464 Todos, 64 leases, 220 KiB / 128 | 786.01 | 91.52 | 1964.03 | 623.49 |
+| Changing 1 MiB / 128 | 456.97 | 288.76 | 1190.10 | 1114.94 |
+| Fixed 64 KiB / 128 | 62.96 | 9.57 | 170.34 | 56.36 |
+
+The many-field receipt/scan costs fall by 88%/68%, but still exceed the
+50/250 ms targets on this host. Changing-1-MiB scan improves only about 6%:
+returning 100 complete large states remains expensive. Mixed and fixed-state
+reads also improve; the optimization is no longer limited to large strings.
+Write costs remain close to baseline because this is primarily a replay change.
+No frozen qualification threshold has been increased.
+
+The candidate-provider comparison retains the tradeoffs instead of declaring
+one provider faster for every operation:
+
+| Projection / commits | SQLite write / warm head / cold head | File write / warm head / cold head | File receipt / scan 100 |
+| --- | ---: | ---: | ---: |
+| Mixed 20 KiB / 128 | 10.26 / 2.11 / 146.14 | 21.01 / 4.81 / 296.79 | 3.28 / 97.72 |
+| Mixed 20 KiB / 512 | 10.56 / 2.59 / 143.09 | 51.87 / 6.08 / 702.25 | 5.55 / 78.13 |
+| 464 Todos, 64 leases, 220 KiB / 128 | 64.24 / 16.44 / 152.50 | 72.75 / 7.69 / 1494.86 | 3.48 / 939.29 |
+| Changing 1 MiB / 128 | 97.50 / 19.51 / 164.87 | 761.97 / 115.46 / 1892.69 | 154.34 / 441.47 |
+| Fixed 64 KiB / 128 | 12.27 / 2.84 / 144.58 | 14.85 / 3.19 / 329.43 | 3.22 / 85.83 |
+
+SQLite has lower write and restart costs in every measured shape. File has
+cheaper warm receipts and, for the many-field fixture, a cheaper warm head.
+SQLite now scans ordinary/many-field history faster, while File wins the
+changing-1-MiB scan. This supports SQLite as the implementation target for
+mutation/restart-heavy local operation, not a universal read-performance claim.
+
+The 1-MiB SQLite post-fill RSS rises from about 118 to 160 MiB; other measured
+SQLite shapes remain near their baseline. This includes fixture and verification
+allocations and is not a steady-state or leak measurement. Sustained-memory
+qualification remains open. Baseline/candidate SQLite final store bytes match
+in all five shapes; no persisted format is changed. Earlier macOS measurements
+motivated the initial target, but a new local paired run encountered load above
+40 and unstable unchanged-baseline timings. Its correctness checks were kept;
+its timing samples are not used to claim improvement or qualification.
+
+These tests change a deterministic observation field in a retained full state;
+they exercise storage, not the complete CLI/Turn workflow. In `changing-1m`,
+padding is resized to retain exactly 1 MiB, so the large string itself can
+change. It must not be reported as a stable-payload cache benchmark.
+
+Reproduce each arm from the same checkout and qualified Node runtime:
+
+```sh
+node --experimental-sqlite --experimental-strip-types \
+  examples/coordination/local-provider-comparison.ts \
+  --provider sqlite --workload mixed --commits 128 --samples 20
+# Repeat with --provider file. Workloads: mixed, full, fixed-64k, changing-1m.
+# Use --commits 512 to cross more checkpoint windows; --output writes JSON.
+```
+
+The runner creates and removes its own temporary store, checks complete
+projections (including Todo metadata), original receipts and reopened state,
+and records the source revision, runtime, runner hash and tracked source diff
+hash. It does not open a selected live Goal. RSS includes fixture/checking
+allocations; File publication bytes are application bytes, not physical disk
+writes. Use the existing SQLite capacity runner for WAL traffic and D2 history
+sizes. Keep performance experiments separate from concurrent test suites.
+
+Before changing release defaults, the existing owners must close these gaps:
+
+1. **L6 / D2:** rerun the unchanged reference capacity profiles after read-path
+   optimization; qualify many-field/changing-state history, crash/restore,
+   consumer lag, supported runtimes/platforms and the >=10-day elapsed soak.
+   PR #4931 contributes read-proof optimization, not a D2 pass.
+2. **L8 / D3:** qualify the integrated Goal command/projection and migration
+   path. Reuse merged reviewed migration/retained audit (#5173), managed-host
+   protection (#5144) and obsolete Todo-source retirement (#5054), rather than
+   count them as new work. A storage benchmark does not certify long-running
+   execution or authorize migration of existing Goals.
+3. **L9:** make new-Goal creation/onboarding choose that qualified profile,
+   including installed runtime admission, settings/readback and packaged entry
+   points. Keep explicit provider selection and reviewed backup/rollback.
+
+Both current local providers require Node >=22.22.3. SQLite uses built-in
+`node:sqlite`: it adds no database service or external SQLite package. Its
+actual embedded SQLite/finalization probe remains required, and a pre-existing
+managed runtime must be restarted on the qualified executable as documented
+below. PostgreSQL deployment is independent of this local default decision.
 
 ## Placement and persistence
 
@@ -18,23 +126,36 @@ directory. Metadata binds the goal, schema version and random database
 incarnation. Provider revisions combine that incarnation with a monotonic
 integer sequence; they are not authority revisions or lease epochs.
 
-The version-1 schema contains:
+The version-2 schema contains:
 
 | Table | Contract |
 | --- | --- |
 | `metadata` | Version and database/goal identity |
-| `head` | One bounded pointer to the current committed projection |
-| `commits` | Unique operation ID, canonical commit digest, ordered cursor, original receipts, events and full projection |
+| `head` | The live committed projection, its state digest and one cursor |
+| `commits` | Unique operation ID, canonical commit digest, ordered cursor, original receipts and events, one exact state delta, its state digest and parent state digest |
+| `checkpoints` | One full projection and its digest per bounded window |
 
 `commits` also serves as the durable projection outbox used by
 `scanCommitted`. There is no independent ACK or second receipt authority.
 Existing consumers resume by cursor. A unique operation index makes receipt
-lookup and cursor paging indexed. The common continuity check counts the compact
-covering index, so total read/write cost is not independent of history length.
-It does not deserialize the complete retained payload history. Historical receipts and full projections are retained without
-pruning. Fixed live state therefore produces linear database growth, not
-bounded total disk use. Growing application projections require separate
+lookup and cursor paging indexed.
+
+Retention is bounded by window instead of by history: every commit keeps one
+exact delta, and one full projection is retained per checkpoint window
+(`authority_state_log.ts`, 64 commits per window). A live read resolves the head
+from the head row, its retained transaction and the cursor bounds; a historical
+read rebuilds at most one window from the covering checkpoint. Retained deltas
+are therefore the only part that still grows with history, and their size is
+proportional to what each commit changed. Original receipts and events are
+retained without pruning, so fixed live state with large receipts still grows
+with history. Growing application projections require separate
 retention/compaction work.
+
+The rehearsal profile measures this profile directly: at 1,000 commits with a
+64 KiB projection, 16 checkpoints retain 1,048,576 projection bytes and 126,714
+delta bytes, against 65,536,000 bytes for one full copy per retained commit.
+Formal 10k/100k evidence still requires the separately authorized matched
+profile.
 
 Writes use `BEGIN IMMEDIATE`, a five-second busy timeout, WAL and
 `synchronous=FULL`. The head, receipt, events and outbox row commit together.
@@ -49,18 +170,51 @@ rotation, corruption repair, or network-filesystem sharing is supported.
 
 ## Read integrity
 
-Authority reads share one SQLite snapshot for metadata, head and requested rows.
-The same check runs inside the write transaction before any new commit row:
-positive unique integer cursors must have `min=1` and `count=max=head`. Thus a
-missing head, rolled-back head, or internal cursor gap is rejected as
-`provider_protocol_violation` before returning authority or accepting a write.
+Direct retries follow the [authority operation replay contract](authority-operation-replay.md):
+matching full intent returns its verified original position without a new write.
 
-The newest row's canonical commit digest is recomputed on every authority read
-and write. Historical receipt reads additionally validate their selected row;
-paged scans validate each returned row and the lookahead row used for
-`has_more`. The digest includes the operation ID, projection, events, receipts
-and expected predecessor revision, reconstructed from the unchanged v0 sequence
-contract. No schema migration or alternate digest format is introduced.
+
+Authority reads share one SQLite snapshot, and writes run the same live proof
+inside their transaction before publishing a new commit row. The proof is
+layered so that each layer pays only for what it returns:
+
+| Layer | Proves | Cost |
+| --- | --- | --- |
+| Live head (`loadAuthority`, `commitAuthority`) | Head row digest over the live projection, the retained transaction at that cursor reproducing its exact commit digest, parent linkage, `min=1`/`count=max=head` cursor continuity, and the presence of the checkpoint that covers the head | One head row, one retained row and one parent digest; no projection replay. The indexed continuity count still depends on retained cursor count |
+| Materialized history (`scanCommitted`, `readReceipt`) | Every row from the covering checkpoint through the requested span, including each delta, state digest and parent lineage; paged scans also prove the lookahead row used for `has_more` | At most one checkpoint window plus the requested span |
+| Archive audit (`verifyAuthorityHistory`) | The complete delta chain from the empty root, every checkpoint against retained history, and the final state against the head | Linear in retained history; qualification and recovery only |
+
+Historical reconstruction uses the shared TS `AuthorityStateReplay` owner.
+It validates and privately copies the initial state and each delta, copies only
+changed object paths, and reuses exact canonical encodings for unchanged
+subtrees. Both proofs still hash the complete original v0 byte sequence; this
+is not a new Merkle proof or a persisted digest format. Cached subtree keys are
+weak, and encoded long-string buffers are capped separately; no cache survives
+the provider read/audit call. A receipt query verifies its entire covering span
+without materializing projections it does not return. Scans return independent
+JSON objects, so editing one row cannot alter another row or a later read.
+
+The same owner now reconstructs provider-neutral archives. Previously a
+consumer could edit a yielded transaction's projection and change the decoder's
+next replay basis, causing a later digest or Goal-identity failure. The decoder
+now retains private state; callers receive detached projections. Existing
+File/SQLite/PostgreSQL archives and terminal seals keep the same bytes. Rejected
+delta batches never advance the replay frontier, and sparse protocol arrays
+are rejected rather than bypassing validation of their absent elements.
+
+A missing head, rolled-back head, internal cursor gap, rewritten receipt/event,
+orphaned parent digest or mismatched state digest is rejected as
+`provider_protocol_violation` before returning authority or accepting a write.
+Preparing a commit also re-applies its own delta and requires byte equality with
+the committed projection before anything is written.
+
+Two shapes are deliberately outside the live proof because the live head never
+reads them: the delta of the newest retained row, and the projection of the
+checkpoint the live head resumes from. Both are refused by every read that
+materializes their span and by the archive audit, and neither can change the
+authority value a live read returns. The commit digest is unchanged from v0
+(operation ID, projection, events, receipts, expected predecessor revision), so
+cursors, provider revisions and stored digests stay comparable.
 
 This is integrity validation of the current and accessed evidence, not a full
 cryptographic audit of every historical payload on each call. Unaccessed older
@@ -87,10 +241,14 @@ qualify the complete D2 profile.
 
 This intentionally rejects SQLite runtimes previously accepted by the
 statement-only probe, including vulnerable drivers shipped with older Node 22
-releases. The public Node minimum remains 22.18 for the default File path;
-SQLite requires the additional fix. No provider selection changes and no
-fallback to File occur when an explicitly selected SQLite runtime is rejected.
-The optional driver is still loaded only after opt-in.
+releases. The public Node minimum is now 22.22.3 for both File and optional
+SQLite use; SQLite also checks the actual embedded driver. Provider selection
+does not change, and an explicitly selected SQLite runtime never falls back to
+File when rejected.
+The optional driver is still opened only after opt-in. The serving runtime
+loads it in-process once at startup for the read-only identity probe described
+below; that probe opens no database file and creates no authority state, and
+the File path keeps working when the driver is unavailable.
 
 From the repository checkout, preview selection:
 
@@ -111,6 +269,24 @@ The process starting the managed Effect runtime must use the qualified Node
 runtime too. Stop a previously running managed runtime normally before changing
 its Node executable. Adding an experimental flag to an older Node 22 release does not fix its
 statement lifecycle.
+
+The managed Effect runtime is reused per user and source revision, so the
+Node/SQLite pair serving a goal is not necessarily the one the calling process
+resolves from PATH. Its info file records a `runtime_identity`
+(`node_version`, `sqlite_version`, `sqlite_authority_qualified`), and
+`loopx doctor` reports that identity plus a restart recommendation when the
+serving runtime is not qualified. Installing the qualified Node alone does not
+repair a runtime that is already running: restart it with
+
+```sh
+loopx doctor --restart-runtime
+```
+
+so the next control-plane request starts a new runtime from the current PATH.
+Waiting for the runtime's idle shutdown has the same effect.
+A direct CLI invocation that is not the reused runtime reports the same
+qualification failure without a restart step, because rerunning it on the
+qualified PATH is already sufficient there.
 
 After separately admitted canonical initialization, ordinary `loopx todo`
 commands use the persisted selector. For example:
@@ -192,6 +368,10 @@ npm ci --ignore-scripts
 npm run typecheck:control-plane
 node --no-warnings --experimental-sqlite --experimental-strip-types --test \
   tests/control_plane_ts/sqlite_authority_store.test.ts \
+  tests/control_plane_ts/sqlite_authority_bounded_profile.test.ts \
+  tests/control_plane_ts/sqlite_authority_migration.test.ts \
+  tests/control_plane_ts/authority_state_log.test.ts \
+  tests/control_plane_ts/authority_provider_parity.test.ts \
   tests/control_plane_ts/local_authority_provider.test.ts \
   tests/control_plane_ts/sqlite_runtime_admission.test.ts \
   tests/control_plane_ts/sqlite_capacity.test.ts
@@ -203,6 +383,12 @@ node --no-warnings --experimental-sqlite --experimental-strip-types \
 node --no-warnings --experimental-sqlite --experimental-strip-types \
   examples/coordination/sqlite-capacity.ts --profile matched-64k --cli \
   --output .local/sqlite-matched-64k.json
+node --no-warnings --experimental-sqlite --experimental-strip-types \
+  examples/coordination/sqlite-capacity.ts --profile matched-1m --cli \
+  --output .local/sqlite-matched-1m.json
+node --no-warnings --experimental-sqlite --experimental-strip-types \
+  examples/coordination/sqlite-capacity.ts --profile headroom-64k --cli \
+  --output .local/sqlite-headroom-64k.json
 ```
 
 For an already promoted Goal, [canonical lease renewal](canonical-lease-renew.md)
@@ -221,6 +407,18 @@ last 1,000 commits and their corresponding reads, plus 200 scan-100 samples.
 This one-Todo storage axis isolates history growth; it is not the complete
 multi-agent/lease/capture workload.
 
+Two dedicated headroom profiles extend the same workload to RFC 7.2's other
+axes with an unchanged budget matrix: `matched-1m` runs the identical 10k/100k
+shape with a 1 MiB live projection (rows prefixed `one_mib_`), and
+`headroom-64k` runs 100k/300k databases at 64 KiB (rows prefixed
+`headroom_300k_`, cumulative-growth budgets evaluated against the 3x depth
+ratio). The per-axis fill wall budget is an operational guard — floored at
+2,400 s and scaled by commits and payload bytes beyond the 64 KiB 100k
+workload — never a qualification budget; the p95 and growth budgets do not
+move with it. A dedicated axis clears its coverage row only after its measured
+payload and both exact commit depths match the selected profile. Other axes
+remain explicit `missing` rows (`payload_one_mib`, `headroom_300k`, `burst_60s`).
+
 `--cli` adds 20 formal samples (three in rehearsal) for complete CLI mutation,
 status and quota, using fresh Python processes and a newly started managed
 Effect runtime for each sample. Shutdown occurs outside the timed interval in
@@ -228,15 +426,28 @@ the isolated fixture. `--python` chooses the Python executable. These figures
 include process startup but do not drop the OS file cache. Cold Node-only load
 and warm actual-provider calls are separate. The provider's normal per-call
 connection open/close remains inside warm timing. CLI mutations happen after
-the fixed-history measurement; their extra commits are reported separately.
+the fixed-history measurement; CLI, traffic-window and lock-probe commits all
+extend past the fill target and are counted separately, so target-state rows
+keep their meaning.
 
 Reports carry p50/p95/p99 and counts, parent-process RSS, application request
 JSON bytes and separate DB/WAL/SHM sizes at the target history. Resource-usage
 peak RSS is process-lifetime across both groups; sampled axis RSS is separate,
 and CLI child RSS is not measured. Application bytes, final files, SQLite
 logical writes, cumulative WAL traffic and physical device writes are different
-metrics. The unavailable write-traffic and pure busy-wait metrics remain
-`missing`; a final WAL size of zero proves no cumulative-write bound.
+metrics and are never substituted for one another. Logical write volume is
+measured from the filled database as the serialized bytes each commit hands to
+SQLite (commits row plus the full-projection head rewrite plus amortized
+checkpoint rows); page, index and compaction overhead belong to the other
+columns. Cumulative WAL traffic is measured over one bounded commit window per
+axis: read marks pinned by two observer connections make every WAL reset
+impossible, so frame growth over the window is exact, and the per-commit
+traffic at both depths carries the <=15x cumulative-growth budget. Lock wait is
+app-observed: a probe process holds the write lock for a controlled interval
+and the end-to-end store commit wait is reported against the uncontended
+baseline. Whole-run WAL totals, pure busy-handler time and physical device
+writes remain `missing`; a final WAL size of zero still proves no
+cumulative-write bound.
 
 Each axis reserves 5 GiB free space, caps its database at 16 GiB and checks a
 2,400-second fill budget. All data are generated in a new temporary directory;
@@ -251,22 +462,91 @@ The real-process regressions exercise SIGKILL before and after business COMMIT,
 lost-response receipt readback, exact head/event/receipt/scan equivalence and
 SQLite `max_page_count` exhaustion. These are small disposable-database tests,
 not power-loss, operating-system ENOSPC or large-history recovery qualification.
-The source uses the shared retained-journal snapshot contract. No checkpoint,
-retention deletion, restore-incarnation change or migration format is added.
+Retention deletion, restore-incarnation change and cross-host sharing are still
+absent from this slice.
+
+## Version-1 migration
+
+The shipped version-1 database keeps one full projection per retained row, so it
+cannot be read by the version-2 provider. `sqlite_authority_migration.ts`
+migrates one Goal database in place: it reads the frozen version-1 rows, proves
+every stored commit digest, writes the checkpoint/delta log, proves that each
+written delta reconstructs its projection, reads the not-yet-swapped tables back
+and replays them through the store's own delta decoder, requires the commit
+count to match, swaps tables and updates the schema version inside a single
+`BEGIN IMMEDIATE` transaction. Any failure rolls back and leaves version 1
+untouched; a second run reports `already_current`; a rewritten proof, a
+mismatched goal/incarnation or an existing swap target fails closed. Cursors,
+operation IDs, commit digests, provider revisions, receipts, events and scan
+pages are byte-identical after the migration.
+
+Retained projections keep every JSON object key the version-1 provider accepted,
+including an empty key and a `__proto__` key: a database the previous provider
+could read must not become one the version-2 provider cannot. The replay proof
+is what keeps that promise honest, because identical identity and digest columns
+alone would not show that a migrated state log is unreadable.
+
+A version-1 database that published only its schema and metadata — the state a
+goal leaves behind when it selected the provider and never committed — migrates
+to an equally empty version-2 database instead of failing, so the operator is
+never left with a database that neither provider accepts.
+
+Run it from the repository checkout, with `--execute` omitted for a safe plan:
+
+```sh
+node --no-warnings --experimental-sqlite --experimental-strip-types \
+  examples/coordination/sqlite-authority-migration.ts \
+  --directory "$RUNTIME_ROOT/authority/sqlite-v0" --goal-id example
+```
+
+Add `--execute` (optionally with `--expected-identity`, which refuses a database
+whose stored incarnation is not the one the operator names) to migrate. The
+entry point rewrites only that Goal's database; it does not change provider
+selection, promote a goal, or enable cross-host writes. Keep the pre-migration
+database copy until the promoted Goal has been validated. A production cutover
+command, migration manifest and reverse export remain separate deliverables.
 
 ### Qualification holds / 资格保留项
 
 The report's `passed` rows apply only to their named axis and sample counts.
-`failed` measurements remain failed; `missing` rows include cumulative storage
-writes, pure lock wait, steady-state RSS proof, the full domain profile, 1 MiB
-and 300k headroom, 24-hour consumer lag, large-history recovery, fenced
-backup/restore, supported upgrades/rollback, OS/runtime coverage and a real
->=10-day soak. Those holds still block profile promotion. Accelerated volume
-never substitutes for elapsed time, and running this command starts no soak.
+`failed` measurements remain failed. The split storage-write rows —
+`logical_write_growth`, `wal_traffic_growth` and `lock_wait_observed`, prefixed
+`one_mib_`/`headroom_300k_` in the dedicated headroom profiles — carry
+the <=15x cumulative-growth budget as per-commit traffic measured at both
+depths, and an invalidated window or missing probe is missing evidence, never a
+pass from the surviving columns. `missing` rows still include whole-run WAL
+totals, pure busy-handler time, physical device writes, steady-state RSS proof,
+the full domain profile, the headroom axes a report did not itself run
+(`payload_one_mib`, `headroom_300k`, `burst_60s`), 24-hour consumer lag,
+large-history recovery, fenced backup/restore, supported upgrades/rollback,
+OS/runtime coverage and a real >=10-day soak. Those holds still block profile
+promotion. Accelerated volume never substitutes for elapsed time, and running
+this command starts no soak.
+
+Retained state is measured where the formal profile runs: an axis reports its
+checkpoint count, replay budget, recovery tail and retained projection/delta
+bytes, and `bounded_retained_state` compares them against one full copy per
+retained commit. That row stays `missing` for a rehearsal, exactly like every
+other formal budget.
 
 SQLite 资格参考使用 Node 22.22.3／SQLite 3.51.3；打开前同时检查实际 WAL 修复版本
-和 statement 关闭行为。公开 Node 最低版本 22.18 继续用于默认 File 路径。显式
+和 statement 关闭行为。公开 Node 最低版本已升至 22.22.3，同时适用于默认 File
+和可选 SQLite；SQLite 仍检查实际内嵌驱动。显式
 SQLite 选择遇到不合格 runtime 会拒绝，不会改默认 provider 或静默回退。
+
+托管 Effect runtime 按用户与源码修订复用，因此真正服务某个 Goal 的 Node／SQLite
+不一定等于调用进程从 PATH 解析到的那一份。runtime info 文件记录
+`runtime_identity`（`node_version`、`sqlite_version`、`sqlite_authority_qualified`），
+`loopx doctor` 会报告该身份；当正在服务的 runtime 不合格时，它还给出重启建议。
+只安装合格 Node 不足以修复一个已经在运行的 runtime：用
+
+```sh
+loopx doctor --restart-runtime
+```
+
+结束后，下一次 control-plane 请求会按当前 PATH 启动新 runtime；等待其 idle
+自动退出等效。非复用 runtime 的直接 CLI 调用只报告同一资格失败、不给重启步骤，
+因为直接换成合格 PATH 重跑一次即可。
 
 默认无参数命令从旧的 4 KiB/100k 改为小型 `rehearsal`，只验证工具和不变量；
 正式 64 KiB、10k/100k 对照必须显式选择
@@ -278,3 +558,16 @@ RSS 和文件大小；没有量到的累计 WAL／逻辑写入和纯锁等待保
 耗尽、长期 consumer backlog 或完整恢复验证。首批测量允许保留 failed/missing；
 >=10 天自然时间 soak、迁移和晋升分别评审与授权。本入口不改变持久格式、Todo
 语义、默认 provider 或任何活跃 Goal。
+
+版本 2 把“每个提交都保留一份完整投影”改成“每个窗口一个检查点 + 每提交一条精确
+delta”：活跃头读取只用自己的行、对应提交和游标连续性自证，历史读取最多重建一个
+窗口，完整归档由 `verifyAuthorityHistory` 线性审计。版本 1 数据库需要显式迁移
+（`examples/coordination/sqlite-authority-migration.ts`，默认只做 plan，`--execute`
+才写入，`--expected-identity` 可拒绝并非操作者所指的 incarnation，失败保持 v1
+原样）。只发布过 schema 与 metadata、从未提交的 v1 库会迁移成同样为空的 v2 库，
+不会让操作者落在两个 provider 都不接受的状态。迁移不改 cursor、operation id、
+commit digest、provider revision、receipt、event 或 scan 页面字节。迁移在提交前
+还会把刚写入的表读回来、用 store 自己的 delta 解码器重放一遍：只核对搬过去的
+标识与摘要无法证明新的状态日志可读。v1 能接受的 JSON key（包括空字符串和
+`__proto__`）在 v2 中保持同样的数据语义，迁移不会把原本可读的库变成读不出来的
+状态。

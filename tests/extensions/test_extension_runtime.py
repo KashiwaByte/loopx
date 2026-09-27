@@ -40,6 +40,7 @@ from loopx.extensions.runtime import (
     doctor_installed_extension,
     enable_extension,
     execute_extension_runtime_binding,
+    extension_catalog_entries,
     extension_status,
     install_extension,
     resolve_capability_binding,
@@ -673,6 +674,177 @@ def test_executable_identity_is_content_addressed_across_paths(tmp_path: Path) -
     changed = resolved_entrypoint_identity(str(provider_b))
     assert changed is not None
     assert changed[1] != identity_a[1]
+
+
+def test_runtime_entrypoint_resolves_sibling_python_for_opaque_launcher(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "provider.exe"
+    launcher.write_bytes(b"MZ opaque console launcher")
+    launcher.chmod(0o755)
+    sibling_python = tmp_path / "python.exe"
+    sibling_python.symlink_to(sys.executable)
+
+    resolved = resolve_runtime_entrypoint({"entrypoint": str(launcher)})
+
+    assert resolved is not None
+    assert resolved.python_executable == str(sibling_python)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink mutation fixture")
+def test_opaque_runtime_identity_binds_sibling_python_artifact(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "provider.exe"
+    launcher.write_bytes(b"MZ opaque console launcher")
+    launcher.chmod(0o755)
+    sibling_python = tmp_path / "python.exe"
+    sibling_python.symlink_to(sys.executable)
+
+    verified = resolve_runtime_entrypoint({"entrypoint": str(launcher)})
+    sibling_python.unlink()
+    sibling_python.symlink_to("/bin/sh")
+    changed = resolve_runtime_entrypoint({"entrypoint": str(launcher)})
+
+    assert verified is not None and changed is not None
+    assert changed.python_executable == verified.python_executable == str(sibling_python)
+    assert changed.identity != verified.identity
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink mutation fixture")
+def test_runtime_entrypoint_identity_binds_selected_python_artifact(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    interpreter = runtime_root / "python"
+    interpreter.symlink_to(sys.executable)
+    provider = runtime_root / "provider"
+    provider.write_text(
+        f"#!{interpreter}\nraise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    provider.chmod(0o755)
+
+    verified = resolve_runtime_entrypoint({"entrypoint": str(provider)})
+    interpreter.unlink()
+    interpreter.symlink_to("/bin/sh")
+    changed = resolve_runtime_entrypoint({"entrypoint": str(provider)})
+
+    assert verified is not None and changed is not None
+    assert changed.python_executable == verified.python_executable == str(interpreter)
+    assert changed.identity != verified.identity
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shebang lifecycle fixture")
+def test_catalog_invalidates_doctor_when_selected_python_artifact_changes(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    interpreter = runtime_root / "python"
+    interpreter.symlink_to(sys.executable)
+    provider = _provider(runtime_root / "provider")
+    provider.write_text(
+        provider.read_text(encoding="utf-8").replace(
+            f"#!{sys.executable}",
+            f"#!{interpreter}",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    manifest = _manifest(
+        tmp_path / "extension.toml",
+        entrypoint=provider,
+        version="1.0.0",
+    )
+    state_file = tmp_path / "extensions.json"
+    install_extension(manifest, state_file=state_file, execute=True)
+    ready = extension_catalog_entries(state_file=state_file)
+    assert ready[0]["provider"]["ready"] is True
+
+    interpreter.unlink()
+    interpreter.symlink_to("/bin/sh")
+
+    stale = extension_catalog_entries(state_file=state_file)
+    assert stale[0]["provider"]["ready"] is False
+    with pytest.raises(ValueError, match="doctor readiness is stale"):
+        resolve_extension_binding(
+            "test-semantic-extension",
+            state_file=state_file,
+            capability_id="semantic-preference",
+            protocol="semantic_preference_provider_v0",
+            permission="semantic_preference.read",
+        )
+
+
+def test_runtime_identity_binds_declared_view_validator_reference(
+    tmp_path: Path,
+) -> None:
+    provider = _provider(tmp_path / "provider")
+    manifest = load_extension_manifest(
+        _standalone_manifest(tmp_path / "extension.toml", entrypoint=provider)
+    )
+    runtime = manifest["runtime"]
+    declaration = ("missing_validator_module:validate_view",)
+
+    undeclared = resolve_runtime_entrypoint(runtime)
+    declared = resolve_runtime_entrypoint(runtime, view_validators=declaration)
+    repeated = resolve_runtime_entrypoint(runtime, view_validators=declaration)
+
+    assert undeclared is not None and declared is not None
+    assert repeated is not None
+    # Declaring implementation code the runtime interpreter runs is part of what
+    # the doctor verifies, and an unresolvable declaration must not drift between
+    # two computations of the same declaration.
+    assert declared.identity != undeclared.identity
+    assert repeated.identity == declared.identity
+
+
+def test_doctor_keeps_provider_ready_when_declared_validator_cannot_resolve(
+    tmp_path: Path,
+) -> None:
+    """A validator the runtime cannot import is not a provider-runtime fault.
+
+    The doctor owns the provider runtime: the launcher, the selected interpreter
+    and the implementations that run in it. A declared validator the runtime
+    interpreter cannot resolve is recorded in that identity, and the projection
+    surface that uses it fails with its own actionable error instead.
+    """
+
+    provider = _provider(tmp_path / "provider")
+    manifest = _presentation_surface_manifest(
+        tmp_path / "extension.toml",
+        entrypoint=provider,
+        declaration="""
+[[presentation_surfaces]]
+id = "investment-research"
+kind = "decision_research_dashboard"
+title = "Investment Research"
+view_schema = "decision_research_dashboard_v0"
+view_validator = "missing_validator_module:validate_view"
+visibility = "owner-only"
+empty_state_title = "No validated research yet"
+empty_state_detail = "Publish a validated projection."
+""",
+        include_view_validator=False,
+    )
+    state_file = tmp_path / "extensions.json"
+    installed = install_extension(manifest, state_file=state_file, execute=True)
+
+    assert installed["doctor"]["verified"] is True
+    assert extension_catalog_entries(state_file=state_file)[0]["provider"]["ready"]
+
+    redoctored = doctor_installed_extension(
+        "test-standalone-extension",
+        state_file=state_file,
+        execute=True,
+    )
+    assert redoctored["verified"] is True
+    assert (
+        redoctored["entrypoint_identity"]
+        == installed["doctor"]["entrypoint_identity"]
+    )
 
 
 def test_standalone_runtime_does_not_require_a_capability_contract(

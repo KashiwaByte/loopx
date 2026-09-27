@@ -32,8 +32,8 @@ export function normalizeTodoRepository(value: unknown, label = "task_repository
         !url.hostname || url.password || url.search || url.hash) throw new Error();
       host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
       const port = Number(url.port);
-      if (port && !((["http:", "git:"].includes(url.protocol) && port === 80) ||
-        (["https:", "ssh:"].includes(url.protocol) && [22, 443].includes(port)))) host += `:${port}`;
+      const defaultPorts: Record<string, number> = {"git:": 9418, "http:": 80, "https:": 443, "ssh:": 22};
+      if (url.port !== "" && port !== defaultPorts[url.protocol]) host += `:${port}`;
       const pathMatch = /^[^:]+:\/\/[^/?#]*([^?#]*)/.exec(raw);
       if (!pathMatch) throw new Error();
       path = pathMatch[1];

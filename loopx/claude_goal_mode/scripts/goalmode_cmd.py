@@ -41,6 +41,7 @@ from loopx.control_plane.heartbeat.rules import (  # noqa: E402
     RUNTIME_REPAIR_ROUTING_RULE,
     SCOPE_BOUNDED_WORK_RULE,
 )
+from loopx.history import load_registry  # noqa: E402
 
 
 def gh_prefix():
@@ -50,7 +51,7 @@ def gh_prefix():
 
 
 def gh(args, cwd=None):
-    return subprocess.run(gh_prefix() + args, cwd=cwd, capture_output=True, text=True, timeout=120)
+    return subprocess.run(gh_prefix() + args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
 
 
 def slug(name: str) -> str:
@@ -83,8 +84,10 @@ def loop_execution_content(goal_id, agent_id) -> str:
         "Use interaction_contract.mcp_channel for tool ownership and vision input limits.\n"
         "At material delivery, compare the Goal's vision/acceptance with actual evidence.\n"
         "Pass the resulting agent_vision or a justified vision_unchanged_reason to\n"
-        "complete_task. If omitted, use review_task_vision on that completed Todo to\n"
-        "repair its missing checkpoint without another spend. This is not a Goal-stop\n"
+        "complete_task. If omitted, call review_task_vision with only that Todo and\n"
+        "Agent to read the basis; rejudge, then submit read_context_id with the decision.\n"
+        "Stale/replaced receipts require rereading; lost replies retry the same receipt\n"
+        "and decision. Recovery never spends again. This is not a Goal-stop\n"
         "shortcut: open acceptance needs replan; vision_closed closes a stage and needs\n"
         "a successor vision; no_followup requires evidence of no remaining scoped work.\n"
         "For new replan work not covered by these tools, use the exact live\n"
@@ -128,7 +131,7 @@ def goal_detail(ctx):
     if reg:
         try:
             regp = Path(reg)
-            data = json.loads(regp.read_text(encoding="utf-8"))
+            data = load_registry(regp)
             entry = next((g for g in data.get("goals", []) if g.get("id") == gid), None)
             sf = (entry or {}).get("state_file")
             if sf:
@@ -144,7 +147,7 @@ def goal_detail(ctx):
             ["--format", "json", "quota", "should-run", "--goal-id", gid]
         if agent:
             cmd += ["--agent-id", agent]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
         payload = json.loads(out.stdout or "{}")
     except Exception:
         pass
@@ -234,7 +237,7 @@ def main():
         # Claude projects keep goal state under .claude/ (not the Codex-default .codex/)
         state_file = f".claude/goals/{goal_id}/ACTIVE_GOAL_STATE.md"
         r = gh(["bootstrap", "--project", str(proj), "--goal-id", goal_id,
-                "--objective", task, "--state-file", state_file, "--no-onboarding-scan"])
+                "--objective", task, "--state-file", state_file])
         if "ok: `True`" not in r.stdout and "ok=True" not in r.stdout and r.returncode != 0:
             print("[loopx] bootstrap failed:\n" + (r.stdout + r.stderr)[:600])
             sys.exit(1)

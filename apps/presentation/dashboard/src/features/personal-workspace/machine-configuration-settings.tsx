@@ -1,5 +1,6 @@
+import { UsageStatisticsSettings } from "./usage-statistics-settings";
 import { useEffect, useMemo, useState } from "react";
-import { Check, Code2, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, Code2, RefreshCw, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
 
 import {
   applyMachineConfiguration,
@@ -44,11 +45,19 @@ function completeMachineConfiguration(
   current: Record<string, unknown> | undefined,
   draft: Record<string, unknown>,
 ) {
-  return {
+  const complete = {
     ...configurationObject(capability.default),
     ...configurationObject(current),
     ...draft,
   };
+  // The guided steward editor owns the v1 selection-policy fields. Opening an
+  // installed v0 preference in that form is an explicit migration preview;
+  // JSON mode can still submit the legacy shape unchanged when needed.
+  if (capability.capability_id === "steward_executor"
+    && (Object.hasOwn(draft, "selection_policy") || Object.hasOwn(draft, "eligible_endpoints"))) {
+    complete.schema_version = configurationObject(capability.default).schema_version;
+  }
+  return complete;
 }
 
 function validGuidedDraft(capability: CapabilityDescriptor, value: Record<string, unknown>) {
@@ -60,6 +69,18 @@ function validGuidedDraft(capability: CapabilityDescriptor, value: Record<string
     return Boolean(String(value.profile_preset ?? "").trim()
       && String(value.route_ref ?? "").trim()
       && String(value.timezone ?? "").trim());
+  }
+  if (capability.capability_id === "steward_executor") {
+    const policy = String(value.selection_policy ?? "preferred");
+    const primary = String(value.executor_endpoint ?? "");
+    const eligible = Array.isArray(value.eligible_endpoints)
+      ? value.eligible_endpoints.map((item) => String(item))
+      : [];
+    if (policy === "flexible") {
+      return eligible.length > 0 && eligible.includes(primary)
+        && new Set(eligible).size === eligible.length;
+    }
+    return eligible.length === 0;
   }
   return true;
 }
@@ -81,7 +102,7 @@ function shortRevision(value: string | undefined) {
   return value.replace(/^sha256:/, "").slice(0, 12);
 }
 
-export function MachineConfigurationSettings() {
+export function MachineConfigurationSettings({ section }: { section: "steward" | "other" }) {
   const { locale, t } = useWorkspaceI18n();
   const [inspection, setInspection] = useState<MachineConfigurationInspection | null>(null);
   const [selectedCapabilityId, setSelectedCapabilityId] = useState("");
@@ -97,14 +118,21 @@ export function MachineConfigurationSettings() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const capabilities = useMemo(() => orderCapabilitiesForPresentation(
-    inspection?.capability_catalog.capabilities ?? [], locale,
-  ), [inspection, locale]);
+    (inspection?.capability_catalog.capabilities ?? []).filter((capability) =>
+      capability.available_scopes.includes("machine")
+      && (section === "steward"
+        ? capability.capability_id === "steward_executor" || capability.capability_id === "manager_runtime"
+        : capability.capability_id !== "steward_executor" && capability.capability_id !== "manager_runtime")),
+    locale,
+  ), [inspection, locale, section]);
   const invalidNamespace = inspection?.invalid_namespaces[0];
   const selectedRaw = capabilities.find(
     (capability) => capability.capability_id === selectedCapabilityId,
   ) ?? (invalidNamespace ? capabilities.find(
     (capability) => capability.machine_namespace === invalidNamespace,
-  ) : undefined) ?? capabilities.find((capability) => canEditCapability(capability, "machine")) ?? capabilities[0];
+  ) : undefined) ?? (section === "steward"
+    ? capabilities.find((capability) => capability.capability_id === "steward_executor")
+    : undefined) ?? capabilities.find((capability) => canEditCapability(capability, "machine")) ?? capabilities[0];
   const selected = selectedRaw ? localizeCapability(selectedRaw, locale) : undefined;
   const selectedCurrent = currentConfiguration(inspection, selected);
   const configured = Boolean(selected?.machine_namespace && selectedCurrent);
@@ -123,6 +151,19 @@ export function MachineConfigurationSettings() {
 
   async function reload() {
     setInspection(await fetchMachineConfiguration());
+  }
+
+  async function retryLoad() {
+    if (busy) return;
+    setBusy("load");
+    setError(null);
+    try {
+      await reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("machine.loadError"));
+    } finally {
+      setBusy(null);
+    }
   }
 
   useEffect(() => {
@@ -282,26 +323,40 @@ export function MachineConfigurationSettings() {
   if (busy === "load") {
     return <div className="personal-machine-loading" role="status">{t("common.loading")}</div>;
   }
+  if (!inspection) {
+    return <section className="personal-capability-error" role="alert">
+      <AlertTriangle aria-hidden size={18} />
+      <span><strong>{t("machine.loadError")}</strong><small>{error}</small></span>
+      <button onClick={() => void retryLoad()} type="button"><RefreshCw aria-hidden size={15} />{t("capabilities.retry")}</button>
+    </section>;
+  }
   if (!selected) {
     return <p className="personal-capability-empty">{t("machine.capabilityEmpty")}</p>;
   }
 
   return (
     <section className="personal-capability-settings" data-revision={inspection?.revision}>
-      <details className="personal-capability-scope-note">
-        <summary><ShieldCheck aria-hidden size={17} />{t("machine.liveDefault")}</summary>
-        <p>{t("machine.liveDefaultDescription")}</p>
-      </details>
+      <div>
+        {section === "steward" ? <details className="personal-capability-scope-note">
+          <summary><ShieldCheck aria-hidden size={17} />{t("machine.liveDefault")}</summary>
+          <p>{t("machine.liveDefaultDescription")}</p>
+        </details> : null}
+        {section === "other" ? <UsageStatisticsSettings /> : null}
+      </div>
 
-      {inspection?.status === "invalid" ? (
-        <section className="personal-machine-error" data-testid="machine-invalid-repair" role="alert">
-          <strong>{t("machine.invalidStoredConfiguration")}</strong>
-          <p>{t("machine.invalidStoredConfigurationDescription")}</p>
-        </section>
-      ) : null}
+      {/* The catalog workbench is the only flexible block on this surface. It
+          lives in one body element so the surface keeps exactly two grid rows
+          however many notices the editor needs. */}
+      <div className="personal-capability-body">
+        {inspection?.status === "invalid" ? (
+          <section className="personal-machine-error" data-testid="machine-invalid-repair" role="alert">
+            <strong>{t("machine.invalidStoredConfiguration")}</strong>
+            <p>{t("machine.invalidStoredConfigurationDescription")}</p>
+          </section>
+        ) : null}
 
-      <div className="personal-capability-layout">
-        <CapabilityCatalogNavigation capabilities={capabilities} locale={locale} onSelect={setSelectedCapabilityId} scope="machine" selectedCapabilityId={selected.capability_id} t={t} />
+        <div className="personal-capability-layout">
+        <CapabilityCatalogNavigation capabilities={capabilities} locale={locale} onSelect={setSelectedCapabilityId} scope="machine" selectedCapabilityId={selected.capability_id} showScope={false} t={t} />
 
         <article aria-label={selected.display_name} className="personal-capability-detail" tabIndex={0}>
           <CapabilityDetailHeader capability={selectedRaw} locale={locale}
@@ -336,6 +391,15 @@ export function MachineConfigurationSettings() {
             </section>
           ) : null}
 
+          {selected.capability_id === "steward_executor" ? (
+            <section className="personal-capability-behavior-note">
+              <ShieldCheck aria-hidden size={18} />
+              <div><strong>{locale === "zh-CN" ? "管家模型与思考深度" : "Steward model and reasoning"}</strong><p>{locale === "zh-CN"
+                ? "这里设置本机管家新会话的默认模型和思考深度。已有会话可能继续使用原来的分配；配置成功不代表正在运行的会话已切换。"
+                : "Choose the model and reasoning effort for new steward sessions on this machine. Existing sessions may retain their earlier allocation; saving a default does not switch a running session."}</p></div>
+            </section>
+          ) : null}
+
           {selected.capability_id === "pull_request_review" ? (
             <section className="personal-capability-behavior-note">
               <ShieldCheck aria-hidden size={18} />
@@ -353,7 +417,9 @@ export function MachineConfigurationSettings() {
 
           {editorMode === "guided" ? (
             <section className="personal-capability-field-summary">
-              <CapabilityConfigurationFields copy={localizedCapabilityFieldCopy(locale)} disabled={Boolean(busy)} editor={selected.configuration_editor} onChange={changeDraft} value={draft}
+              <CapabilityConfigurationFields copy={localizedCapabilityFieldCopy(locale)} disabled={Boolean(busy)} editor={selected.configuration_editor}
+                omitKeys={selected.capability_id === "steward_executor" && draft.selection_policy !== "flexible" ? ["eligible_endpoints"] : []}
+                onChange={changeDraft} value={draft}
                 enabledAction={<button className="personal-capability-edit-json" onClick={() => changeMode("json")} type="button"><Code2 aria-hidden size={14} />{t("machine.editJson")}</button>} />
               {!editorValid ? <p className="personal-machine-validation" role="alert">{t("machine.requiredFields")}</p> : null}
             </section>
@@ -401,6 +467,7 @@ export function MachineConfigurationSettings() {
             t={t}
           /> : null}
         </article>
+        </div>
       </div>
     </section>
   );

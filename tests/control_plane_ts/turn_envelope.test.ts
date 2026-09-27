@@ -12,6 +12,7 @@ import {
 import { EffectRuntimeRequestError } from "../../loopx/control_plane/effect_runtime_errors.ts";
 import type { JsonObject } from "../../loopx/control_plane/effect_program.ts";
 import { TURN_ENVELOPE_SECTION_TARGETS } from "../../loopx/control_plane/quota/turn_envelope_budget.ts";
+import { projectPeerOrchestration } from "../../loopx/control_plane/quota/peer_orchestration.ts";
 
 function payload(): Record<string, unknown> {
   return {
@@ -71,6 +72,97 @@ const protocolActionFields = {
   llm: "no_api",
   agent_action: "advance one bounded segment",
 };
+
+test("large peer inventories retain scoped gates and signed detail without hiding tasks", () => {
+  const source = payload();
+  const items = Array.from({ length: 50 }, (_, i) => ({ todo_id: `todo_${i}`,
+    claimed_by: "worker", status: "open", task_class: "advancement_task",
+    title: "Inspect independent source and return verified evidence" }));
+  for (const available of [[], ["peer_agent_activation"]]) {
+    const peer = projectPeerOrchestration({ agent_id: "parent", registered_agents: ["worker"],
+      items, available_capabilities: available, agents: [{ agent_id: "worker", state: "running" }] })!;
+    for (const nested of [false, true]) {
+      source.task_orchestration_contract = nested
+        ? { mode: "adaptive", execution_state: "ready", eligible_child_lanes: [{ todo_id: "local-child" }], peer_activation_diagnostic: peer }
+        : peer;
+      const render = () => buildTurnEnvelope({ payload: source,
+        protocol_action_fields: protocolActionFields, scheduler_execution_args: " --available-capability shell" });
+      const envelope = render();
+      const contract = envelope.task_orchestration_contract as JsonObject;
+      const compact = (nested ? contract.peer_activation_diagnostic : contract) as JsonObject;
+      assert.equal(compact.execution_scope, "peer_agent_activation");
+      assert.equal(compact.execution_state, available.length ? "ready" : "blocked");
+      assert.equal(compact.activation_allowed, available.length > 0);
+      assert.equal(Number(compact.eligible_peer_count) + Number(compact.blocked_peer_count), 50);
+      assert.equal(compact.read_required, true);
+      assert.equal(compact.eligible_peer_lanes, undefined);
+      assert.equal((peer.eligible_peer_lanes as unknown[]).length + (peer.blocked_peer_lanes as unknown[]).length, 50);
+      assert.equal((envelope.compaction as JsonObject).within_budget, true);
+      assert.deepEqual(quotaActionSignatureDocument(source, protocolActionFields), turnEnvelopeActionSignatureDocument(envelope));
+      const rows = (available.length ? peer.eligible_peer_lanes : peer.blocked_peer_lanes) as JsonObject[];
+      rows[0].todo_id = `changed-identity-${nested}`;
+      assert.notEqual((render().action_signature as JsonObject).source_hash, (envelope.action_signature as JsonObject).source_hash);
+      if (nested) assert.deepEqual(contract.eligible_child_lanes, [{ todo_id: "local-child" }]);
+    }
+  }
+});
+
+test("Turn preserves checkpointed scope approval without lifting other gates", () => {
+  const source = payload();
+  const scope = source.goal_boundary as Record<string, unknown>;
+  scope.requires_parent_approval = ["write", "publish", "production-action"];
+  const render = () => buildTurnEnvelope({payload: source,
+    protocol_action_fields: protocolActionFields, scheduler_execution_args: ""});
+  const baseline = render();
+  scope.checkpointed_boundary_authority = {
+    schema_version: "checkpointed_boundary_authority_v0", active_count: 1,
+    active_write_scope: ["src/**"], entries: [{source: "operator-decision"}],
+  };
+  const approved = render();
+  const boundary = approved.boundary as Record<string, unknown>;
+  assert.deepEqual(boundary.checkpointed_boundary_authority, {
+    schema_version: "checkpointed_boundary_authority_v0", active_count: 1,
+    active_write_scope: ["src/**"],
+  });
+  assert.deepEqual(boundary.requires_parent_approval, ["write", "publish", "production-action"]);
+  for (const inactive of [
+    {schema_version: "checkpointed_boundary_authority_v0", active_count: 0, active_write_scope: []},
+    {schema_version: "unknown", active_count: 1, active_write_scope: ["**"]},
+    {schema_version: "checkpointed_boundary_authority_v0", active_count: 1, active_write_scope: ["x".repeat(181)]},
+  ]) {
+    scope.checkpointed_boundary_authority = inactive;
+    assert.deepEqual(render().boundary, baseline.boundary);
+  }
+  delete scope.checkpointed_boundary_authority;
+  assert.deepEqual(render(), baseline);
+});
+
+test("only active hook reads carry additive prompt budget through the envelope", () => {
+  const source = payload();
+  const baseline = buildTurnEnvelope({ payload: source, protocol_action_fields: protocolActionFields, scheduler_execution_args: "" });
+  const command = "loopx inspect --registry /" + "route/".repeat(80) + "registry.json";
+  const read = { kind: "fixture_read", command, reason: "Read the pending observation",
+    source: "turn_start_capability_hook" };
+  source.required_reads = [read];
+  const ordinary = buildTurnEnvelope({ payload: source, protocol_action_fields: protocolActionFields, scheduler_execution_args: "" });
+  assert.equal((ordinary.compaction as JsonObject).budget_bytes, 8_192);
+  assert.equal(((ordinary.required_reads as JsonObject[])[0].command as string).length, 360);
+  assert.equal((ordinary.compaction as JsonObject).hook_prompt_budget_bytes, undefined);
+  source.required_reads = [{ ...read, prompt_budget_bytes: 1_536 }];
+  const active = buildTurnEnvelope({ payload: source, protocol_action_fields: protocolActionFields, scheduler_execution_args: "" });
+  assert.equal((active.required_reads as JsonObject[])[0].command, command);
+  assert.equal((active.compaction as JsonObject).budget_bytes, 8_192 + 1_536);
+  assert.equal((active.compaction as JsonObject).hook_prompt_budget_bytes, 1_536);
+  assert.equal((active.compaction as JsonObject).envelope_utf8_bytes, Buffer.byteLength(JSON.stringify(active)));
+  for (const field of ["action", "user", "scheduler", "execution_policy", "writeback"]) {
+    assert.deepEqual(active[field], baseline[field]);
+  }
+  source.required_reads = [{ ...read, source: "other", prompt_budget_bytes: 1_536 }];
+  const unrelated = buildTurnEnvelope({ payload: source, protocol_action_fields: protocolActionFields, scheduler_execution_args: "" });
+  assert.equal((unrelated.compaction as JsonObject).budget_bytes, 8_192);
+  delete source.required_reads;
+  assert.deepEqual(buildTurnEnvelope({ payload: source, protocol_action_fields: protocolActionFields, scheduler_execution_args: "" }), baseline);
+});
 
 test("pending capability action outranks stale replan commands and remains signed", () => {
   const source = payload();

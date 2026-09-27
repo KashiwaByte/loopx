@@ -8,23 +8,28 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 import loopx.pr_review as pr_review_module  # noqa: E402
-from loopx.capabilities.pr_review_queue.review_contract import (  # noqa: E402
-    REVIEW_POLICY_REVISION,
+from loopx.capabilities.project_skill_delivery.core import (  # noqa: E402
+    discover_project_scoped_skill_ids,
 )
+from loopx.doctor import REQUIRED_INSTALLED_SKILL_PHRASES  # noqa: E402
 from loopx.pr_review import (  # noqa: E402
     _github_search_date,
     build_pr_review_packet,
     load_pr_fixture,
 )
+from loopx.skill_install_readback import PACKAGED_HOST_SKILL_IDS  # noqa: E402
 
 FIXTURE = REPO_ROOT / "examples" / "fixtures" / "pr-review.public.json"
 PR_REVIEW_SKILL = REPO_ROOT / "skills" / "loopx-pr-review" / "SKILL.md"
+PR_MERGE_SKILL_DIR = REPO_ROOT / "skills" / "loopx-pr-merge"
+PR_MERGE_SKILL = REPO_ROOT / "skills" / "loopx-pr-merge" / "SKILL.md"
 PRIVATE_PATTERNS = [
     re.compile(r"/" + r"Users/[A-Za-z0-9._-]+/"),
     re.compile(r"/" + r"private/"),
@@ -54,12 +59,40 @@ def assert_public_safe(payload: dict[str, object]) -> None:
             )
 
 
+# `--check-merge-readiness` now mandates a Goal id. Every authoritative
+# invocation an agent may read has to carry it, or the canonical self-merge
+# gate fails deterministically before it can record its observation.
+MERGE_READINESS_GUIDANCE_PATHS = (
+    REPO_ROOT / "AGENTS.md",
+    REPO_ROOT / "loopx" / "capabilities" / "pr_review_queue" / "README.md",
+    REPO_ROOT / "loopx" / "capabilities" / "pr_review_queue" / "catalog_entry.py",
+    PR_REVIEW_SKILL,
+    PR_MERGE_SKILL,
+)
+
+
+def assert_merge_readiness_invocations_require_goal_id() -> None:
+    for path in MERGE_READINESS_GUIDANCE_PATHS:
+        source = path.read_text(encoding="utf-8")
+        for span in re.findall(r"`[^`]*--check-merge-readiness[^`]*`", source):
+            assert "--goal-id" in span, (
+                f"{path.name} must pass --goal-id to --check-merge-readiness: {span}"
+            )
+        for line in source.splitlines():
+            if "--check-merge-readiness" in line and "`" not in line:
+                assert "--goal-id" in line, (
+                    f"{path.name} must pass --goal-id to --check-merge-readiness: "
+                    f"{line.strip()}"
+                )
+
+
 def main() -> int:
     skill_source = PR_REVIEW_SKILL.read_text(encoding="utf-8")
     skill_text = " ".join(skill_source.split())
     for phrase in (
         "This skill is a thin host adapter",
-        "loopx --format json pr-review --state all",
+        "keeps ordinary queue discovery open-only",
+        "explicit `--state merged|all`",
         "agent_response_contract.review_execution_contract",
         "pull_requests[review_action_kind!=null].review_plan",
         "pull_requests[review_action_kind!=null].review_template",
@@ -77,13 +110,15 @@ def main() -> int:
         "详细中文评审",
         "英文简短结论",
         "complete Chinese five-block review plus one concise English verdict",
-        f"Require execution `policy_revision == {REVIEW_POLICY_REVISION}`",
+        "review_execution_contract.policy_revision",
+        "review_policy_revision",
         "Do not retain expired temporary worktree overrides",
         "Treat `candidate` as a preview, not a durable projection",
         "durable Todo target-key readback -> `--projected-exact-head` -> exact-head review/comment readback -> `--handled-exact-head`",
         "Never send the projection ACK before the Todo exists",
         "Generic `re-review`, `重新review`, and `复审` wording selects the named PR; it is not a force-refresh token.",
         "the row stays in `pull_requests` inventory but must not appear in `review_sequence`",
+        "--target-exact-head NUMBER@HEAD_OID",
     ):
         assert phrase in skill_text, phrase
     assert len(skill_source.splitlines()) <= 180, len(skill_source.splitlines())
@@ -98,14 +133,50 @@ def main() -> int:
         assert duplicated_contract_heading not in skill_source, (
             duplicated_contract_heading
         )
-    policy_requirement = re.search(
-        r"Require execution `policy_revision == ([0-9]+)`", skill_source
+    # The skill must track the capability's revision, not pin a copy of it:
+    # a literal here goes stale on the next capability bump and blocks
+    # reviewers with a mismatch that has nothing to do with their change.
+    assert not re.search(r"policy_revision\s*==\s*[0-9]+", skill_source), (
+        "skill must not pin a literal review policy revision"
     )
-    assert policy_requirement, "skill must declare an exact review policy revision"
-    assert int(policy_requirement.group(1)) == REVIEW_POLICY_REVISION, (
-        policy_requirement.group(1),
-        REVIEW_POLICY_REVISION,
+
+    # The merge-decision workflow must require the capability-owned review
+    # evidence for the exact head, and must stay out of the default installed
+    # skill set so it cannot disturb hosts that never merge LoopX pull requests.
+    assert PR_MERGE_SKILL.is_file(), PR_MERGE_SKILL
+    assert "loopx-pr-merge" not in PACKAGED_HOST_SKILL_IDS
+    # Repo-kept means repo-only: no scope marker, so no delivery path can copy
+    # this workflow onto a host that did not deliberately adopt it, and the
+    # wheel does not ship it either.
+    assert not (PR_MERGE_SKILL_DIR / ".loopx-skill-scope").exists()
+    assert "loopx-pr-merge" not in discover_project_scoped_skill_ids(
+        REPO_ROOT / "skills"
     )
+    assert "loopx-pr-merge" not in REQUIRED_INSTALLED_SKILL_PHRASES
+    packaged_files = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["tool"]["setuptools"]["data-files"]
+    assert not [
+        path
+        for paths in packaged_files.values()
+        for path in paths
+        if path.startswith("skills/loopx-pr-merge/")
+    ], "the repo-kept merge workflow must stay out of the packaged wheel"
+    merge_text = " ".join(PR_MERGE_SKILL.read_text(encoding="utf-8").split())
+    for phrase in (
+        "Optional maintainer workflow",
+        "stays outside the default installed skill set",
+        "It lives in the repository",
+        "loopx --format json pr-review --state all",
+        "agent_response_contract.review_execution_contract",
+        "--check-merge-readiness NUMBER@HEAD_OID",
+        "ready=true",
+        "completion_gate",
+        "admin bypass never overrides this gate",
+        "A merge decision without this evidence is not authorized",
+    ):
+        assert phrase in merge_text, phrase
+    assert_merge_readiness_invocations_require_goal_id()
 
     assert _github_search_date("2026-06-28T00:00:00+08:00") == "2026-06-27"
     assert _github_search_date("2026-06-28T00:00:00Z") == "2026-06-28"
@@ -180,7 +251,8 @@ def main() -> int:
 
     payload = json.loads(
         run_cli(
-            "--format", "json", "pr-review", "--fixture", str(FIXTURE), "--limit", "5"
+            "--format", "json", "pr-review", "--fixture", str(FIXTURE),
+            "--state", "all", "--limit", "5"
         ).stdout
     )
     assert payload["schema_version"] == "loopx_pr_review_command_response_v0", payload
@@ -188,7 +260,7 @@ def main() -> int:
     assert request["command"] == "/loopx-pr-review", request
     assert (
         request["cli_command"]
-        == "loopx pr-review [--repo owner/repo] [--state open|merged|all] [--review-priority other-developers-first|owner-first] [--since ISO]"
+        == "loopx pr-review [--repo owner/repo] [--target-exact-head NUMBER@HEAD_OID] [--state open|merged|all] [--review-priority other-developers-first|owner-first] [--since ISO]"
     ), request
     assert request["privacy_mode"] == "public_safe_github_metadata", request
     assert request["dry_run"] is True, request
@@ -212,6 +284,27 @@ def main() -> int:
     assert payload["summary"]["total_pr_count"] == 4, payload["summary"]
     assert payload["summary"]["open_pr_count"] == 3, payload["summary"]
     assert payload["summary"]["merged_pr_count"] == 1, payload["summary"]
+    default_open = json.loads(
+        run_cli(
+            "--format", "json", "pr-review", "--fixture", str(FIXTURE), "--limit", "5"
+        ).stdout
+    )
+    assert default_open["request"]["state_filter"] == "open", default_open["request"]
+    assert default_open["summary"]["total_pr_count"] == 3, default_open["summary"]
+    assert default_open["summary"]["merged_pr_count"] == 0, default_open["summary"]
+    target = next(item for item in payload["pull_requests"] if item["number"] == 770)
+    exact_target = f"{target['number']}@{target['head_oid']}"
+    targeted = json.loads(
+        run_cli(
+            "--format", "json", "pr-review", "--fixture", str(FIXTURE),
+            "--target-exact-head", exact_target,
+        ).stdout
+    )
+    assert targeted["request"]["target_exact_heads"] == [exact_target], targeted
+    assert targeted["request"]["state_filter"] == "all", targeted["request"]
+    assert targeted["result_completeness"]["complete"] is True, targeted
+    assert targeted["result_completeness"]["limit_scope"] == "exact_targets", targeted
+    assert [item["number"] for item in targeted["pull_requests"]] == [target["number"]]
     assert payload["summary"]["post_merge_review_count"] == 1, payload["summary"]
     assert payload["summary"]["review_attention_count"] == 3, payload["summary"]
     assert payload["summary"]["draft_count"] == 1, payload["summary"]
@@ -251,6 +344,12 @@ def main() -> int:
 
     merge_head = "e" * 40
     with tempfile.TemporaryDirectory() as temp_dir:
+        runtime_root = Path(temp_dir) / "runtime"
+        registry_path = Path(temp_dir) / "registry.json"
+        registry_path.write_text(
+            json.dumps({"goals": [{"id": "test-goal", "repo": temp_dir}]}),
+            encoding="utf-8",
+        )
         merge_fixture_path = Path(temp_dir) / "merge-readiness.json"
         merge_fixture = {
             "repository": "owner/repo",
@@ -272,12 +371,7 @@ def main() -> int:
                     "reviews": [
                         {
                             "state": "APPROVED",
-                            "body": (
-                                "## 动机\n动机。\n\n## 改动思路\n思路。\n\n"
-                                "## 具体改动\n改动。\n\n## 对主干的风险\n风险。\n\n"
-                                "## 我的整体评价\n通过。\n\n"
-                                f"English verdict: APPROVE at exact head {merge_head}."
-                            ),
+                            "body": (REPO_ROOT / "examples/fixtures/pr-review.body.md").read_text().replace("HEAD_OID", merge_head).replace("VERDICT", "APPROVE"),
                             "author": {"login": "maintainer"},
                             "commit": {"oid": merge_head},
                             "submittedAt": "2026-09-09T11:14:01Z",
@@ -307,9 +401,15 @@ def main() -> int:
         merge_fixture_path.write_text(json.dumps(merge_fixture), encoding="utf-8")
         ready = json.loads(
             run_cli(
+                "--runtime-root",
+                str(runtime_root),
+                "--registry",
+                str(registry_path),
                 "--format",
                 "json",
                 "pr-review",
+                "--goal-id",
+                "test-goal",
                 "--fixture",
                 str(merge_fixture_path),
                 "--check-merge-readiness",
@@ -318,6 +418,29 @@ def main() -> int:
         )
         assert ready["ready"] is True, ready
         assert ready["blocking_reasons"] == [], ready
+        unchanged_queue = json.loads(
+            run_cli(
+                "--runtime-root",
+                str(runtime_root),
+                "--registry",
+                str(registry_path),
+                "--format",
+                "json",
+                "pr-review",
+                "--goal-id",
+                "test-goal",
+                "--fixture",
+                str(merge_fixture_path),
+                "--state",
+                "open",
+            ).stdout
+        )
+        unchanged_item = unchanged_queue["pull_requests"][0]
+        assert unchanged_item["review_action_kind"] is None, unchanged_item
+        assert (
+            unchanged_item["merge_readiness_observation"]["observation_state"]
+            == "observed_unchanged"
+        ), unchanged_item
 
         merge_fixture["pull_requests"][0]["reviews"][0]["body"] = merge_fixture[
             "pull_requests"
@@ -327,9 +450,15 @@ def main() -> int:
         )
         merge_fixture_path.write_text(json.dumps(merge_fixture), encoding="utf-8")
         blocked_run = run_cli(
+            "--runtime-root",
+            str(runtime_root),
+            "--registry",
+            str(registry_path),
             "--format",
             "json",
             "pr-review",
+            "--goal-id",
+            "test-goal",
             "--fixture",
             str(merge_fixture_path),
             "--check-merge-readiness",
@@ -342,6 +471,140 @@ def main() -> int:
             "current_head_review_missing_or_invalid" in blocked["blocking_reasons"]
         ), blocked
         assert "status_checks_failed" in blocked["blocking_reasons"], blocked
+
+    # Merge readiness follows the typed approval verdict, not GitHub's review
+    # state. The platform blocks self-approval, so an author-owned approval is
+    # stored as COMMENTED; a state-based rule counted these still-open heads as
+    # concluded and hid approved heads that had gone behind, conflicted, lost
+    # checks, or become blocked.
+    approval_head = "f" * 40
+
+    def approved_open_head(
+        number: int,
+        *,
+        merge_state: str,
+        review_state: str = "COMMENTED",
+        verdict: str = "APPROVE",
+    ) -> dict[str, object]:
+        title = (
+            "Approval conclusion (author-owned PR; GitHub blocks formal self-approval)"
+            if verdict == "APPROVE"
+            else "Request changes conclusion (author-owned PR; GitHub blocks formal self-review)"
+        )
+        return {
+            "number": number,
+            "title": f"Approved open head {number}",
+            "url": f"https://github.com/owner/repo/pull/{number}",
+            "state": "OPEN",
+            "author": {"login": "maintainer"},
+            "headRefOid": approval_head,
+            "baseRefName": "main",
+            "isDraft": False,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "mergeStateStatus": merge_state,
+            "files": [{"path": "src/runtime.py", "additions": 1, "deletions": 1}],
+            "reviews": [
+                {
+                    "state": review_state,
+                    "body": title + "\n\n" + (REPO_ROOT / "examples/fixtures/pr-review.body.md").read_text().replace("HEAD_OID", approval_head).replace("VERDICT", verdict),
+                    "author": {"login": "maintainer"},
+                    "commit": {"oid": approval_head},
+                    "submittedAt": "2026-09-09T11:14:01Z",
+                }
+            ],
+            "statusCheckRollup": [
+                {"name": "Sign-off", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {
+                    "name": "merge-gate",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS" if merge_state == "CLEAN" else "FAILURE",
+                },
+            ],
+            "review_thread_summary": {
+                "schema_version": "github_review_thread_summary_v0",
+                "complete": True,
+                "total_count": 0,
+                "unresolved_count": 0,
+            },
+        }
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        runtime_root = Path(temp_dir) / "runtime"
+        registry_path = Path(temp_dir) / "registry.json"
+        registry_path.write_text(
+            json.dumps({"goals": [{"id": "test-goal", "repo": temp_dir}]}),
+            encoding="utf-8",
+        )
+        approval_fixture_path = Path(temp_dir) / "approved-open-heads.json"
+        approval_fixture = {
+            "repository": "owner/repo",
+            "reviewer_login": "maintainer",
+            "pull_requests": [
+                approved_open_head(4111, merge_state="BEHIND"),
+                approved_open_head(4112, merge_state="CLEAN"),
+                approved_open_head(
+                    4113, merge_state="CLEAN", verdict="REQUEST_CHANGES"
+                ),
+            ],
+        }
+        approval_fixture_path.write_text(
+            json.dumps(approval_fixture), encoding="utf-8"
+        )
+        approval_packet = json.loads(
+            run_cli(
+                "--format",
+                "json",
+                "pr-review",
+                "--fixture",
+                str(approval_fixture_path),
+                "--state",
+                "open",
+            ).stdout
+        )
+        approvals = {
+            item["number"]: item for item in approval_packet["pull_requests"]
+        }
+        for number in (4111, 4112):
+            assert approvals[number]["review_conclusion"]["verdict"] == "APPROVE", approvals
+            assert (
+                approvals[number]["review_action_kind"]
+                == "qualify_pull_request_merge_readiness"
+            ), approvals[number]
+        assert approvals[4111]["merge_state"] == "BEHIND", approvals[4111]
+        assert approvals[4112]["merge_state"] == "CLEAN", approvals[4112]
+        assert approvals[4113]["review_conclusion"]["verdict"] == "REQUEST_CHANGES", approvals
+        assert approvals[4113]["review_action_kind"] is None, approvals[4113]
+        assert approval_packet["summary"]["review_attention_count"] == 2, (
+            approval_packet["summary"]
+        )
+        assert sorted(
+            item["number"] for item in approval_packet["review_sequence"]
+        ) == [4111, 4112], approval_packet["review_sequence"]
+        for number, expected_blockers in (
+            (4111, ("merge_state_requires_update", "status_checks_failed")),
+            (4112, ()),
+        ):
+            readiness = json.loads(
+                run_cli(
+                    "--runtime-root",
+                    str(runtime_root),
+                    "--registry",
+                    str(registry_path),
+                    "--format",
+                    "json",
+                    "pr-review",
+                    "--goal-id",
+                    "test-goal",
+                    "--fixture",
+                    str(approval_fixture_path),
+                    "--check-merge-readiness",
+                    f"{number}@{approval_head}",
+                    check=not expected_blockers,
+                ).stdout
+            )
+            for blocker in expected_blockers:
+                assert blocker in readiness["blocking_reasons"], readiness
+            assert readiness["ready"] is (not expected_blockers), readiness
     assert sequence[0]["risk_hint_level"] == "medium", sequence[0]
     assert sequence[0]["main_risk_level"] == "medium", sequence[0]
     merged_sequence = next(item for item in sequence if item["number"] == 770)
@@ -366,13 +629,7 @@ def main() -> int:
         assert section["word_hint"], section
         assert section["agent_instruction"], section
         assert "quota.py" not in section["agent_instruction"], section
-    assert [section["word_hint"] for section in template["sections"]] == [
-        "200-350字",
-        "300-500字",
-        "450-800字",
-        "250-500字",
-        "150-300字",
-    ], template
+    assert all(section["minimum_prose_characters"] > 0 for section in template["sections"])
     concrete_change = next(
         section for section in template["sections"] if section["label"] == "具体改动"
     )
@@ -728,7 +985,7 @@ def main() -> int:
     )
     assert incomplete_observation["candidate"] is None, incomplete_observation
 
-    repository, fixture_prs = load_pr_fixture(FIXTURE)
+    repository, fixture_prs, _fixture_reviewer = load_pr_fixture(FIXTURE)
     merged_fixture = next(item for item in fixture_prs if item.get("state") == "MERGED")
     busy_window = []
     for offset in range(105):
@@ -865,6 +1122,7 @@ def main() -> int:
         "behavior_change_disclosure",
         "guidance_vs_obligation",
         "durable_smoke_value",
+        "semantic_alignment",
     }, requirements
     assert requirements["symbol_map"]["item_count"] == {"minimum": 2, "maximum": 5}
     assert "caller_evidence" in requirements["symbol_map"]["item_fields"]
@@ -916,11 +1174,13 @@ def main() -> int:
     assert execution["completion_gate"]["metadata_only_verdict_allowed"] is False
     assert execution["completion_gate"]["stale_head_verdict_allowed"] is False
     assert execution["completion_gate"]["blocking_evidence_verdicts"] == {
+        "problem_context": ["off_goal", "fragmented", "not_yet_proven"],
         "repository_reuse": ["unjustified_duplication", "not_yet_proven"],
         "observable_semantics": ["unintended_drift", "not_yet_proven"],
         "change_proportionality": ["disproportionate", "not_yet_proven"],
         "default_off_isolation": ["not_isolated", "not_yet_proven"],
         "authority_semantics": ["misleading", "not_yet_proven"],
+        "semantic_alignment": ["not_yet_proven", "violated"],
     }
     assert execution["finding_contract"]["findings_first"] is True
     first_plan = first["review_plan"]
@@ -973,7 +1233,8 @@ def main() -> int:
 
     group_limited = json.loads(
         run_cli(
-            "--format", "json", "pr-review", "--fixture", str(FIXTURE), "--limit", "1"
+            "--format", "json", "pr-review", "--fixture", str(FIXTURE),
+            "--state", "all", "--limit", "1"
         ).stdout
     )
     assert group_limited["summary"]["total_pr_count"] == 2, group_limited["summary"]
@@ -1013,6 +1274,8 @@ def main() -> int:
             "pr-review",
             "--fixture",
             str(FIXTURE),
+            "--state",
+            "all",
             "--since",
             "2026-06-27T12:20:00Z",
             "--limit",
@@ -1027,7 +1290,14 @@ def main() -> int:
         "review_sequence"
     ]
 
-    markdown = run_cli("pr-review", "--fixture", str(FIXTURE), "--limit", "1").stdout
+    default_markdown = run_cli(
+        "pr-review", "--fixture", str(FIXTURE), "--limit", "1"
+    ).stdout
+    assert "state_filter: `open`" in default_markdown, default_markdown
+    assert "#770" not in default_markdown, default_markdown
+    markdown = run_cli(
+        "pr-review", "--fixture", str(FIXTURE), "--state", "all", "--limit", "1"
+    ).stdout
     assert "# Project PR Review Queue" in markdown, markdown
     assert "current gh repository" not in markdown, markdown
     assert "state_filter: `all`" in markdown, markdown
@@ -1053,11 +1323,11 @@ def main() -> int:
     assert "template below is intentionally blank" in markdown, markdown
     assert "- 推荐阅读顺序:" in markdown, markdown
     assert "- 五块模板（留空给 agentloop 填写）:" in markdown, markdown
-    assert "动机（200-350字）" in markdown, markdown
-    assert "改动思路（300-500字）" in markdown, markdown
-    assert "具体改动（450-800字）" in markdown, markdown
-    assert "对主干的风险（250-500字）" in markdown, markdown
-    assert "我的整体评价（150-300字）" in markdown, markdown
+    assert "动机（至少 " in markdown, markdown
+    assert "改动思路（至少 " in markdown, markdown
+    assert "具体改动（至少 " in markdown, markdown
+    assert "对主干的风险（至少 " in markdown, markdown
+    assert "我的整体评价（至少 " in markdown, markdown
     assert "main regression risk:" not in markdown, markdown
     assert "## Combined Review Sequence" in markdown, markdown
     assert "PR #771" in markdown, markdown

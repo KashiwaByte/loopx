@@ -73,7 +73,8 @@ test("production-scale requirements use the same rule for every retained record 
 test("quota v1 recomputes missing capabilities, never trusts stale Python results", () => {
   const candidate = {payload: {todo_id: "monitor"}, claim: null, bound: null, blocks: null, excluded: [],
     global: false, gate: false, removed: false, actionable: true, due: true, task_class: "continuous_monitor",
-    priority: 1, index: 1, profile_rank: 1, missing: [], raw_claimed: false, required: ["network"], targets: []};
+    priority: 1, index: 1, profile_rank: 1, missing: [], raw_claimed: false,
+    watch_only: false, required: ["network"], targets: []};
   const request = {items: [candidate], active_items: [], active_executable_items: [], agent_id: "agent-a",
     user_gate_scope: false, monitor_supported: true, diagnostic_limit: 3, backlog_limit: 8,
     visibility_limit: 16, profile: null, source_open_count: 1, available: []};
@@ -132,4 +133,11 @@ test("reentry decoder rejects malformed selection and requirement facts", () => 
   assert.throws(() => reentry({receipt_todo_id: 3}), /receipt_todo_id/);
   assert.throws(() => reentry({gate: {repair_missing: "network"}}), /repair_missing/);
   assert.throws(() => reentry({gate: {blocked_candidates: [{required_capabilities: "network"}]}}), /required_capabilities/);
+});
+
+
+test("repair binding preserves declared P3 and P4 instead of promoting them to P1", () => {
+  const binding = (project([row("low", ["network"], [], 4), row("higher", ["network"], [], 3)])!
+    .resolution_bindings as JsonObject[])[0]!;
+  assert.equal(binding.priority, "P3"); assert.equal(binding.primary_blocked_todo_id, "higher");
 });

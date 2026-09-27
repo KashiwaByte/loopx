@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .readiness_observation import (
+    readiness_material_fingerprint,
+    readiness_material_state,
+)
+
 
 SCHEMA_VERSION = "pull_request_merge_readiness_v0"
 
@@ -24,6 +29,7 @@ def build_merge_readiness(
     item: Mapping[str, Any],
     review_threads: Mapping[str, Any],
     source: str,
+    wait_for_ci: bool = True,
 ) -> dict[str, Any]:
     """Return a read-only pre-merge gate without granting merge authority."""
 
@@ -59,17 +65,18 @@ def build_merge_readiness(
     if review_decision != "APPROVED" and not author_owned_fallback:
         blockers.append("github_review_decision_not_approved")
 
-    total_checks = checks.get("total")
-    successful_checks = check_counts.get("success", 0)
-    if type(total_checks) is not int or total_checks <= 0:
-        blockers.append("status_checks_missing")
-    else:
-        if check_counts.get("failure", 0):
-            blockers.append("status_checks_failed")
-        if check_counts.get("pending", 0):
-            blockers.append("status_checks_pending")
-        if successful_checks != total_checks:
-            blockers.append("status_checks_incomplete")
+    if wait_for_ci:
+        total_checks = checks.get("total")
+        successful_checks = check_counts.get("success", 0)
+        if type(total_checks) is not int or total_checks <= 0:
+            blockers.append("status_checks_missing")
+        else:
+            if check_counts.get("failure", 0):
+                blockers.append("status_checks_failed")
+            if check_counts.get("pending", 0):
+                blockers.append("status_checks_pending")
+            if successful_checks != total_checks:
+                blockers.append("status_checks_incomplete")
 
     if not thread_complete:
         blockers.append("review_threads_incomplete")
@@ -83,10 +90,16 @@ def build_merge_readiness(
         blockers.append("merge_state_requires_update")
     elif merge_state in {"", "UNKNOWN"}:
         blockers.append("merge_state_unverified")
-    elif merge_state == "BLOCKED" and not author_owned_fallback:
+    elif merge_state == "BLOCKED" and wait_for_ci and not author_owned_fallback:
         blockers.append("repository_merge_state_blocked")
 
     blockers = list(dict.fromkeys(blockers))
+    material_state = readiness_material_state(
+        repository=repository,
+        item=item,
+        review_threads=review_threads,
+        wait_for_ci=wait_for_ci,
+    )
     return {
         "ok": True,
         "schema_version": SCHEMA_VERSION,
@@ -104,9 +117,13 @@ def build_merge_readiness(
         "review_threads": dict(review_threads),
         "author_owned_commented_approval": author_owned_fallback,
         "admin_bypass_required": bool(
-            author_owned_fallback and merge_state == "BLOCKED"
+            (author_owned_fallback or not wait_for_ci) and merge_state == "BLOCKED"
         ),
+        "ci_policy": "required" if wait_for_ci else "not_consulted",
+        "wait_for_ci": wait_for_ci,
         "blocking_reasons": blockers,
+        "material_state": material_state,
+        "material_fingerprint": readiness_material_fingerprint(material_state),
         "authority": {
             "grants_merge_authority": False,
             "admin_bypass_overrides_this_gate": False,

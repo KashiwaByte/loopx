@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | Accepted |
+| Supersedes / closes | none |
 | Date | 2026-08-08 |
 | Author | LoopX maintainers |
 | Scope | Public control-plane docs, packet contracts, refactor direction, test strategy |
@@ -409,6 +410,13 @@ Stop or narrow M7 when any kill criterion holds:
 - around semantics encoded in `capability_gate`, `interaction_contract`,
   `work_lane_contract`, and `scheduler_hint`.
 - focused tests and docs that pin the lens.
+
+The quota closeout adapter now consumes receipt-derived settlement progress
+from the TS readback instead of independently treating a spend run as settled.
+Normal refresh, replay and spend responses share that projection; executable
+commands bind the original actor and route. Receipt repair reuses the existing
+idempotent writer. This is a bounded M7.4 adoption with no shared executor or
+new authority store; it does not certify terminal Todo or Goal acceptance.
 
 ### What Is Missing
 

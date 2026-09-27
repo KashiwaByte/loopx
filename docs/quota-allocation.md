@@ -129,6 +129,31 @@ an outer caller still owns repeated execution. A completed-Todo threshold, a
 per-Turn path declaration, and a same-Todo continuation budget are different
 controls.
 
+### Receipt-backed settlement progress
+
+Turn-scoped `refresh-state` and `quota spend-slot` expose
+`settlement_progress` from the TypeScript receipt readback. The states are
+`identity_required`, `writeback_required`, `writeback_receipt_required`,
+`spend_required`, `spend_receipt_required`, and `settled`. A durable run without
+its matching receipt is incomplete. Ordinarily, `settled` certifies the
+writeback/spend chain. An exact typed blocked writeback with a bounded retry
+instead sets `closeout_kind=typed_blocked_writeback_no_spend` and settles the
+Turn without a quota debit. Todo completion and Goal acceptance retain their
+separate checks in both cases.
+
+When a quota spend remains owed after verified writeback,
+`settlement_owed.command` carries the original Goal, Agent, Todo or replan
+obligation, Turn, registry/runtime route and spend source. Execute it unchanged.
+The typed blocked no-spend closeout has no spend command. In
+`spend_receipt_required`, the same idempotent spend
+writer restores the receipt without another debit. Refresh and recovery never
+spend automatically. JSON and normal/recovery Markdown expose the same step.
+Rejected recovery reports observed progress without offering a spend command.
+The raw Python refresh API returns `writeback_receipt_required` until its CLI
+caller appends the refresh receipt and rereads the chain; it must not offer a
+spend command before that point. Older guards without a persisted spend source
+retain the existing heartbeat default.
+
 ## Minimal Contract
 
 The compact status shape can start with a small object:
@@ -293,12 +318,23 @@ from `classification`. New writes should use one of:
 execution-profile hints only as a compatibility fallback for historical runs;
 new control-plane decisions should be driven by the enum above.
 
-An `outcome_gap` does not become delivery progress. It may settle and spend one
-exact Todo-bound Turn only when the same writeback includes a
+An `outcome_gap` does not become delivery progress. A blocked writeback is
+eligible for exact Todo-bound Turn settlement only when it includes a
 `typed_progress_observation_v0` with `result_class=blocked`, the matching
 `work_item_id`, a stable `blocker_id`, and a non-empty array of stable
 `evidence_ids`. Missing schemas, prose-only blockers, malformed evidence, and
 Todo identity mismatches remain fail-closed.
+
+New Turn-bound blocked writebacks also require a bounded retry on the same
+unfinished advancement Todo. A legacy Todo must have a pending
+`resume_when=resume_at:<timezone-aware-time>` due in 1–30 minutes. With promoted
+File/SQLite authority, an open Todo without its own resume condition can use
+a five-minute retry stored on the committed Turn instead; the peer-gated Todo
+and its completion validator stay unchanged. That exact writeback settles the
+Turn without spending quota. The retry suppresses only the blocked Todo for
+the same Agent until due or superseded by newer work, so independent eligible
+Todos can still be selected. Historical blocked writebacks without a bounded
+retry retain their prior spend readback; no debit is retroactively erased.
 
 `quota should-run` also separates long-running observation from work that should
 advance the selected goal. When the selected goal's current projection is a
@@ -486,7 +522,23 @@ bounded suggestions. That request is only a pending selection: the second guard
 re-runs current lane arbitration and eligibility checks before upgrading the
 receipt. A newly due hard-priority monitor, blocking user gate, or other current
 preemption defers the request and leaves the receipt identity-less. Delivery and
-quota spend remain disabled until binding succeeds. A single-candidate response
+quota spend remain disabled until binding succeeds. Deferred/rejected selections
+return the TS-owned `recovery_action=reenter_guard_without_selection`: execute
+the single command in `interaction_contract.cli_channel.next_cli_actions`, with
+the same turn id and no Todo/replan argument. That guard either binds the current
+hard lane or returns a refreshed portfolio. No settlement plan is exposed before
+reentry, and a previously bound receipt cannot be retargeted. `recommended_action`
+retains the human-readable rejection or deferral guidance; the executable recovery
+command lives in `next_cli_actions` and `agent_channel.primary_action`.
+Fresh explicit selection reads the complete Todo source through the same reader
+as `todo list`, before display or Agent-lane compaction. Before shared-authority
+promotion, that reader retains Markdown plus the existing event overlay. After
+promotion, it reads the selected canonical provider, including authoritative
+empty results; missing/stale display and provider failure never authorize a
+Markdown fallback. The guard does not append a second Markdown candidate list.
+Historical receipt-bound recovery remains separate from new work admission.
+
+A single-candidate response
 keeps the direct execution path and does not add an extra selection round trip.
 
 When the selected Todo has meaningful strategic context, the same default
@@ -717,6 +769,14 @@ gap, autonomy blocker, or replan obligation fail closed. This keeps recurring
 controllers alive during ordinary waits while honoring an explicit completed
 goal shutdown without another quota-spending turn.
 
+An explicit `peer_coordination_blocked` decision is a recoverable typed wait,
+not a terminal host stop. It keeps the recurring heartbeat alive without
+spending quota and uses the existing TypeScript-owned stateful backoff
+transition with a 10/20/30/60 minute progression. Peer activation capability,
+peer runtime readiness, coordinator configuration, or newly projected local
+work changes the reset identity and restores the initial cadence. Goal stopped,
+quota paused, and validated terminal no-follow-up remain the stop cases.
+
 An individual registered peer can instead be put in `monitor_only` work mode:
 
 ```bash
@@ -726,10 +786,15 @@ loopx configure-goal --goal-id <goal-id> \
 
 This suppresses that peer's advancement, autonomous replan, repair, fallback,
 and new-topic lanes while preserving due `continuous_monitor` todos and verified
-direct operator replies. A future or unchanged monitor stays quiet and no-spend;
-a due monitor may spend only after a validated material transition. Other peers
-remain active. Use `--clear-agent-work-mode <agent-id>` (or set `=active`) to
-resume ordinary advancement.
+direct operator replies. A future monitor stays quiet; a committed monitor poll
+is the Turn's no-spend closeout whether unchanged or material. A material poll
+may atomically release an independent advancement successor, whose later
+delivery has its own quota identity. Same-Turn readback and prior-Turn recovery
+accept the same exact committed effect, including the shipped turn-only receipt;
+a preview or a row with missing or mismatched commit metadata cannot close the
+Turn. Other peers remain active. Use
+`--clear-agent-work-mode <agent-id>` (or set `=active`) to resume ordinary
+advancement.
 
 The read model exposes that derivation as
 `goal_frontier_projection.terminal_state={kind:no_followup, derived:true,

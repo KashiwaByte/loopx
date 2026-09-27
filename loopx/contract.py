@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,12 @@ from .control_plane.runtime.run_index_duplicates import (
     index_identity,
 )
 from .control_plane.todos.active_state_editing import COMPLETED_WORK_ARCHIVE_HEADING
-from .history import collect_history, load_registry
+from .history import (
+    RunHistoryAudit,
+    build_run_history_audit,
+    collect_history,
+    load_registry,
+)
 from .paths import DEFAULT_RUNTIME_ROOT, rel_or_abs, resolve_runtime_root
 from .registry import inspect_registry, inspect_registry_boundary, registry_goals, resolve_state_file
 from .state_projection import state_projection_gap_warning
@@ -48,29 +54,90 @@ from .control_plane.todos.contract import (
 )
 
 
-LEAK_PATTERNS = {
-    "private_doc_url": re.compile(
-        "|".join(["la" + "rk" + "office", "docs" + r"\." + "internal"]),
-        re.I,
-    ),
-    "credential": re.compile(
-        "|".join(
-            [
-                "Bear" + "er" + r"\s+[A-Za-z0-9._-]+",
-                "AK" + "IA" + r"[0-9A-Z]{16}",
-                r"(?<![A-Za-z0-9_])" + "tok" + "en=",
-                r"(?<![A-Za-z0-9_])" + "pass" + "word=",
-                "Author" + "ization:",
-            ]
+@dataclass(frozen=True)
+class LeakRule:
+    pattern: re.Pattern[str]
+    required_literals: tuple[str, ...]
+
+    def is_candidate(self, folded_text: str) -> bool:
+        return any(literal in folded_text for literal in self.required_literals)
+
+
+# Python's Unicode re.IGNORECASE matches ASCII I/i against both dotted and
+# dotless I. casefold() alone does not: it expands U+0130 to i + combining dot.
+# Fold those two regex-equivalent characters first. The other special matches
+# (long s and Kelvin sign) are already covered by casefold().
+_REGEX_IGNORECASE_ASCII_TRANSLATION = str.maketrans({"\u0130": "i", "\u0131": "i"})
+
+
+def _prefilter_fold(text: str) -> str:
+    if text.isascii():
+        return text.lower()
+    if "\u0130" in text or "\u0131" in text:
+        text = text.translate(_REGEX_IGNORECASE_ASCII_TRANSLATION)
+    return text.casefold()
+
+
+# Required literals are only a cheap necessary condition for running a rule.
+# The regular expressions remain the sole authority for classifying a leak.
+LEAK_RULES = {
+    "private_doc_url": LeakRule(
+        pattern=re.compile(
+            "|".join(["la" + "rk" + "office", "docs" + r"\." + "internal"]),
+            re.I,
         ),
-        re.I,
+        required_literals=("lark" + "office", "docs" + ".internal"),
     ),
-    "local_private_path": re.compile(
-        "(" + "/" + "Users" + "/" + r"[^/\s]+/(?:Documents|code" + "-" + r"reading)|" + "/ext" + "_data/" + ")"
+    "credential": LeakRule(
+        pattern=re.compile(
+            "|".join(
+                [
+                    "Bear" + "er" + r"\s+[A-Za-z0-9._-]+",
+                    "AK" + "IA" + r"[0-9A-Z]{16}",
+                    r"(?<![A-Za-z0-9_])" + "tok" + "en=",
+                    r"(?<![A-Za-z0-9_])" + "pass" + "word=",
+                    "Author" + "ization:",
+                ]
+            ),
+            re.I,
+        ),
+        required_literals=(
+            "bear" + "er",
+            "ak" + "ia",
+            "tok" + "en=",
+            "pass" + "word=",
+            "author" + "ization:",
+        ),
     ),
-    "internal_task_id": re.compile(r"\bt-" + r"20\d{12}-[a-z0-9]+\b"),
-    "private_ip": re.compile(r"\b10\.\d+\.\d+\.\d+\b|\b172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+\b|\b192\.168\.\d+\.\d+\b"),
+    "local_private_path": LeakRule(
+        pattern=re.compile(
+            "("
+            + "/"
+            + "Users"
+            + "/"
+            + r"[^/\s]+/(?:Documents|code"
+            + "-"
+            + r"reading)|"
+            + "/ext"
+            + "_data/"
+            + ")"
+        ),
+        required_literals=("/" + "users/", "/ext" + "_data/"),
+    ),
+    "internal_task_id": LeakRule(
+        pattern=re.compile(r"\bt-" + r"20\d{12}-[a-z0-9]+\b"),
+        required_literals=("t-20",),
+    ),
+    "private_ip": LeakRule(
+        pattern=re.compile(
+            r"\b10\.\d+\.\d+\.\d+\b"
+            r"|\b172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+\b"
+            r"|\b192\.168\.\d+\.\d+\b"
+        ),
+        required_literals=("10.", "172.", "192.168."),
+    ),
 }
+LEAK_PATTERNS = {name: rule.pattern for name, rule in LEAK_RULES.items()}
 
 _PUBLIC_NPM_REGISTRY_PREFIX = "https://registry.npmjs.org/"
 
@@ -145,7 +212,7 @@ def _credential_match_is_reference(line: str, match: re.Match[str]) -> bool:
 
 
 def _credential_hits_are_all_references(line: str) -> bool:
-    matches = list(LEAK_PATTERNS["credential"].finditer(line))
+    matches = list(LEAK_RULES["credential"].pattern.finditer(line))
     if not matches:
         return False
     return all(_credential_match_is_reference(line, match) for match in matches)
@@ -750,16 +817,22 @@ def iter_scan_files(scan_root: Path) -> list[Path]:
     files: list[Path] = []
     tracked_files = _tracked_scan_files(scan_root)
     root_parts = set(scan_root.parts)
-    if any(part in DEFAULT_SKIP_DIRS or part.endswith(".egg-info") for part in root_parts):
+    # Dependency pruning never overrides tracked repository ownership.
+    if (
+        any(part in DEFAULT_SKIP_DIRS or part.endswith(".egg-info") for part in root_parts)
+        or os.path.isfile(scan_root / "pyvenv.cfg")
+    ):
         return sorted(tracked_files)
 
     for dir_path, dir_names, file_names in os.walk(scan_root):
+        current_dir = Path(dir_path)
         dir_names[:] = [
             name
             for name in dir_names
-            if name not in DEFAULT_SKIP_DIRS and not name.endswith(".egg-info")
+            if name not in DEFAULT_SKIP_DIRS
+            and not name.endswith(".egg-info")
+            and not os.path.isfile(current_dir / name / "pyvenv.cfg")
         ]
-        current_dir = Path(dir_path)
         for file_name in file_names:
             path = (current_dir / file_name).resolve()
             if path.name.endswith(".local.json"):
@@ -833,12 +906,23 @@ def scan_public_boundary(
                                 "non_public_package_registry "
                                 f"({display_package})"
                             )
+        folded_text = _prefilter_fold(text)
+        candidate_rules = [
+            (name, rule)
+            for name, rule in LEAK_RULES.items()
+            if rule.is_candidate(folded_text)
+        ]
+        if not candidate_rules:
+            continue
         for line_no, line in enumerate(text.splitlines(), start=1):
-            for name, pattern in LEAK_PATTERNS.items():
+            folded_line = _prefilter_fold(line)
+            for name, rule in candidate_rules:
+                if not rule.is_candidate(folded_line):
+                    continue
                 scan_line = line
                 if name == "private_doc_url":
                     scan_line = _PUBLIC_LARK_DEVELOPER_CONSOLE_HOST.sub("", scan_line)
-                if pattern.search(scan_line):
+                if rule.pattern.search(scan_line):
                     hit = f"{rel_or_abs(path, root)}:{line_no}: {name}"
                     if name == "credential" and _credential_hits_are_all_references(line):
                         credential_reference_hits.append(hit)
@@ -877,6 +961,8 @@ def check_contract(
     goal_id_filter: str | None = None,
     activation_state_filter: GoalActivationState | str | None = None,
     include_public_boundary_scan: bool = True,
+    history_audit: RunHistoryAudit | None = None,
+    registry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     error_diagnostics: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -924,7 +1010,8 @@ def check_contract(
         for risk in boundary_payload.get("risks") or []:
             add_global_error("registry_boundary_risk", f"registry boundary risk: {risk}")
 
-    registry = load_registry(registry_path)
+    if registry is None:
+        registry = load_registry(registry_path)
     todo_contract_diagnostics, checked_user_gates = (
         _active_state_todo_contract_diagnostics(
             registry,
@@ -953,34 +1040,70 @@ def check_contract(
     else:
         warnings.append(f"runtime root does not exist yet: {runtime_root}")
 
-    history = collect_history(
+    if history_audit is None:
+        history = collect_history(
+            registry_path=registry_path,
+            runtime_root=runtime_root,
+            goal_id=goal_id_filter,
+            limit=limit,
+            activation_state_filter=activation_state_filter,
+        )
+        history_audit = build_run_history_audit(
+            history,
+            registry_path=registry_path,
+            runtime_root=runtime_root,
+            goal_id=goal_id_filter,
+            activation_state_filter=activation_state_filter,
+            include_runtime_goals=True,
+        )
+    elif not history_audit.matches(
         registry_path=registry_path,
         runtime_root=runtime_root,
         goal_id=goal_id_filter,
-        limit=limit,
         activation_state_filter=activation_state_filter,
+        include_runtime_goals=True,
+    ):
+        raise ValueError("history audit scope does not match contract request")
+    checks.append(
+        f"run-history goals={history_audit.goal_count} runs={history_audit.run_count}"
     )
-    checks.append(f"run-history goals={history.get('goal_count')} runs={history.get('run_count')}")
-    for item in history.get("goals") or []:
-        raw = int(item.get("raw_index_records") or 0)
-        unique = int(item.get("unique_runs") or 0)
-        if item.get("legacy_runtime_goal") and raw > unique:
-            checks.append(f"{item.get('id')}: legacy runtime goal has duplicate rows raw={raw} unique={unique}")
+    for item in history_audit.goals:
+        raw = item.raw_index_records
+        unique = item.unique_runs
+        if item.legacy_runtime_goal and raw > unique:
+            checks.append(
+                f"{item.goal_id}: legacy runtime goal has duplicate rows "
+                f"raw={raw} unique={unique}"
+            )
             continue
         if raw > unique:
-            duplicate_summary = _index_duplicate_summary(Path(str(item.get("index_path") or "")))
+            duplicate_summary = _index_duplicate_summary(item.index_path)
             if duplicate_summary.get("unexpected_duplicate_rows"):
-                warnings.append(_index_duplicate_warning(item.get("id"), raw, unique, duplicate_summary))
+                warnings.append(
+                    _index_duplicate_warning(
+                        item.goal_id,
+                        raw,
+                        unique,
+                        duplicate_summary,
+                    )
+                )
             else:
                 emitted_check = False
                 if duplicate_summary.get("reward_overlay_rows"):
                     emitted_check = True
                     checks.append(
-                        f"{item.get('id')}: reward overlay rows raw={raw} unique={unique} "
+                        f"{item.goal_id}: reward overlay rows raw={raw} unique={unique} "
                         f"overlays={duplicate_summary.get('reward_overlay_rows')}"
                     )
                 if not emitted_check:
-                    warnings.append(_index_duplicate_warning(item.get("id"), raw, unique, duplicate_summary))
+                    warnings.append(
+                        _index_duplicate_warning(
+                            item.goal_id,
+                            raw,
+                            unique,
+                            duplicate_summary,
+                        )
+                    )
 
     if include_public_boundary_scan:
         boundary = scan_public_boundary(scan_roots, registry=registry)

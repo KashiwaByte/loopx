@@ -81,10 +81,130 @@ in a `manager.context` event, and supplies it to the executor. Chat prose is
 never the inventory. Normal manager questions no longer silently use a limited
 frontend projection; explicitly choosing status-only still uses that projection.
 
-For Codex, manager defaults are `gpt-6-astra` with `high` reasoning. Set
-`LOOPX_MANAGER_MODEL` and `LOOPX_MANAGER_REASONING_EFFORT` on the Chat service to
-override them. Thread start, resume and turn start explicitly carry the settings;
-worker configuration is unchanged. Capabilities expose the manager defaults.
+The manager channel's model and reasoning effort follow its executor. On the
+interactive CLI endpoint the defaults are `gpt-6-astra` with `high` reasoning; on
+the managed host they are the managed execution profile
+(`deepseek-official` / `deepseek-v4-flash` / `high`). The machine's
+`steward_executor` machine configuration decides the executor, the model and the
+effort first; set `LOOPX_MANAGER_MODEL` and `LOOPX_MANAGER_REASONING_EFFORT` on
+the Chat service when a machine has no such configuration, and the shipped
+default applies when neither exists. A blank model or effort in the machine
+configuration means that field keeps resolving from the layers below it. Thread
+start, resume and turn start explicitly carry the settings; worker configuration
+is unchanged. Capabilities expose the manager defaults, their source, and the
+status and revision of the machine document they were read from.
+
+The managed profile reaches the channel as the same one-line readback the
+governed Turn publishes (`deepseek-v4-flash@high`), so the channel and the
+bounded Turns it drives cannot report two different managed profiles; the
+provider is prepended when it is not the shipped one.
+
+### Steward channel host selection
+
+The steward channel resolves one machine configuration, then one service
+environment value, then one shipped default. The `steward_executor` machine
+configuration (`loopx/capabilities/steward_executor/machine_defaults.py`) selects
+the primary executor for its machine and is the setting the Dashboard edits and
+`loopx machine-config describe`/`inspect` read back; it accepts only the
+endpoints LoopX ships as channel executors and stores no credential. Its
+`selection_policy` is `preferred`, `pinned`, or `flexible`: preferred honors an
+explicit user pick, pinned rejects substitution, and flexible permits fallback
+only within its closed `eligible_endpoints` pool. Stored v0 configurations map
+to preferred behavior.
+`LOOPX_MANAGER_ENDPOINT` bootstraps a machine or names an unlisted adapter;
+without either the channel runs the interactive CLI endpoint (`codex`) on every
+machine, and the managed host (`dsh`) is reached by selecting it. The channel
+reports where the endpoint came from (`executor_endpoint_source`, including
+`machine_configuration`), the status and revision of the machine document it
+read, and, when it is the shipped default, which decision that was
+(`executor_endpoint_default_reason`, `steward_channel_default`), so the default is
+disclosed rather than silent or inferred from the resolved host name.
+
+The channel must stay reachable, which is why its default does not move: the
+steward is the surface a person talks to, a managed host without its credential
+cannot answer at all, and an operator whose machine has only a personal login
+must still get a steward. A credential authenticates the endpoint it belongs to
+and never selects one. Its presence is still reported as a fact
+(`operator_credential_configured`), as the variable name and never the value,
+and only for the endpoint that actually authenticates with it.
+
+The model follows the executor, so a credential can no longer pair a managed
+model with an individual CLI login: an explicitly selected managed host takes the
+managed execution profile in full, and the interactive CLI endpoint keeps its
+vendor model. The resolved model and effort are never discovered from a
+credential.
+
+The managed host answers through a **segment transport**: the channel runs
+exactly one bounded DeepSeek Harness work segment per Chat turn on the managed
+execution profile, with the channel's bounded visible history as input. That
+transport deliberately claims no partial streaming, no cross-turn host session
+and no tool authority: LoopX pins `DSH_PERMISSION_MODE=read-only` for those
+segments, so dsh refuses a write or shell action itself instead of trusting the
+channel prompt. "Exactly one" is held, not assumed: a segment is the binding's
+single executor until its thread exits, so a start while one is still running is
+refused with the typed `managed_host_chat_segment_in_flight` instead of quietly
+running a second executor, and an answer that arrives for an interrupted turn is
+discarded rather than folded into the visible history the next segment reads. A
+segment that cannot run (missing credential or missing runtime)
+makes the endpoint unavailable in `channel_binding` with the typed reason the
+governed Turn surface already publishes, and a session request for that endpoint
+fails as a typed host-tool gate with the next step instead of an unknown-endpoint
+error. The steward still **drives** managed work on `dsh`: those bounded Turns
+are the managed execution unit described by the LoopX Turn host selection
+contract, and they remain separate from the channel the steward answers on.
+
+The Chat capabilities payload carries this resolution in its `manager` block
+(`channel_binding`): the resolved executor endpoint and its source, its executor
+kind in the same vocabulary as the governed Turn surface (`individual` runs on
+one person's CLI login, `managed` on an operator credential), the reason the
+shipped default applied, the resolved model and its source, the managed
+execution profile when the endpoint is managed, whether an operator credential is
+configured, and `available`/`unavailable_reason` when LoopX can prove the selected
+endpoint cannot serve this channel. `available` is `null` when the projection
+makes no claim. A frontend can show which executor and model the steward channel
+resolved, the selection policy, the allocation reason, and the eligible pool
+without re-deriving the rule. `loopx chat-endpoint inspect-steward` exposes the
+same effective binding for CLI readback.
+
+The Chat server that opens a steward Session is an entry point, not a second
+owner: it resolves the executor through the same channel decision this payload
+reports. A session request that carries no executor pick lands on the resolved
+endpoint and reports it back as the session's `executor_endpoint_id`, so a client
+that ships with its own silent executor default cannot re-point the channel
+behind its own readback. An explicit pick is accepted only when the configured
+policy permits it. The chosen endpoint, model, effort, policy, reason, pool and
+configuration revision are persisted with the manager Session; restart and
+later machine-configuration edits do not silently reinterpret that Session.
+A Goal-scoped session keeps the Goal channel's own default. The steward channel
+is one conversation across whatever executor it currently resolves, so a client
+reading that conversation asks for the channel instead of filtering it by an
+executor the client assumed.
+
+The flexible policy in this version reacts to endpoint availability. It does
+not classify the user's prose or claim semantic task-fit routing. An Agent may
+later choose an executor by passing an explicit pick, and that pick remains
+subject to the same pinned or flexible boundary.
+
+The Personal Workspace manager header renders that binding as one compact chip
+(`executor · executor kind · model`). The chip is display-only: it reads the
+projected fields, keeps the executor kind in the same `individual`/`managed`
+vocabulary, and names an unrecognized kind as an unclaimed registered endpoint
+rather than guessing. When the projection proves the selected endpoint cannot
+serve the channel, the chip is marked unavailable and the header names the
+reported reason -- the missing operator credential, the missing runtime, or a
+rejected reasoning effort -- instead of asserting that one particular host is
+required. The header also names the shipped default and the one way to move it,
+so a steward an operator selected looks different from the one every machine
+runs; a configured credential changes nothing visible, because it selects
+nothing. A capabilities payload without `channel_binding` renders the previous
+header unchanged, and an unrecognized reason stays unclaimed rather than being
+rendered as a reason this build invented.
+
+| Surface, Chinese | Shipped selection | Managed host selected |
+| --- | --- | --- |
+| Desktop, 1512px | [Chip](../../assets/personal-workspace/steward-execution-chip-desktop.png) | [Unavailable](../../assets/personal-workspace/steward-execution-chip-unavailable-desktop.png) |
+| Mobile, 390px | -- | [Unavailable](../../assets/personal-workspace/steward-execution-chip-unavailable-mobile.png) |
+
 Legacy managed manager sessions retain their logical identity and bounded chat
 history but start a fresh executor thread in the same Codex home on first
 restore. This removes inherited project instructions without importing sessions
@@ -128,6 +248,71 @@ These facts retain `recorded_claim_not_independent_verification` and
 `artifact_read_status=not_read`. No repository, arbitrary path, URL or transcript
 reader is added. Existing owner/external scope checks and snapshot identity
 cover this hydration; there is no second progress store or extra history scan.
+
+## A bounded recent-evidence window with declared sources
+
+The turn context reads a bounded recent window rather than one day, because a
+single-day read cannot answer a week question and an unbounded one would grow a
+prompt-only managed transport without limit. `evidence_window` records the
+schema, the number of days, the local window bounds, the per-day and total
+receipt limits, the per-day matched counts, included versus omitted receipts,
+invalid records, and `receipt_detail`: each Goal's newest receipt in the window
+keeps full `recorded_details`, while older in-window receipts are compacted to
+their recorded outcome, result class, probe kind and surface. Receipts outside
+the window are outside coverage, not evidence of no progress, and the newest
+finding for a Goal is never dropped by the window bound.
+
+The same block declares `sources`: the local registry source plus every
+SSH host this machine **registered** for LoopX evidence (an `evidence_ssh_hosts`
+grant on any channel), with its read status and scope — not every configured SSH
+alias, since an operator's `git` host or personal jump host holds no Core state
+and only adds prompt noise. Declaring a source performs no remote connection and
+grants no authority. A declared but unread source is a named coverage gap. The
+manager must state the window and the sources it actually read, and must not
+present an unread host as whole coverage.
+
+The window itself is a selected decision rather than a discovered fact:
+`days_source` reports `product_default`, `explicit_config`
+(`LOOPX_MANAGER_EVIDENCE_WINDOW_DAYS`, 1..30) or `explicit_argument`, beside
+`days_default`, `days_env_var`, `days_bounds` and `days_reason`. A missing,
+out-of-bounds or unreadable explicit value keeps the shipped default and reports
+its reason, so a misconfiguration can neither widen the prompt nor answer a
+narrower window than it declares.
+
+## A prompt-only segment receives the declared source read
+
+An interactive endpoint reads a declared remote source on demand and pays no
+source latency. A prompt-only steward segment has no read tool, so a declared
+source it never receives is a coverage gap it cannot close. In that case the Turn
+owner reads the registered sources before the segment starts and adds a
+`manager_remote_evidence_v0` block, with `remote_read` declaring `inline_in_prompt`
+rather than `on_demand_tool` in `evidence_window`.
+
+The read is bounded so it cannot slow every Turn: one dial per Turn, at most two
+hosts, nine seconds per host inside a ten-second Turn budget, and eight portfolio
+rows per host. A read inside `ttl_seconds` (ten minutes) is served from cache
+instead of dialling again, and cache entries are keyed by host, window and the
+exact grant scope, so a changed grant or window re-reads rather than answering
+from a narrower cached read. The read reuses the same `read_remote` path and its
+before/after scope checks, so it never widens authority. The declaration and the
+read use the same SSH configuration, so one packet cannot call a host
+unconfigured and read it in the same Turn.
+
+Because one Turn dials one host, which source receives that dial rotates: a
+source that was never read goes first, then the source whose successful read is
+oldest. Declaration order never decides it, so a source listed last cannot be
+deferred on every Turn that arrives after the cache TTL. The packet still
+reports its sources in declaration order, so the rotation chooses the dial
+rather than the shape of the answer.
+
+Every declared source carries a typed outcome in the same block: `read` or
+`cached` with `read_at` and `age_seconds`; `unavailable` with its reason, the last
+successful read and a `coverage_effect`; `not_configured` for alias drift; or
+`deferred_budget` with the last successful read. A failed read keeps its last
+successful rows only as `source_freshness: "stale"` with
+`remote_source_rows_are_stale` in `limitations`. A stale or unavailable source is
+a named coverage gap: it must never be presented as current progress, and it must
+never be read as no progress. A source read failure never fails the Turn.
 
 ## A bounded portfolio with explicit coverage
 

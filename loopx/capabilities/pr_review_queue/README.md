@@ -38,6 +38,67 @@ code-symbol and negative-walkthrough applicability. Inventory-only rows expose
 no executable review artifacts. Host skills route and publish this packet; they
 must not maintain a second explanation checklist.
 
+Compatibility review replaces the old free-text justification inside
+`code_volume` with `compatibility_assessment`. Reviewers identify actual callers,
+their deployment boundary, the separately persisted contract, a simpler
+alternative, and validation evidence. Keeping historical receipts does not by
+itself justify retaining an old transient request decoder; deploying callers
+together does not justify deleting a reader for durable queued requests.
+
+The declared decision is `retain`, `simplify_now`, `follow_up`, `not_yet_proven`,
+or `not_applicable`. A required simplification or material unknown cannot support
+APPROVE; an evidenced non-blocking follow-up can. Unrelated changes need only a
+scoped not-applicable reason. The checker enforces these declarations, not their
+truth: real caller inspection and old-data/mixed-version readback still belong
+to the reviewer. Policy revision 10 requires fresh evidence rather than relabeling
+an older result. It does not add a new wire schema or a new review authority.
+
+The primary product judgment lives in `problem_context.outcome_impact`: can
+useful work continue over later invocations, and can users still reach their
+intended outcome through the affected surface? Assess `long_horizon` and
+`user_experience` before implementation narration. Local feature acceptance or
+green CI cannot override a regression or a material unproven claim in either
+dimension. Follow bounded real journeys appropriate to the diff: durable
+continuation, retry/restart, competing work, truthful status, intervention cost
+and correction/recovery. Reuse walkthroughs and validation references rather
+than producing a second report or requiring a soak for every change.
+
+Legitimate safety, budget and dependency waits can be an `accepted_tradeoff`
+with an independent acceptance basis and bounded cost/recovery. Do not weaken
+authority to manufacture progress. A scoped `not_applicable` still names the
+inspected path. These assessments also apply to user-facing instructions and
+defaults; they are not limited to state-machine code or visible UI diffs.
+
+The narrower `observable_semantics.scope_coverage` assessment is required for
+behavior-bearing reviews. First establish whether the touched path owns or
+retains a gate; a scoped `not_applicable` reason is sufficient otherwise. For a
+gate, distinguish activation authority, covered subjects and binding readiness.
+Validate covered work, independent work in the same container, new work after
+activation, mutable-field escape and recovery back to useful execution. Global
+coverage is valid when explicitly authorized; feature-off parity alone does not
+prove enabled-but-out-of-scope isolation. A blocker receipt or replan ACK does
+not establish recovery. These are reviewer-executed counterfactuals, not semantic
+facts inferred by the checker.
+
+Save the exact final Markdown in the result's `review_body` before `--check-result`.
+The same body validator is used for published review readback and merge readiness.
+For behavior-bearing changes, the five sections require respectively 40, 80,
+180, 120 and 60 explanatory letters/numbers; reviews without executable or
+policy changes use 20, 30, 50, 30 and 20. Headings, code blocks, URL targets,
+commit hashes and repeated lines within a section do not count. These modest
+floors reject empty shells; they do not prove
+correct reasoning or replace evidence. Explain concrete symbols, decisions,
+counterexamples and results rather than padding. A sufficiently long body with
+unverified scope evidence still cannot support approval. Existing short reviews
+on open heads must be expanded and checked before they qualify again; queue
+ordering and explicit post-merge audit selection remain unchanged.
+
+The [historical review corpus](../../../examples/fixtures/pr-review-history/README.md)
+exercises these checks with substantial public reviews and exact-commit source
+excerpts. Model probes receive code and bounded observations without the review
+or expected verdict. Historical validation reports stay explicitly historical;
+neither a long body nor a recorded approval supplies present-day evidence.
+
 Codex agents should use the dedicated `loopx-pr-review` skill for this slash
 command. Do not route `/loopx-pr-review` through the broader `loopx-project`
 workflow or the merge-focused `loopx-pr-merge` skill.
@@ -46,8 +107,8 @@ workflow or the merge-focused `loopx-pr-merge` skill.
 
 | Command | CLI reference | Intent |
 | --- | --- | --- |
-| `/loopx-pr-review` | `loopx pr-review [--repo owner/repo] [--state open\|merged\|all] [--review-priority other-developers-first\|owner-first] [--since ISO] [--fresh-audit-exact-head NUMBER@HEAD_OID]` | List open and merged PRs for the current project or explicit repository, provide concrete main-regression analysis for each actionable PR, and include a blank five-block template that agentloop fills after reading the selected PR body/diff. The default prioritizes non-owner developer PRs; `owner-first` opts into owner priority. A typed exact-head option is required to re-audit an unchanged concluded head. |
-| pre-merge readback | `loopx pr-review --repo owner/repo --check-merge-readiness NUMBER@HEAD_OID` | Immediately before merge, fail closed unless the remote PR is still open at the reviewed head, its standalone conclusion approves that head, all checks are successful or skipped, review-thread pagination is complete with no unresolved thread, and merge state is compatible. This read grants no merge authority. |
+| `/loopx-pr-review` | `loopx pr-review [--repo owner/repo] [--target-exact-head NUMBER@HEAD_OID] [--state open\|merged\|all] [--review-priority other-developers-first\|owner-first] [--since ISO] [--fresh-audit-exact-head NUMBER@HEAD_OID]` | Review a small explicit batch with repeatable `--target-exact-head`, or list a lifecycle queue when no target is supplied. Both paths provide concrete main-regression analysis and the five-block review contract. The default queue prioritizes non-owner developer PRs; `owner-first` opts into owner priority. `--fresh-audit-exact-head` separately forces new evidence for an unchanged concluded head. |
+| pre-merge readback | `loopx pr-review --goal-id GOAL --repo owner/repo --check-merge-readiness NUMBER@HEAD_OID` | Immediately before merge, fail closed unless the remote PR is still open at the reviewed head, its standalone conclusion approves that head, all checks are successful or skipped, review-thread pagination is complete with no unresolved thread, and merge state is compatible. The Goal-scoped command records a compact public-safe readiness observation; this read grants no merge authority. |
 
 The slash command must run the CLI first. Agentloop must not reconstruct the
 review window by manually calling `gh pr view` / `gh pr list` for every PR. The
@@ -59,8 +120,26 @@ Use the JSON form for the first pass so the response contract and per-PR blank
 templates enter the model context:
 
 ```bash
-loopx --format json pr-review --state all [--repo owner/repo] [--since ISO]
+loopx --format json pr-review [--repo owner/repo] [--since ISO]
 ```
+
+The ordinary queue defaults to open PRs. Use `--state merged` or `--state all`
+explicitly only for a lifecycle or post-merge audit; named exact targets remain
+lifecycle-neutral when `--state` is omitted.
+
+When the user explicitly names one or a few PRs, resolve each current head and
+request only those exact heads. This direct path is complete for the named
+targets and must not be expanded into a historical queue merely to satisfy
+queue completeness:
+
+```bash
+loopx --format json pr-review --repo owner/repo \
+  --target-exact-head 4868@0123456789abcdef0123456789abcdef01234567
+```
+
+The option is repeatable. A remote head mismatch fails closed. Use
+`--fresh-audit-exact-head` in addition only when an unchanged target already has
+a valid conclusion and the user explicitly requests new evidence.
 
 The live source scan keeps the list query lightweight and enriches each PR's
 nested commits, reviews, and checks with a bounded pool of concurrent
@@ -212,11 +291,20 @@ The command packet keeps inventory and execution queues distinct.
 window for compact conclusion readback. Top-level and group `review_sequence`
 contain only rows whose `review_action_kind` is non-null. A merged exact head
 without a valid conclusion receives `audit_merged_pull_request_exact_head`; a
-merged or open exact head with a valid non-action conclusion remains
-inventory-only and cannot become the recommended first PR. The summary's
-attention counts are derived from this same actionable set. Inventory-only rows
-set `review_plan` and `review_template` to null and `evidence_commands` to an
-empty list so hosts cannot mistake readback metadata for execution authority.
+merged or open exact head whose valid conclusion is not an approval remains
+inventory-only and cannot become the recommended first PR. An open exact head
+with a valid approval owes `qualify_pull_request_merge_readiness` until the Goal
+has observed its current readiness material state. An unchanged observation
+suppresses duplicate qualification work; exact-head, base, review conclusion,
+configured CI, review-thread, merge-state, or draft-state changes reopen it.
+This preserves the typed readiness verdict rather than relying on GitHub's
+review state: the platform blocks self-approval, so an author-owned approval is
+recorded as `COMMENTED` and a state-based rule could otherwise count a
+still-unmerged head as concluded even after it goes behind, conflicts, loses
+its checks or is blocked. The summary's attention counts are derived from this
+same actionable set. Inventory-only rows set `review_plan` and
+`review_template` to null and `evidence_commands` to an empty list so hosts
+cannot mistake readback metadata for execution authority.
 
 It emits a
 `pull_request_review_todo_preview_v0` bound to its exact head. The preview may
@@ -309,6 +397,110 @@ progress toward approval by themselves; the reviewer should request the
 smallest viable fix, deletion, split, or hold when the benefit does not justify
 the accumulated mechanism.
 
+### Goal-oriented delivery and product impact
+
+Every actionable review now extends the existing `problem_context` evidence
+with `goal_basis` and a typed `verdict`. This applies to code, docs, maintenance
+and test-only changes. Resolve the current user request, issue/task, accepted
+contract or demonstrated regression before accepting the author's narrowed
+scope. A public roadmap id is optional; do not copy private goal content or
+require another repository to use LoopX's S/G/R identifiers.
+
+| Delivery verdict | Meaning and additional evidence | Approval effect |
+| --- | --- | --- |
+| `goal_achieved` | Existing before/after, observable outcome and non-goals prove the named task's acceptance; no invented successor required | May approve when sustained progress and user experience also qualify, without claiming the parent program complete |
+| `justified_increment` | Useful delivered delta, plus `remaining_gap`, `next_step` (owner/dependency) and `boundary_reason` for independent review, verification and rollback | May approve a prerequisite, research, docs or maintenance increment without shipping the entire feature |
+| `off_goal` / `fragmented` / `not_yet_proven` | `reason` and `minimum_repair` explain the mismatch, avoidable premature stop or missing evidence | Blocks APPROVE even when other evidence and checks pass |
+
+Reuse `problem_context.observable_outcome`, `walkthroughs` and
+`validation_matrix` instead of writing another evidence report. Small diffs are
+not fragmentation; a new field or sent message is not proof of a promised
+end-to-end user journey. For collaboration, follow the required dependency,
+receiver adoption, artifact acceptance and return through real callers.
+Independent prerequisites and characterization remain valid when their boundary
+and real successor are justified. Do not reward larger diffs or fabricated
+follow-ups. The checker validates declared evidence consistency, not whether a
+reviewer's semantic judgment is true, and it never settles a Goal.
+
+The current policy adds the two `outcome_impact` judgments to this existing
+delivery assessment. A local success cannot excuse a material regression in
+either dimension. Rebuild older results from the current packet; do not relabel
+them. Queue selection, scheduler and runtime permissions are unchanged. The
+five public sections retain the bounded prose floors documented above; reuse
+evidence and do not pad. Invoking review uses the installed capability policy.
+
+### Semantic alignment and CI constraint recovery
+
+The semantic triage introduced in policy revision 5 replaces universal detailed
+semantic review with bounded triage for code and behavior-bearing policy changes. The required row starts
+with `checked_scope`, `impact_reason`, and `verdict` (plus the standard evidence
+`status`). Review the full diff and relevant definitions/callers, then stop at
+`not_applicable` if no shared contract is affected. No candidate value, separate
+report subsection, full RFC read, or hypothetical repair is needed on this path.
+A changed-file preview or an unchanged registry alone cannot establish no impact.
+
+| Verdict | Additional evidence | Approval effect |
+| --- | --- | --- |
+| `not_applicable` | None; scope and reason explain the absence of shared contract impact | No semantic blocker |
+| `aligned` / `new_semantics_justified` | `candidate_decision`, `affected_contract`, `evidence_refs` to existing review evidence | No semantic blocker |
+| `advisory` | `candidate_decision`, `analysis_limit`; the impact reason explains why no affected current obligation lacks required evidence | Reports a bounded-analysis gap, without claiming safety or blocking on that gap alone |
+| `not_yet_proven` / `violated` | `candidate_decision`, `affected_contract`, `trigger`, `observed_evidence`, `minimum_repair`, `validation_commands` | Blocks approval for an affected current obligation with missing required evidence or a concrete violation |
+
+For shared states, owners, consumer domains, projections or persistence changes,
+read only the affected base/head contracts. Reuse `repository_reuse`,
+`observable_semantics`, and `validation_matrix` evidence instead of repeating
+it. Docs-only reviews may supply the same row when they find contract impact;
+a supplied row is checked even when not required by the plan. A generated
+inventory change alone does not require a detailed semantic review.
+
+The generic capability does not infer impact from repository-specific paths or
+inject a repository's check names into another repository's packet. Resolve
+obligations from the target repository's current policy and use the existing
+validation matrix. Observed check runs do not establish which checks are required.
+Green CI proves only the checks that ran, not whole-program convergence.
+
+The repair map below is a **LoopX repository example**, not a policy for every
+`--repo`. In LoopX, verify required checks against `.github/GOVERNANCE.md` and the
+current CI configuration: `Sign-off` and `merge-gate` are the documented checks;
+the semantic smoke runs through Python tests. Full Public Smokes is a
+post-merge/scheduled surface. These facts are not copied into generic packets.
+
+Use this repair map when a check fails:
+
+| Failure family | What it means | Minimum repair | Do not repair by |
+| --- | --- | --- | --- |
+| `Sign-off` | One commit in the PR range lacks a valid DCO trailer | Add `Signed-off-by` to every affected commit with `git commit --amend -s` or an equivalent history repair; verify the full range | Signing only the newest commit |
+| semantic smoke: unregistered value | A recognised carrier/field form introduced a value outside the registry | Reuse the existing owner value, or add the value with its owner, slot, scope, tests, and RFC evidence | Registering an unrelated string to silence the error |
+| optional inventory report: stale or missing | A developer-requested export differs from the current tree; semantic CI does not read it | Rerun `uv run python scripts/generate_semantic_inventory.py --output <path>` if the report is needed; semantic failures require fixing the reported rule | Committing the census, editing counts by hand, or replacing the full-tree scan with a diff-only scan |
+| semantic smoke: owner/parity | A defining symbol or Python/TypeScript value set diverged | Restore the single owner or deliberately update both runtime owners with parity evidence | Adding a second silent authority |
+| semantic smoke: projection | A source value is unmapped, mapped to the wrong target, or should be rejected explicitly | Update the declared mapping and executable owner together, then test the boundary case | Deleting a source value without compatibility analysis |
+| semantic smoke: budget/anchor | Measured debt grew or the guard was weakened | Fix the underlying duplicate/coverage issue and lower a budget only when the measured debt really fell | Raising the budget, narrowing the scan root, or renaming to hide drift |
+| `merge-gate` | A required upstream CI job failed, was skipped unexpectedly, or has incomplete qualification | Inspect `needs` and the failing job, fix the owning path, and rerun at the same head | Treating a local smoke as proof that the remote gate is complete |
+
+A blocker must connect the exact-head change to an existing obligation and a
+replayable failure or missing required validation. An untraceable dynamic value
+alone is an `advisory`, not `not_yet_proven` and not proof of safety. Removing a
+persisted value without required old-state readback is `not_yet_proven`; a failed
+required projection check is `violated`. Neither can be downgraded to advisory
+to bypass CI or a concrete blocking finding. Do not turn future or advisory RFC
+properties into current merge obligations. Result checking validates declared
+consistency, not the truth of a reviewer's classification.
+
+**中文边界：** 普通改动只填检查范围、影响理由与结论，无共享契约影响时用
+`not_applicable` 结束，无需虚构候选值或补齐整张证据表。影响共享状态、owner、
+消费者、投影或持久化时，按受影响契约检查并引用已有证据。扫描器能力不足用
+`advisory` 报告；本次修改缺少现行契约要求的验证用 `not_yet_proven`，明确违规用
+`violated`，后二者阻断批准并给出契约、触发修改、观察证据、最小修复与复验命令。
+其他仓库使用自己的 CI 与契约规则，不能继承 LoopX 的检查名。
+
+A matched model evaluation should preselect ordinary edits, legal contract
+extensions, and real contract defects; fix tasks, model/version, tools, seeds
+where supported, and total budgets across policies. Count review and repair
+within that budget. Compare independently accepted completions, tokens, elapsed
+time, false blocks and missed defects; report uncertainty and repeat stochastic
+runs. Deterministic consistency fixtures establish the boundary, not model
+benchmark uplift or non-regression.
+
 The per-actionable-PR `pull_request_review_plan_v1` records the exact target,
 applicability, required evidence ids, and an initially `unverified`
 `pull_request_review_result_v1` skeleton. Metadata, labels, file counts, risk
@@ -390,10 +582,22 @@ reports a typed verdict and invalid-reason codes.
 re-reads the named PR instead of trusting a saved review packet. In particular,
 GitHub may retain or reassociate an approval after an update-from-base commit;
 the gate still requires the public review body to name the observed exact head.
-It also rejects missing, pending, failed, or unknown checks and incomplete or
-unresolved review threads. An admin bypass may satisfy GitHub's author-owned
+For check-runs with a reliable workflow/job identity and start time, it evaluates
+only the latest attempt and reports raw and superseded counts; ambiguous rows are
+retained so the gate fails closed. It also rejects missing, pending, failed, or
+unknown effective checks and incomplete or unresolved review threads. An admin
+bypass may satisfy GitHub's author-owned
 self-review limitation, but it never overrides this capability gate or supplies
 user merge authority.
+
+`pull_request_merge_readiness_observation_v0` is the Goal-scoped scheduling
+receipt for that gate. It persists only the exact-head material fingerprint and
+compact public-safe readiness result under the local Goal runtime. It excludes
+review bodies, raw logs, credentials, private payloads, and local paths. Queue
+construction consumes the observation only when every readiness input still
+matches; a changed head, base, review conclusion, CI policy/result, review
+thread, draft flag, merge state, or PR state fails open to a fresh
+qualification.
 
 They must not include raw logs, private connector payloads, credentials, local
 absolute paths, private source bodies, or hidden CI artifacts.
@@ -500,31 +704,31 @@ absolute paths, private source bodies, or hidden CI artifacts.
         "sections": [
           {
             "label": "动机",
-            "word_hint": "200-350字",
+            "word_hint": "按证据需要；无最低字数",
             "content": "",
             "agent_instruction": "解释旧行为、具体痛点、受影响的用户或调用方、目标结果与必要性；说明不合并会继续付出什么代价，以及需求来自活跃调用方还是未来设想。"
           },
           {
             "label": "改动思路",
-            "word_hint": "250-450字",
+            "word_hint": "按证据需要；无最低字数",
             "content": "",
             "agent_instruction": "解释所选架构、改动前后的控制流或数据流、所有权边界、关键不变量和替代方案取舍；为不熟悉子系统的读者给出一条正向运行链路。"
           },
           {
             "label": "具体改动",
-            "word_hint": "300-600字",
+            "word_hint": "按证据需要；无最低字数",
             "content": "",
             "agent_instruction": "把关键文件和符号映射到行为，覆盖接口、配置或状态、兼容路径、测试与文档；说明各部分如何协作，并给出一个具体输入到输出的例子。"
           },
           {
             "label": "对主干的风险",
-            "word_hint": "250-500字",
+            "word_hint": "按证据需要；无最低字数",
             "content": "",
             "agent_instruction": "按严重度列出有文件或符号证据的发现，评估爆炸半径、兼容性、权限、默认副作用、失败与回滚、可观测性和缺失覆盖；策略或生命周期改动必须解释一条负向链路。"
           },
           {
             "label": "我的整体评价",
-            "word_hint": "150-300字",
+            "word_hint": "按证据需要；无最低字数",
             "content": "",
             "agent_instruction": "权衡价值与复杂度，列出实际检查或运行的验证，注明审阅的 head SHA，并给出精确结论；若阻塞，说明最小修复和复审所需证据。"
           }
@@ -559,7 +763,7 @@ absolute paths, private source bodies, or hidden CI artifacts.
       },
       "risk_notes": [],
       "evidence_commands": [
-        "gh pr view 773 --json title,body,files,commits,statusCheckRollup,headRefOid,updatedAt",
+        "gh pr view 773 --json title,body,files,commits,headRefOid,updatedAt",
         "gh pr diff 773 --name-only",
         "gh pr diff 773 --patch",
         "gh pr view 773 --json headRefOid,updatedAt"
@@ -698,7 +902,8 @@ The packet should let a reviewer move through PRs in order:
    copied as the final risk judgement.
 8. Recheck the exact head, then decide `approve`, `request changes`, `defer`, or
    `merge after checks`. Immediately before merge, require
-   `--check-merge-readiness NUMBER@HEAD_OID` to return `ready=true`.
+   `loopx pr-review --goal-id GOAL --check-merge-readiness NUMBER@HEAD_OID` to
+   return `ready=true`.
 
 A response that only lists `Open` and `Merged` PRs, scale, and recommended next
 order is incomplete for `/loopx-pr-review`; it should continue into the
@@ -717,10 +922,10 @@ A first implementation is acceptable when:
 - `loopx pr-review` returns `loopx_pr_review_command_response_v0`;
 - default live reads use the caller's current `gh` repository, while
   `--repo owner/repo` can review another GitHub project;
-- `--state all` includes merged PRs in the same packet, applies `--limit` per
+- omitted `--state` and explicit `--state open` keep the ordinary queue
+  open-only; `--state all` includes merged PRs in the same packet, applies `--limit` per
   lifecycle group, and keeps `review_groups.merged` non-empty when merged PRs
-  exist in the requested window; `--state open` preserves the old open-only
-  review queue;
+  exist in the requested window;
 - `pull_requests` remains the full bounded inventory while every
   `review_sequence` contains only rows with a non-null `review_action_kind`;
   valid concluded exact heads are never recommended for duplicate work and
@@ -728,9 +933,10 @@ A first implementation is acceptable when:
 - `--fresh-audit-exact-head NUMBER@HEAD_OID` is the only packet-level way to
   turn an unchanged valid conclusion into an actionable fresh audit, and
   malformed, absent, or already-actionable targets fail closed;
-- `--check-merge-readiness NUMBER@HEAD_OID` rejects head drift, stale review
+- Goal-scoped `--goal-id GOAL --check-merge-readiness NUMBER@HEAD_OID` rejects head drift, stale review
   prose, non-approval conclusions, red/pending/unknown checks, incomplete or
-  unresolved review-thread evidence, and incompatible merge state;
+  unresolved review-thread evidence, and incompatible merge state, then records
+  the compact observation used to suppress only unchanged requalification;
 - the default limit is 100, and exhaustive requests only proceed when
   `result_completeness.complete=true`; truncated packets provide a larger
   `recommended_limit` for the next read;
@@ -779,3 +985,39 @@ A first implementation is acceptable when:
 - live GitHub reads and fixture-based smokes share the same schema;
 - no raw logs, private payloads, credentials, local paths, or private source
   bodies are recorded.
+
+## Configure CI waiting / 配置是否等待 CI
+
+`pull_request_review.wait_for_ci` defaults to `true`. Machine defaults use the
+existing capability editor. A Goal may override the complete review namespace;
+clearing that override restores live machine defaults. Local required validation
+and exact-head review/thread gates apply in both modes. Attribute a red required
+check before selecting the review verdict: an unchanged failure reproduced on
+the immutable base and exact head, or an independently evidenced external
+outage, is not a reason to request code changes on an unrelated PR when its
+changed invariant has separate passing coverage. Record the red check and its
+owner; approval does not make a blocked merge ready. A new, worsened or
+unattributed failure remains a review blocker. Disabling CI waiting
+also removes CI requests and waiting instructions; legacy supplied summaries
+are diagnostic only. It grants no publication, merge, or admin-bypass authority.
+
+```bash
+loopx configure-goal --goal-id GOAL --no-pr-review-wait-for-ci --execute
+loopx configure-goal --goal-id GOAL
+loopx pr-review --goal-id GOAL --state all --format json
+loopx pr-review --goal-id GOAL --check-merge-readiness NUMBER@HEAD_OID --format json
+loopx configure-goal --goal-id GOAL --clear-pr-review-configuration --execute
+```
+
+The Dashboard capability editor exposes **Wait for CI** in machine and Goal
+scopes. Save a Goal override to affect only that Goal; use inherit/reset to
+restore machine defaults. The CLI packet echoes the resolved configuration.
+A Goal namespace is atomic (including review priority); partial updates retain
+its existing values, and a new namespace uses capability defaults.
+
+`wait_for_ci` 默认开启，保留既有 CI 验证行为。Dashboard 的机器/目标 capability
+编辑器提供“等待 CI”开关。以上命令只关闭指定 Goal 的等待，读取配置和评审载荷
+可确认生效；清除完整目标覆盖后恢复机器默认。目标覆盖是完整 namespace（包括
+审阅优先级），部分修改保留既有目标值，新覆盖使用 capability 默认值。关闭时不
+查询、轮询或等待 CI；本地必需验证、当前提交评审、评论及权限检查仍然适用。
+GitHub `BLOCKED` 只提示另需管理员授权，不授予合并权限。
