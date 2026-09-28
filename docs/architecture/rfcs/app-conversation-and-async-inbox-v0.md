@@ -337,8 +337,13 @@ remain authoritative; creation is not proof of worker execution or delivery.
 Lark receives the shared semantic answer/handoff behavior, while draft cards and
 direct preview are App-only. No new capability, provider or scheduler is added.
 
-The opt-in [public model evaluation](../../../examples/evaluations/chat-intake.py)
-uses the production prompt/parser and fixed public contexts. Its frozen outcomes
+The [public model evaluation](../../../examples/evaluations/chat-intake.py) runs
+only during release-candidate qualification, with explicit paid-call opt-in and
+at least two repeats per default or newly advertised model profile. Routine PR
+work and heartbeats use offline regressions and affected browser scenarios; they
+do not launch paid evaluation. Record candidate identity and retain failures or
+skips rather than presenting an unqualified profile as passing. The suite uses
+the production prompt/parser and fixed public contexts. Its frozen outcomes
 cover new work, existing owners, ambiguity, stopped/ungranted recipients, scope
 correction, current-Goal follow-ups, quotes, negation and ordinary questions in
 Chinese/English. Output conflicts, omitted envelopes and truncated generations

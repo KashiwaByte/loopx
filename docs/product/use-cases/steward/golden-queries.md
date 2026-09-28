@@ -103,7 +103,14 @@ must instead retain its qualified owner; corrections are delegated context, not
 Todo CRUD approval. Two plausible owners require clarification, never selection
 by list order. A stopped or ungranted owner is not replaced by a new Goal.
 
-Run the opt-in API suite from the repository root (machine operator credential;
+Run paid model evaluation only when qualifying a release candidate, not during
+routine PR work, per-commit checks or heartbeats. Ordinary development uses the
+offline scorer/contract tests and affected packaged-browser scenarios. Qualify
+the default and any newly advertised execution profiles separately, with at
+least two repeats; retain failures and report unavailable credentials as skipped,
+not passed. Record the exact candidate commit alongside the result.
+
+For the API profile, run from the repository root (machine operator credential;
 no key in arguments):
 
 ```sh

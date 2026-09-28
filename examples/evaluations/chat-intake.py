@@ -1,5 +1,6 @@
-"""Opt-in paid model evaluation; production Chat prompt/parser, public fixtures only.
+"""Release-only paid model evaluation; production Chat prompt/parser, public fixtures.
 
+Not for routine PR checks or heartbeats. Explicit --live opt-in is required.
 No tools, dispatch, state writes or worker launch. This qualifies semantic intake,
 not dynamic discovery or completed work. Credentials remain in process memory.
 """
