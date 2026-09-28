@@ -337,12 +337,12 @@ def _normalize_gate(value: Any, *, protected_paths: Iterable[Path | str]) -> dic
     }
 
 
-def _normalize_goal_draft(value: Any, *, protected_paths: Iterable[Path | str]) -> dict[str, Any] | None:
-    if value is None:
+def _normalize_goal_draft(payload: Mapping[str, Any], *, protected_paths: Iterable[Path | str]) -> dict[str, Any] | None:
+    if payload.get("goal_draft") is None:
         return None
     from .control_plane.effect_runtime import effect_runtime_result
 
-    draft = effect_runtime_result("collaboration.goal_draft", {"draft": value}).get("draft")
+    draft = effect_runtime_result("collaboration.goal_draft", dict(payload)).get("draft")
     if not draft:
         return None
     # Python owns transport redaction; the shared TypeScript owner admits structure.
@@ -368,7 +368,7 @@ def normalize_agent_response(
         str(payload.get("message") or ""),
         protected_paths=protected,
     ).strip()
-    goal_draft = _normalize_goal_draft(payload.get("goal_draft"), protected_paths=protected)
+    goal_draft = _normalize_goal_draft(payload, protected_paths=protected)
     return {
         "schema_version": CHAT_AGENT_RESPONSE_SCHEMA_VERSION,
         "message": message,

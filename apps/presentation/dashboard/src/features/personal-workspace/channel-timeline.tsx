@@ -116,7 +116,7 @@ export function ChannelTimeline({
   onSelect: (selection: WorkspaceDrawerSelection) => void;
   selectedGoal: WorkspaceGoal | null;
   showManagerTeamResults?: boolean;
-  onReviewGoalDraft?: (draft: GoalDraft) => void;
+  onReviewGoalDraft?: (draft: GoalDraft, edit?: boolean, draftId?: string) => Promise<void>;
   onSuggestReply?: (text: string) => void;
   onOpenGoalEvidence?: (goalId: string) => void;
   onInterruptTurn?: (turnId: string) => Promise<void>;
@@ -219,7 +219,7 @@ export function ChannelTimeline({
             : null}
           {item.message.role !== "user" && (item.message.pending || item.message.sourceTurnId || item.message.activity?.length) ? <MessageActivity message={item.message} onInterruptTurn={onInterruptTurn} onSteerTurn={onSteerTurn}/> : null}
           {item.message.role === "assistant" && !item.message.pending && item.message.goalDraft
-            ? <GoalDraftCard draft={item.message.goalDraft} onReview={onReviewGoalDraft} onSuggest={onSuggestReply}/> : null}
+            ? <GoalDraftCard draftId={`${item.message.sourceSessionId ?? ""}:${item.message.id}`} draft={item.message.goalDraft} onReview={onReviewGoalDraft} onSuggest={onSuggestReply}/> : null}
           <CollaborationCard request={item.message.collaboration} />
               <ReturnDeliveryStatus delivery={item.message.returnDelivery} />
         </div>

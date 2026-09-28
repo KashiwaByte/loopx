@@ -7,6 +7,17 @@ export type GoalDraft = {
   options: string[];
 };
 
+/** Competing operations must never also advertise creation of a new Goal.
+ * Semantic relevance is the model's responsibility; this enforces output exclusivity,
+ * not a keyword classifier or permission grant. Even malformed competing proposals
+ * suppress the draft rather than turning a failed handoff into new work.
+ */
+export function admitGoalDraft(response: Record<string, unknown>): GoalDraft | null {
+  if (response.context_handoff != null || response.protected_action != null || response.gate != null
+    || (response.proposals != null && (!Array.isArray(response.proposals) || response.proposals.length > 0))) return null;
+  return normalizeGoalDraft(response.goal_draft);
+}
+
 export function normalizeGoalDraft(value: unknown): GoalDraft | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
